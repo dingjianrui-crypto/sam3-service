@@ -91,6 +91,19 @@ When `SAM3_CHECKPOINT_PATH` is supplied, the upstream builder loads that file an
 
 Current upstream video code uses BF16 autocast. NVIDIA T4 compatibility must be established before real inference is enabled. The worker fails early with `MODEL_UNSUPPORTED_GPU` when CUDA reports no BF16 support; setting `SAM3_ALLOW_UNSUPPORTED_BF16=1` only bypasses that guard for an explicit feasibility experiment.
 
+### Optional inference dependencies
+
+The upstream README lists `einops`, `ninja`, `flash-attn-3`, and `cc_torch` as optional acceleration packages. They are not required to start this service.
+
+For the NVIDIA T4 deployment:
+
+- do not install `flash-attn-3`; it requires an H100/H800-class Hopper GPU;
+- `einops` and `ninja` are only needed by that optional FlashAttention installation path;
+- leave `cc_torch` out of the initial deployment and benchmark the supported fallback first;
+- consider `cc_torch` only as a later, separately tested optimization.
+
+The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, so installing FlashAttention 3 would not affect inference unless that code setting were also changed.
+
 ## Configuration
 
 | Variable | Default | Meaning |
