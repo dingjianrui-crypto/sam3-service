@@ -61,12 +61,25 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function sha256(blob: Blob): Promise<string> {
+async function sha256(blob: Blob): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
+
   const bytes = await blob.arrayBuffer();
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = await subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function idempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
 }
 
 export async function uploadVideo(
@@ -90,9 +103,10 @@ export async function uploadVideo(
   for (let part = 0; part < partCount; part += 1) {
     const start = part * chunkSize;
     const chunk = file.slice(start, Math.min(file.size, start + chunkSize));
+    const checksum = await sha256(chunk);
     await request(`/api/v1/videos/${created.video_id}/parts/${part}`, {
       method: "PUT",
-      headers: { "x-part-sha256": await sha256(chunk) },
+      headers: checksum ? { "x-part-sha256": checksum } : undefined,
       body: chunk
     });
     onProgress(((part + 1) / partCount) * 100);
@@ -106,7 +120,7 @@ export async function createJob(videoId: string, prompts: string[]): Promise<Job
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "idempotency-key": crypto.randomUUID()
+      "idempotency-key": idempotencyKey()
     },
     body: JSON.stringify({
       video_id: videoId,
