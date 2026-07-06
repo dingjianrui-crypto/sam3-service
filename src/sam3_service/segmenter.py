@@ -195,6 +195,10 @@ class Sam3Segmenter:
             torch.backends.cuda.enable_flash_sdp(False)
             torch.backends.cuda.enable_mem_efficient_sdp(False)
             torch.backends.cuda.enable_math_sdp(True)
+        else:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            torch.backends.cuda.enable_math_sdp(True)
         self.torch = torch
         self.offload_video_to_cpu = os.getenv(
             "SAM3_OFFLOAD_VIDEO_TO_CPU", "1"

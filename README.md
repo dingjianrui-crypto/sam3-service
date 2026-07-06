@@ -91,6 +91,11 @@ When `SAM3_CHECKPOINT_PATH` is supplied, the upstream builder loads that file an
 
 Current upstream video code uses BF16 autocast. NVIDIA T4 compatibility must be established before real inference is enabled. The worker fails early with `MODEL_UNSUPPORTED_GPU` when CUDA reports no BF16 support. Setting `SAM3_ALLOW_UNSUPPORTED_BF16=1` enables an experimental T4 path that replaces the upstream flash-only SDPA call with PyTorch's slower math kernel; output quality and performance still require validation.
 
+On BF16-capable Ampere GPUs such as the NVIDIA A30, the worker enables PyTorch
+Flash SDPA and memory-efficient SDPA, with the math implementation retained as a
+fallback. `use_fa3` remains disabled because FlashAttention 3 targets
+Hopper-class GPUs rather than the A30.
+
 ### Optional inference dependencies
 
 The upstream README groups `einops`, `ninja`, `flash-attn-3`, and `cc_torch` under optional acceleration packages. However, the current SAM 3.1 multiplex implementation imports `einops` during normal startup. Its video predictor also imports `psutil`, its inference import chain reaches a training data module that imports `pycocotools`, and its default video loader imports `cv2` when processing begins. These are not all declared by the upstream base package, so our `sam3` extra installs them as required compatibility dependencies.
