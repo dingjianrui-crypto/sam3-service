@@ -89,7 +89,7 @@ uv run sam3-worker
 
 When `SAM3_CHECKPOINT_PATH` is supplied, the upstream builder loads that file and does not download the checkpoint. `SAM3_OFFLINE=1` also sets Hugging Face offline mode and refuses to start unless the local checkpoint exists. The tokenizer vocabulary is included in the installed SAM 3 package.
 
-Current upstream video code uses BF16 autocast. NVIDIA T4 compatibility must be established before real inference is enabled. The worker fails early with `MODEL_UNSUPPORTED_GPU` when CUDA reports no BF16 support; setting `SAM3_ALLOW_UNSUPPORTED_BF16=1` only bypasses that guard for an explicit feasibility experiment.
+Current upstream video code uses BF16 autocast. NVIDIA T4 compatibility must be established before real inference is enabled. The worker fails early with `MODEL_UNSUPPORTED_GPU` when CUDA reports no BF16 support. Setting `SAM3_ALLOW_UNSUPPORTED_BF16=1` enables an experimental T4 path that replaces the upstream flash-only SDPA call with PyTorch's slower math kernel; output quality and performance still require validation.
 
 ### Optional inference dependencies
 

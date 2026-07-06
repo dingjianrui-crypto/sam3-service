@@ -150,6 +150,7 @@ class Sam3Segmenter:
             )
         try:
             import torch
+            from sam3.model import decoder as sam3_decoder
             from sam3.model_builder import build_sam3_multiplex_video_predictor
         except ModuleNotFoundError as exc:
             if exc.name and (exc.name == "sam3" or exc.name.startswith("sam3.")):
@@ -174,9 +175,9 @@ class Sam3Segmenter:
             raise ServiceError(
                 "MODEL_UNAVAILABLE", "CUDA is unavailable to the worker.", status_code=503
             )
-        if not torch.cuda.is_bf16_supported() and os.getenv(
-            "SAM3_ALLOW_UNSUPPORTED_BF16", "0"
-        ) != "1":
+        bf16_supported = torch.cuda.is_bf16_supported()
+        allow_legacy_gpu = os.getenv("SAM3_ALLOW_UNSUPPORTED_BF16", "0") == "1"
+        if not bf16_supported and not allow_legacy_gpu:
             raise ServiceError(
                 "MODEL_UNSUPPORTED_GPU",
                 "Current upstream SAM 3.1 video code uses BF16 autocast, but this GPU "
@@ -184,6 +185,16 @@ class Sam3Segmenter:
                 "before enabling SAM3_ALLOW_UNSUPPORTED_BF16.",
                 status_code=503,
             )
+        if not bf16_supported:
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+
+            def legacy_gpu_sdpa_kernel(_backend: Any):
+                return sdpa_kernel(SDPBackend.MATH)
+
+            sam3_decoder.sdpa_kernel = legacy_gpu_sdpa_kernel
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
         self.torch = torch
         self.offload_video_to_cpu = os.getenv(
             "SAM3_OFFLOAD_VIDEO_TO_CPU", "1"
