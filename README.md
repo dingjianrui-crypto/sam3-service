@@ -93,12 +93,14 @@ Current upstream video code uses BF16 autocast. NVIDIA T4 compatibility must be 
 
 ### Optional inference dependencies
 
-The upstream README lists `einops`, `ninja`, `flash-attn-3`, and `cc_torch` as optional acceleration packages. They are not required to start this service.
+The upstream README groups `einops`, `ninja`, `flash-attn-3`, and `cc_torch` under optional acceleration packages. However, the current SAM 3.1 multiplex implementation imports `einops` during normal startup. Its video predictor also imports `psutil`, which is not declared by the upstream base package. Our `sam3` extra therefore installs both as required compatibility dependencies.
 
 For the NVIDIA T4 deployment:
 
 - do not install `flash-attn-3`; it requires an H100/H800-class Hopper GPU;
-- `einops` and `ninja` are only needed by that optional FlashAttention installation path;
+- `einops` is required by the current SAM 3.1 multiplex implementation;
+- `psutil` is required by the upstream video predictor;
+- `ninja` is not required while FlashAttention 3 is disabled;
 - leave `cc_torch` out of the initial deployment and benchmark the supported fallback first;
 - consider `cc_torch` only as a later, separately tested optimization.
 
@@ -397,6 +399,15 @@ For an immediate repair before updating the source:
 sudo UV_CACHE_DIR=/tmp/sam3-uv-cache \
   uv pip install --python /opt/sam3/.venv/bin/python \
   "setuptools>=70,<82"
+sudo systemctl restart sam3-worker.service
+```
+
+If an older deployment reports a missing `einops` or `psutil` module, the equivalent immediate repair is:
+
+```bash
+sudo UV_CACHE_DIR=/tmp/sam3-uv-cache \
+  uv pip install --python /opt/sam3/.venv/bin/python \
+  "einops>=0.8,<1" "psutil>=5.9,<8"
 sudo systemctl restart sam3-worker.service
 ```
 

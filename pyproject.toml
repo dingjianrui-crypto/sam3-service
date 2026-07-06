@@ -16,6 +16,8 @@ dev = [
   "pytest-asyncio>=0.25,<1",
 ]
 sam3 = [
+  "einops>=0.8,<1",
+  "psutil>=5.9,<8",
   "sam3 @ git+https://github.com/facebookresearch/sam3.git@5dd401d1c5c1d5c3eedff06d41b77af824517619",
   "setuptools>=70,<82",
   "torch==2.10.0; sys_platform == 'linux'",
