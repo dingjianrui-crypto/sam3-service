@@ -119,6 +119,9 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_CHECKPOINT_PATH` | unset | Local SAM 3.1 checkpoint; skips automatic download |
 | `SAM3_OFFLINE` | `0` | Require local checkpoint and disable Hugging Face network access |
 | `SAM3_OFFLOAD_VIDEO_TO_CPU` | `1` | Keep decoded video frames in CPU memory to reduce GPU use |
+| `SAM3_MAX_TRACKED_OBJECTS` | `4` | Cap tracked instances to reduce inference memory |
+| `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |
+| `SAM3_POSTPROCESS_BATCH_SIZE` | `1` | Frames accumulated for mask post-processing |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
 | `SAM3_PORT` | `8000` | HTTP port |
 | `SAM3_MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |

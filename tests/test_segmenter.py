@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 
 from sam3_service.errors import ServiceError
-from sam3_service.segmenter import Sam3Segmenter, _patch_sam3_init_state
+from sam3_service.segmenter import (
+    Sam3Segmenter,
+    _configure_sam3_batches,
+    _patch_sam3_init_state,
+)
 
 
 class _ModelWithoutOffloadOptions:
@@ -94,6 +98,20 @@ class Sam3CompatibilityTest(unittest.TestCase):
         )
 
         self.assertTrue(model.offload_state_to_cpu)
+
+    def test_configures_single_frame_memory_mode(self) -> None:
+        model = type("Model", (), {})()
+        predictor = _Predictor(model)
+
+        _configure_sam3_batches(
+            predictor,
+            grounding_batch_size=1,
+            postprocess_batch_size=1,
+        )
+
+        self.assertFalse(model.use_batched_grounding)
+        self.assertEqual(model.batched_grounding_batch_size, 1)
+        self.assertEqual(model.postprocess_batch_size, 1)
 
     def test_offloads_video_frames_and_closes_session(self) -> None:
         segmenter = Sam3Segmenter.__new__(Sam3Segmenter)

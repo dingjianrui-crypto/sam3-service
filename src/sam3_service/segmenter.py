@@ -39,6 +39,17 @@ def _patch_sam3_init_state(predictor: Any) -> None:
     predictor.model.init_state = compatible_init_state
 
 
+def _configure_sam3_batches(
+    predictor: Any,
+    *,
+    grounding_batch_size: int,
+    postprocess_batch_size: int,
+) -> None:
+    predictor.model.use_batched_grounding = grounding_batch_size > 1
+    predictor.model.batched_grounding_batch_size = grounding_batch_size
+    predictor.model.postprocess_batch_size = postprocess_batch_size
+
+
 @dataclass
 class FrameResult:
     frame_index: int
@@ -177,12 +188,21 @@ class Sam3Segmenter:
         self.offload_video_to_cpu = os.getenv(
             "SAM3_OFFLOAD_VIDEO_TO_CPU", "1"
         ).lower() in {"1", "true", "yes"}
+        max_tracked_objects = max(1, int(os.getenv("SAM3_MAX_TRACKED_OBJECTS", "4")))
+        grounding_batch_size = max(1, int(os.getenv("SAM3_GROUNDING_BATCH_SIZE", "1")))
+        postprocess_batch_size = max(1, int(os.getenv("SAM3_POSTPROCESS_BATCH_SIZE", "1")))
         self.predictor = build_sam3_multiplex_video_predictor(
             checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
+            max_num_objects=max_tracked_objects,
             use_fa3=False,
             compile=False,
         )
         _patch_sam3_init_state(self.predictor)
+        _configure_sam3_batches(
+            self.predictor,
+            grounding_batch_size=grounding_batch_size,
+            postprocess_batch_size=postprocess_batch_size,
+        )
 
     def segment(
         self,
@@ -256,8 +276,8 @@ class Sam3Segmenter:
         except self.torch.OutOfMemoryError as exc:
             raise ServiceError(
                 "GPU_OUT_OF_MEMORY",
-                "The GPU could not fit this video even with video frames offloaded to CPU. "
-                "Try a shorter video; if the problem persists, lower the inference resolution.",
+                "The GPU could not fit this video in minimum-memory mode. Try a shorter "
+                "video; this SAM 3.1 multiplex build may require a GPU with more VRAM.",
                 retryable=False,
             ) from exc
         finally:
