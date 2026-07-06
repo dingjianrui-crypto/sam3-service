@@ -122,6 +122,7 @@ class Sam3Segmenter:
     model_name = "sam3.1-object-multiplex"
 
     def __init__(self, checkpoint_path: Path | None = None, *, offline: bool = False) -> None:
+        os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
         if offline:
             os.environ["HF_HUB_OFFLINE"] = "1"
         if checkpoint_path is not None and not checkpoint_path.is_file():
@@ -173,6 +174,9 @@ class Sam3Segmenter:
                 status_code=503,
             )
         self.torch = torch
+        self.offload_video_to_cpu = os.getenv(
+            "SAM3_OFFLOAD_VIDEO_TO_CPU", "1"
+        ).lower() in {"1", "true", "yes"}
         self.predictor = build_sam3_multiplex_video_predictor(
             checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
             use_fa3=False,
@@ -190,13 +194,18 @@ class Sam3Segmenter:
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
     ) -> Iterable[FrameResult]:
-        response = self.predictor.handle_request(
-            {"type": "start_session", "resource_path": str(video_path)}
-        )
-        session_id = response["session_id"]
+        session_id: str | None = None
         total = int(metadata["frame_count"])
         fps = float(metadata["fps"])
         try:
+            response = self.predictor.handle_request(
+                {
+                    "type": "start_session",
+                    "resource_path": str(video_path),
+                    "offload_video_to_cpu": self.offload_video_to_cpu,
+                }
+            )
+            session_id = response["session_id"]
             self.predictor.handle_request(
                 {
                     "type": "add_prompt",
@@ -244,10 +253,19 @@ class Sam3Segmenter:
                         segmentation=_encode_uncompressed_rle(mask),
                     )
                 progress(min(frame_index + 1, total), total)
+        except self.torch.OutOfMemoryError as exc:
+            raise ServiceError(
+                "GPU_OUT_OF_MEMORY",
+                "The GPU could not fit this video even with video frames offloaded to CPU. "
+                "Try a shorter video; if the problem persists, lower the inference resolution.",
+                retryable=False,
+            ) from exc
         finally:
-            self.predictor.handle_request(
-                {"type": "close_session", "session_id": session_id}
-            )
+            if session_id is not None:
+                self.predictor.handle_request(
+                    {"type": "close_session", "session_id": session_id}
+                )
+            self.torch.cuda.empty_cache()
 
 
 def create_segmenter(

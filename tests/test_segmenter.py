@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
-from sam3_service.segmenter import _patch_sam3_init_state
+from sam3_service.errors import ServiceError
+from sam3_service.segmenter import Sam3Segmenter, _patch_sam3_init_state
 
 
 class _ModelWithoutOffloadOptions:
@@ -32,6 +34,40 @@ class _Predictor:
         self.model = model
 
 
+class _Cuda:
+    def __init__(self) -> None:
+        self.empty_cache_calls = 0
+
+    def empty_cache(self) -> None:
+        self.empty_cache_calls += 1
+
+
+class _Torch:
+    class OutOfMemoryError(Exception):
+        pass
+
+    def __init__(self) -> None:
+        self.cuda = _Cuda()
+
+
+class _SessionPredictor:
+    def __init__(self, *, out_of_memory: bool = False) -> None:
+        self.out_of_memory = out_of_memory
+        self.requests: list[dict[str, object]] = []
+
+    def handle_request(self, request: dict[str, object]) -> dict[str, str]:
+        self.requests.append(request)
+        if request["type"] == "start_session":
+            return {"session_id": "session"}
+        if request["type"] == "add_prompt" and self.out_of_memory:
+            raise _Torch.OutOfMemoryError("out of memory")
+        return {"is_success": "true"}
+
+    def handle_stream_request(self, request: dict[str, object]):
+        self.requests.append(request)
+        return iter(())
+
+
 class Sam3CompatibilityTest(unittest.TestCase):
     def test_removes_session_options_rejected_by_model(self) -> None:
         model = _ModelWithoutOffloadOptions()
@@ -58,6 +94,51 @@ class Sam3CompatibilityTest(unittest.TestCase):
         )
 
         self.assertTrue(model.offload_state_to_cpu)
+
+    def test_offloads_video_frames_and_closes_session(self) -> None:
+        segmenter = Sam3Segmenter.__new__(Sam3Segmenter)
+        segmenter.torch = _Torch()
+        segmenter.predictor = _SessionPredictor()
+        segmenter.offload_video_to_cpu = True
+
+        frames = segmenter.segment(
+            Path("/tmp/video.mp4"),
+            {"frame_count": 10, "fps": 10},
+            "prompt",
+            "paddle",
+            0.5,
+            lambda _done, _total: None,
+            lambda: False,
+        )
+
+        self.assertEqual(list(frames), [])
+        self.assertTrue(segmenter.predictor.requests[0]["offload_video_to_cpu"])
+        self.assertEqual(segmenter.predictor.requests[-1]["type"], "close_session")
+        self.assertEqual(segmenter.torch.cuda.empty_cache_calls, 1)
+
+    def test_reports_gpu_out_of_memory_and_recovers_cache(self) -> None:
+        segmenter = Sam3Segmenter.__new__(Sam3Segmenter)
+        segmenter.torch = _Torch()
+        segmenter.predictor = _SessionPredictor(out_of_memory=True)
+        segmenter.offload_video_to_cpu = True
+
+        frames = segmenter.segment(
+            Path("/tmp/video.mp4"),
+            {"frame_count": 10, "fps": 10},
+            "prompt",
+            "paddle",
+            0.5,
+            lambda _done, _total: None,
+            lambda: False,
+        )
+
+        with self.assertRaisesRegex(ServiceError, "shorter video") as raised:
+            list(frames)
+
+        self.assertEqual(raised.exception.code, "GPU_OUT_OF_MEMORY")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(segmenter.predictor.requests[-1]["type"], "close_session")
+        self.assertEqual(segmenter.torch.cuda.empty_cache_calls, 1)
 
 
 if __name__ == "__main__":

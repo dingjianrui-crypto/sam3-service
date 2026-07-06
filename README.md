@@ -118,6 +118,7 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_SEGMENTER` | `mock` | `mock` or `sam3` |
 | `SAM3_CHECKPOINT_PATH` | unset | Local SAM 3.1 checkpoint; skips automatic download |
 | `SAM3_OFFLINE` | `0` | Require local checkpoint and disable Hugging Face network access |
+| `SAM3_OFFLOAD_VIDEO_TO_CPU` | `1` | Keep decoded video frames in CPU memory to reduce GPU use |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
 | `SAM3_PORT` | `8000` | HTTP port |
 | `SAM3_MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
@@ -300,6 +301,7 @@ WorkingDirectory=/opt/sam3
 EnvironmentFile=/etc/sam3/sam3.env
 Environment=PYTHONUNBUFFERED=1
 Environment=CUDA_VISIBLE_DEVICES=0
+Environment=PYTORCH_ALLOC_CONF=expandable_segments:True
 ExecStart=/opt/sam3/.venv/bin/sam3-worker
 Restart=on-failure
 RestartSec=10
