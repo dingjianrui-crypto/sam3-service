@@ -1,13 +1,42 @@
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import JobCancelled, ServiceError
+
+_SAM3_SESSION_OPTIONS = {
+    "async_loading_frames",
+    "offload_state_to_cpu",
+    "offload_video_to_cpu",
+    "video_loader_type",
+}
+
+
+def _patch_sam3_init_state(predictor: Any) -> None:
+    """Keep the upstream session wrapper compatible with its concrete model."""
+    original = predictor.model.init_state
+    parameters = inspect.signature(original).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return
+
+    unsupported = _SAM3_SESSION_OPTIONS.difference(parameters)
+    if not unsupported:
+        return
+
+    @wraps(original)
+    def compatible_init_state(*args: Any, **kwargs: Any) -> Any:
+        for option in unsupported:
+            kwargs.pop(option, None)
+        return original(*args, **kwargs)
+
+    predictor.model.init_state = compatible_init_state
 
 
 @dataclass
@@ -149,6 +178,7 @@ class Sam3Segmenter:
             use_fa3=False,
             compile=False,
         )
+        _patch_sam3_init_state(self.predictor)
 
     def segment(
         self,
