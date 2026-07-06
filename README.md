@@ -53,7 +53,7 @@ SAM 3 is an optional dependency because the API and mock worker do not need its 
 UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --extra sam3
 ```
 
-The `sam3` extra in `pyproject.toml` pins an upstream commit compatible with the current adapter. On Linux it also installs PyTorch 2.10.0 and torchvision from the CUDA 12.8 PyTorch index used by the current upstream instructions.
+The `sam3` extra in `pyproject.toml` pins an upstream commit compatible with the current adapter. On Linux it also installs PyTorch 2.10.0 and torchvision from the CUDA 12.8 PyTorch index used by the current upstream instructions. It includes setuptools because upstream SAM 3 imports its legacy `pkg_resources` module at runtime without declaring that dependency.
 
 Confirm which package is imported:
 
@@ -382,6 +382,23 @@ sudo -u sam3 test -r /opt/models/sam3.1_multiplex.pt
 ```
 
 If the API starts but jobs remain queued, inspect the worker log first. Common causes are missing checkpoint permissions, CUDA/PyTorch incompatibility, lack of `/dev/nvidia*` access, or the current T4/BF16 compatibility constraint.
+
+If the worker reports `ModuleNotFoundError: No module named 'pkg_resources'`, update the source and resynchronize the `sam3` extra:
+
+```bash
+cd /opt/sam3
+sudo UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --no-dev --extra sam3
+sudo systemctl restart sam3-worker.service
+```
+
+For an immediate repair before updating the source:
+
+```bash
+sudo UV_CACHE_DIR=/tmp/sam3-uv-cache \
+  uv pip install --python /opt/sam3/.venv/bin/python \
+  "setuptools>=70,<82"
+sudo systemctl restart sam3-worker.service
+```
 
 ## Tests
 

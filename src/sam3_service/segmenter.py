@@ -110,10 +110,23 @@ class Sam3Segmenter:
         try:
             import torch
             from sam3.model_builder import build_sam3_multiplex_video_predictor
+        except ModuleNotFoundError as exc:
+            if exc.name and (exc.name == "sam3" or exc.name.startswith("sam3.")):
+                message = "SAM 3.1 is not installed in the worker environment."
+            else:
+                message = (
+                    "A SAM 3.1 runtime dependency is missing from the worker "
+                    f"environment: {exc.name or exc}."
+                )
+            raise ServiceError(
+                "MODEL_UNAVAILABLE",
+                message,
+                status_code=503,
+            ) from exc
         except ImportError as exc:
             raise ServiceError(
                 "MODEL_UNAVAILABLE",
-                "SAM 3.1 is not installed in the worker environment.",
+                f"SAM 3.1 could not be imported: {exc}.",
                 status_code=503,
             ) from exc
         if not torch.cuda.is_available():
