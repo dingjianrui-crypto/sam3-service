@@ -182,6 +182,8 @@ class Sam3CompatibilityTest(unittest.TestCase):
         self.assertGreaterEqual(centerline.box_xywh[2], 123)
         self.assertLessEqual(centerline.box_xywh[2], 125)
         self.assertLess(centerline.box_xywh[3], 20)
+        self.assertEqual(len(centerline.line_xyxy), 4)
+        self.assertGreater(centerline.line_xyxy[2] - centerline.line_xyxy[0], 120)
 
         original_area = sum(1 for row in mask for value in row if value)
         centerline_area = _rle_area(centerline.segmentation)
@@ -206,6 +208,7 @@ class Sam3CompatibilityTest(unittest.TestCase):
         assert centerline is not None
         self.assertGreaterEqual(centerline.box_xywh[3], 11)
         self.assertLessEqual(centerline.box_xywh[3], 13)
+        self.assertEqual(len(centerline.line_xyxy), 4)
 
 
 def _rle_area(rle: dict[str, object]) -> int:

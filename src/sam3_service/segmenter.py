@@ -63,14 +63,17 @@ class FrameResult:
     segmentation: dict[str, Any]
     centerline_segmentation: dict[str, Any] | None = None
     centerline_box_xywh: list[float] | None = None
+    centerline_line_xyxy: list[float] | None = None
     shaft_segmentation: dict[str, Any] | None = None
     shaft_box_xywh: list[float] | None = None
+    shaft_line_xyxy: list[float] | None = None
 
 
 @dataclass(frozen=True)
 class CenterlineMask:
     segmentation: dict[str, Any]
     box_xywh: list[float]
+    line_xyxy: list[float]
 
 
 class VideoSegmenter(Protocol):
@@ -139,8 +142,20 @@ class MockSegmenter:
                 segmentation={"type": "polygon", "points": polygon},
                 centerline_segmentation={"type": "polygon", "points": polygon},
                 centerline_box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
+                centerline_line_xyxy=[
+                    center_x - dx,
+                    center_y - dy,
+                    center_x + dx,
+                    center_y + dy,
+                ],
                 shaft_segmentation={"type": "polygon", "points": polygon},
                 shaft_box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
+                shaft_line_xyxy=[
+                    center_x - dx,
+                    center_y - dy,
+                    center_x + dx,
+                    center_y + dy,
+                ],
             )
         progress(total, total)
 
@@ -305,8 +320,10 @@ class Sam3Segmenter:
                         segmentation=_encode_uncompressed_rle(mask),
                         centerline_segmentation=centerline.segmentation if centerline else None,
                         centerline_box_xywh=centerline.box_xywh if centerline else None,
+                        centerline_line_xyxy=centerline.line_xyxy if centerline else None,
                         shaft_segmentation=centerline.segmentation if centerline else None,
                         shaft_box_xywh=centerline.box_xywh if centerline else None,
+                        shaft_line_xyxy=centerline.line_xyxy if centerline else None,
                     )
                 progress(min(frame_index + 1, total), total)
         except self.torch.OutOfMemoryError as exc:
@@ -404,7 +421,18 @@ def _fit_centerline_mask(mask: Any) -> CenterlineMask | None:
     box = _box_from_mask(rows)
     if box is None:
         return None
-    return CenterlineMask(segmentation=_encode_uncompressed_rle(rows), box_xywh=box)
+    center_x, center_y, unit_x, unit_y = line
+    line_xyxy = [
+        center_x + start * unit_x,
+        center_y + start * unit_y,
+        center_x + end * unit_x,
+        center_y + end * unit_y,
+    ]
+    return CenterlineMask(
+        segmentation=_encode_uncompressed_rle(rows),
+        box_xywh=box,
+        line_xyxy=line_xyxy,
+    )
 
 
 def _coerce_2d_mask(mask: Any) -> tuple[Any, int, int]:

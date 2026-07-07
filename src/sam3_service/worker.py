@@ -275,8 +275,10 @@ def _frame_to_dict(frame: FrameResult) -> dict[str, Any]:
         "segmentation": frame.segmentation,
         "centerline_segmentation": frame.centerline_segmentation,
         "centerline_box_xywh": frame.centerline_box_xywh,
+        "centerline_line_xyxy": frame.centerline_line_xyxy,
         "shaft_segmentation": frame.shaft_segmentation,
         "shaft_box_xywh": frame.shaft_box_xywh,
+        "shaft_line_xyxy": frame.shaft_line_xyxy,
     }
 
 

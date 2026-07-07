@@ -24,7 +24,9 @@ export type FrameMask = {
   instance_id: string;
   box_xywh: number[];
   centerline_box_xywh?: number[] | null;
+  centerline_line_xyxy?: number[] | null;
   shaft_box_xywh?: number[] | null;
+  shaft_line_xyxy?: number[] | null;
   score: number | null;
   segmentation:
     | { type: "polygon"; points: number[][] }

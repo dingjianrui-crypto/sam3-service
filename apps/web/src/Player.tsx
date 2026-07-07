@@ -7,6 +7,12 @@ type Props = {
 
 type OverlayMode = "mask" | "centerline";
 
+type CenterlineRecord = {
+  record: FrameMask;
+  line: [number, number, number, number];
+  color: string;
+};
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
     callback: (now: number, metadata: { mediaTime: number }) => void
@@ -76,8 +82,13 @@ export function Player({ manifest }: Props) {
           Math.abs(record.timestamp_ms - timeMs) <= tolerance &&
           enabledPrompts.has(record.prompt_id)
       );
+      const centerlines: CenterlineRecord[] = [];
       for (const record of nearby) {
         const color = colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
+        const line = getCenterlineLine(record);
+        if (overlayMode === "centerline" && line) {
+          centerlines.push({ record, line, color });
+        }
         const segmentation =
           overlayMode === "centerline" &&
           (record.centerline_segmentation || record.shaft_segmentation)
@@ -114,6 +125,9 @@ export function Player({ manifest }: Props) {
             Math.max(18, y - 6)
           );
         }
+      }
+      if (overlayMode === "centerline") {
+        drawAngleAnnotations(context, centerlines);
       }
     },
     [
@@ -209,6 +223,157 @@ export function Player({ manifest }: Props) {
       </div>
     </section>
   );
+}
+
+function getCenterlineLine(record: FrameMask): [number, number, number, number] | null {
+  const line = record.centerline_line_xyxy ?? record.shaft_line_xyxy;
+  if (!line || line.length !== 4 || line.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+  return [line[0], line[1], line[2], line[3]];
+}
+
+function drawAngleAnnotations(
+  context: CanvasRenderingContext2D,
+  centerlines: CenterlineRecord[]
+) {
+  for (let firstIndex = 0; firstIndex < centerlines.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < centerlines.length; secondIndex += 1) {
+      const first = centerlines[firstIndex];
+      const second = centerlines[secondIndex];
+      if (first.record.prompt_id === second.record.prompt_id) continue;
+      const annotation = angleAnnotation(first.line, second.line);
+      if (!annotation) continue;
+      drawAngleAnnotation(context, annotation);
+    }
+  }
+}
+
+function angleAnnotation(
+  first: [number, number, number, number],
+  second: [number, number, number, number]
+) {
+  const intersection = segmentIntersection(first, second);
+  if (!intersection) return null;
+
+  const firstVector = normalize([first[2] - first[0], first[3] - first[1]]);
+  let secondVector = normalize([second[2] - second[0], second[3] - second[1]]);
+  if (!firstVector || !secondVector) return null;
+
+  if (dot(firstVector, secondVector) < 0) {
+    secondVector = [-secondVector[0], -secondVector[1]];
+  }
+  const radians = Math.acos(clamp(dot(firstVector, secondVector), -1, 1));
+  const degrees = (radians * 180) / Math.PI;
+  if (!Number.isFinite(degrees) || degrees < 2) return null;
+
+  const firstAngle = Math.atan2(firstVector[1], firstVector[0]);
+  let secondAngle = Math.atan2(secondVector[1], secondVector[0]);
+  let delta = normalizeAngle(secondAngle - firstAngle);
+  if (Math.abs(delta) > Math.PI) {
+    delta -= Math.sign(delta) * Math.PI * 2;
+  }
+  secondAngle = firstAngle + delta;
+
+  return {
+    x: intersection.x,
+    y: intersection.y,
+    startAngle: firstAngle,
+    endAngle: secondAngle,
+    degrees: Math.min(degrees, 180 - degrees)
+  };
+}
+
+function segmentIntersection(
+  first: [number, number, number, number],
+  second: [number, number, number, number]
+): { x: number; y: number } | null {
+  const [x1, y1, x2, y2] = first;
+  const [x3, y3, x4, y4] = second;
+  const denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denominator) < 1e-6) return null;
+
+  const firstDet = x1 * y2 - y1 * x2;
+  const secondDet = x3 * y4 - y3 * x4;
+  const x = (firstDet * (x3 - x4) - (x1 - x2) * secondDet) / denominator;
+  const y = (firstDet * (y3 - y4) - (y1 - y2) * secondDet) / denominator;
+  if (!pointOnSegment(x, y, first) || !pointOnSegment(x, y, second)) return null;
+  return { x, y };
+}
+
+function pointOnSegment(x: number, y: number, line: [number, number, number, number]) {
+  const [x1, y1, x2, y2] = line;
+  const tolerance = 1.5;
+  return (
+    x >= Math.min(x1, x2) - tolerance &&
+    x <= Math.max(x1, x2) + tolerance &&
+    y >= Math.min(y1, y2) - tolerance &&
+    y <= Math.max(y1, y2) + tolerance
+  );
+}
+
+function drawAngleAnnotation(
+  context: CanvasRenderingContext2D,
+  annotation: {
+    x: number;
+    y: number;
+    startAngle: number;
+    endAngle: number;
+    degrees: number;
+  }
+) {
+  const radius = Math.max(24, Math.min(context.canvas.width, context.canvas.height) * 0.07);
+  const counterclockwise = annotation.endAngle < annotation.startAngle;
+  context.save();
+  context.globalAlpha = 1;
+  context.strokeStyle = "#fff2a8";
+  context.fillStyle = "#fff2a8";
+  context.lineWidth = Math.max(2, context.canvas.width / 700);
+  context.beginPath();
+  context.arc(
+    annotation.x,
+    annotation.y,
+    radius,
+    annotation.startAngle,
+    annotation.endAngle,
+    counterclockwise
+  );
+  context.stroke();
+
+  const midAngle = annotation.startAngle + normalizeAngle(annotation.endAngle - annotation.startAngle) / 2;
+  const labelX = annotation.x + Math.cos(midAngle) * (radius + 18);
+  const labelY = annotation.y + Math.sin(midAngle) * (radius + 18);
+  const label = `${Math.round(annotation.degrees)}°`;
+  context.font = `${Math.max(14, context.canvas.width / 55)}px system-ui`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  const metrics = context.measureText(label);
+  context.fillStyle = "rgba(2, 5, 9, 0.78)";
+  context.fillRect(labelX - metrics.width / 2 - 6, labelY - 11, metrics.width + 12, 22);
+  context.fillStyle = "#fff2a8";
+  context.fillText(label, labelX, labelY);
+  context.restore();
+}
+
+function normalize(vector: number[]): [number, number] | null {
+  const length = Math.hypot(vector[0], vector[1]);
+  if (length < 1e-6) return null;
+  return [vector[0] / length, vector[1] / length];
+}
+
+function dot(first: [number, number], second: [number, number]) {
+  return first[0] * second[0] + first[1] * second[1];
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeAngle(angle: number) {
+  let result = angle;
+  while (result <= -Math.PI) result += Math.PI * 2;
+  while (result > Math.PI) result -= Math.PI * 2;
+  return result;
 }
 
 function drawRle(
