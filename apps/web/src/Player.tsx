@@ -5,7 +5,7 @@ type Props = {
   manifest: ResultManifest;
 };
 
-type OverlayMode = "paddle" | "shaft";
+type OverlayMode = "mask" | "centerline";
 
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
@@ -21,7 +21,7 @@ export function Player({ manifest }: Props) {
   const loadingRef = useRef(new Set<number>());
   const [opacity, setOpacity] = useState(0.48);
   const [showBoxes, setShowBoxes] = useState(true);
-  const [overlayMode, setOverlayMode] = useState<OverlayMode>("paddle");
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>("mask");
   const [enabledPrompts, setEnabledPrompts] = useState(
     new Set(manifest.prompts.map((prompt) => prompt.id))
   );
@@ -79,8 +79,9 @@ export function Player({ manifest }: Props) {
       for (const record of nearby) {
         const color = colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
         const segmentation =
-          overlayMode === "shaft" && record.shaft_segmentation
-            ? record.shaft_segmentation
+          overlayMode === "centerline" &&
+          (record.centerline_segmentation || record.shaft_segmentation)
+            ? (record.centerline_segmentation ?? record.shaft_segmentation)!
             : record.segmentation;
         context.save();
         context.globalAlpha = opacity;
@@ -99,8 +100,8 @@ export function Player({ manifest }: Props) {
         context.restore();
         if (showBoxes) {
           const [x, y, width, height] =
-            overlayMode === "shaft" && record.shaft_box_xywh
-              ? record.shaft_box_xywh
+            overlayMode === "centerline" && (record.centerline_box_xywh || record.shaft_box_xywh)
+              ? (record.centerline_box_xywh ?? record.shaft_box_xywh)!
               : record.box_xywh;
           context.strokeStyle = color;
           context.lineWidth = Math.max(2, canvas.width / 600);
@@ -193,8 +194,8 @@ export function Player({ manifest }: Props) {
             value={overlayMode}
             onChange={(event) => setOverlayMode(event.target.value as OverlayMode)}
           >
-            <option value="paddle">Paddle mask</option>
-            <option value="shaft">Shaft centerline</option>
+            <option value="mask">Detected mask</option>
+            <option value="centerline">Centerline</option>
           </select>
         </label>
         <label className="checkbox">

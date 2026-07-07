@@ -25,7 +25,7 @@ export default function App() {
   const [selected, setSelected] = useState<Job | null>(null);
   const [manifest, setManifest] = useState<ResultManifest | null>(null);
   const [file, setFile] = useState<File | null>(null);
-  const [prompt, setPrompt] = useState("paddle shaft");
+  const [prompt, setPrompt] = useState("paddle, boat");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -116,7 +116,7 @@ export default function App() {
           <form className="upload-card" onSubmit={submit}>
             <div>
               <p className="step">NEW ANALYSIS</p>
-              <h2>Track an object</h2>
+              <h2>Track objects</h2>
               <p className="muted">Upload a video and describe what SAM should follow.</p>
             </div>
             <label className={file ? "dropzone selected" : "dropzone"}>
@@ -139,7 +139,7 @@ export default function App() {
                 value={prompt}
                 disabled={busy}
                 onChange={(event) => setPrompt(event.target.value)}
-                placeholder="paddle shaft"
+                placeholder="paddle, boat"
               />
               <small>Separate up to three prompts with commas.</small>
             </label>
@@ -257,7 +257,7 @@ export default function App() {
                     <i />
                   </div>
                   <p className="step">{selected.progress.stage}</p>
-                  <h3>Finding your paddle</h3>
+                  <h3>Finding your objects</h3>
                   <div className="progress-track">
                     <span style={{ width: `${selected.progress.percent}%` }} />
                   </div>
@@ -288,4 +288,3 @@ export default function App() {
     </div>
   );
 }
-

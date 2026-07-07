@@ -94,7 +94,7 @@ class PipelineTest(unittest.TestCase):
         self.database.execute(
             """
             INSERT INTO job_prompts (id, job_id, position, text, color)
-            VALUES (?, ?, 0, 'paddle shaft', '#35C2FF')
+            VALUES (?, ?, 0, 'paddle', '#35C2FF')
             """,
             (prompt_id, job_id),
         )
@@ -118,6 +118,8 @@ class PipelineTest(unittest.TestCase):
         chunk = json.loads(self.storage.chunk_path(job_id, 0).read_text())
         self.assertEqual(len(chunk["frames"]), 10)
         self.assertEqual(chunk["frames"][0]["segmentation"]["type"], "polygon")
+        self.assertEqual(chunk["frames"][0]["centerline_segmentation"]["type"], "polygon")
+        self.assertIsNotNone(chunk["frames"][0]["centerline_box_xywh"])
         self.assertEqual(chunk["frames"][0]["shaft_segmentation"]["type"], "polygon")
         self.assertIsNotNone(chunk["frames"][0]["shaft_box_xywh"])
 

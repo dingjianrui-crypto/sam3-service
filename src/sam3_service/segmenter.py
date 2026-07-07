@@ -18,7 +18,7 @@ _SAM3_SESSION_OPTIONS = {
     "offload_video_to_cpu",
     "video_loader_type",
 }
-_DEFAULT_SHAFT_THICKNESS_PIXELS = 8.0
+_DEFAULT_CENTERLINE_THICKNESS_PIXELS = 8.0
 
 
 def _patch_sam3_init_state(predictor: Any) -> None:
@@ -61,12 +61,14 @@ class FrameResult:
     box_xywh: list[float]
     score: float | None
     segmentation: dict[str, Any]
+    centerline_segmentation: dict[str, Any] | None = None
+    centerline_box_xywh: list[float] | None = None
     shaft_segmentation: dict[str, Any] | None = None
     shaft_box_xywh: list[float] | None = None
 
 
 @dataclass(frozen=True)
-class ShaftMask:
+class CenterlineMask:
     segmentation: dict[str, Any]
     box_xywh: list[float]
 
@@ -135,6 +137,8 @@ class MockSegmenter:
                 box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
                 score=0.96,
                 segmentation={"type": "polygon", "points": polygon},
+                centerline_segmentation={"type": "polygon", "points": polygon},
+                centerline_box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
                 shaft_segmentation={"type": "polygon", "points": polygon},
                 shaft_box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
             )
@@ -282,7 +286,7 @@ class Sam3Segmenter:
                 masks = outputs.get("out_binary_masks")
                 for index, object_id in enumerate(object_ids):
                     mask = masks[index]
-                    shaft = _fit_shaft_mask(mask)
+                    centerline = _fit_centerline_mask(mask)
                     box = [float(value) for value in boxes[index]]
                     if box and max(abs(value) for value in box) <= 2:
                         box = [
@@ -299,8 +303,10 @@ class Sam3Segmenter:
                         box_xywh=box,
                         score=float(scores[index]) if index < len(scores) else None,
                         segmentation=_encode_uncompressed_rle(mask),
-                        shaft_segmentation=shaft.segmentation if shaft else None,
-                        shaft_box_xywh=shaft.box_xywh if shaft else None,
+                        centerline_segmentation=centerline.segmentation if centerline else None,
+                        centerline_box_xywh=centerline.box_xywh if centerline else None,
+                        shaft_segmentation=centerline.segmentation if centerline else None,
+                        shaft_box_xywh=centerline.box_xywh if centerline else None,
                     )
                 progress(min(frame_index + 1, total), total)
         except self.torch.OutOfMemoryError as exc:
@@ -360,7 +366,7 @@ def _encode_uncompressed_rle(mask: Any) -> dict[str, Any]:
     return {"type": "rle", "size": [height, width], "counts": counts}
 
 
-def _fit_shaft_mask(mask: Any) -> ShaftMask | None:
+def _fit_centerline_mask(mask: Any) -> CenterlineMask | None:
     mask, height, width = _coerce_2d_mask(mask)
     points = _mask_points(mask, height, width)
     if len(points) < 8:
@@ -370,7 +376,7 @@ def _fit_shaft_mask(mask: Any) -> ShaftMask | None:
     if line is None:
         return None
 
-    threshold = _initial_shaft_threshold(points, width, height)
+    threshold = _initial_centerline_threshold(points, width, height)
     inliers = [point for point in points if _line_distance(point, line) <= threshold]
     if len(inliers) >= max(8, len(points) // 20):
         refined = _principal_line(inliers)
@@ -383,21 +389,22 @@ def _fit_shaft_mask(mask: Any) -> ShaftMask | None:
     if len(inlier_projections) < 2:
         return None
 
-    # Fit the shaft direction from the long, thin inliers, but keep the output length
-    # equal to the full detected paddle extent along that direction: blade tip to blade tip.
-    paddle_projections = [_line_projection(point, line) for point in points]
-    start = min(paddle_projections)
-    end = max(paddle_projections)
+    # Fit direction from long, thin inliers, but keep the output length equal to
+    # the full detected object extent along that direction: paddle blade-tip to
+    # blade-tip, or boat head to tail.
+    object_projections = [_line_projection(point, line) for point in points]
+    start = min(object_projections)
+    end = max(object_projections)
     if end - start < 2:
         return None
 
-    half_width = _fixed_shaft_half_width()
+    half_width = _fixed_centerline_half_width()
 
     rows = _line_band_mask(height, width, line, start, end, half_width)
     box = _box_from_mask(rows)
     if box is None:
         return None
-    return ShaftMask(segmentation=_encode_uncompressed_rle(rows), box_xywh=box)
+    return CenterlineMask(segmentation=_encode_uncompressed_rle(rows), box_xywh=box)
 
 
 def _coerce_2d_mask(mask: Any) -> tuple[Any, int, int]:
@@ -429,7 +436,7 @@ def _mask_points(mask: Any, height: int, width: int) -> list[tuple[float, float]
     return points
 
 
-def _initial_shaft_threshold(
+def _initial_centerline_threshold(
     points: list[tuple[float, float]], width: int, height: int
 ) -> float:
     area_scale = math.sqrt(len(points)) * 0.08
@@ -437,12 +444,15 @@ def _initial_shaft_threshold(
     return max(3.0, min(16.0, max(area_scale, frame_scale)))
 
 
-def _fixed_shaft_half_width() -> float:
-    raw = os.getenv("SAM3_SHAFT_THICKNESS_PIXELS", str(_DEFAULT_SHAFT_THICKNESS_PIXELS))
+def _fixed_centerline_half_width() -> float:
+    raw = os.getenv(
+        "SAM3_CENTERLINE_THICKNESS_PIXELS",
+        os.getenv("SAM3_SHAFT_THICKNESS_PIXELS", str(_DEFAULT_CENTERLINE_THICKNESS_PIXELS)),
+    )
     try:
         thickness = float(raw)
     except ValueError:
-        thickness = _DEFAULT_SHAFT_THICKNESS_PIXELS
+        thickness = _DEFAULT_CENTERLINE_THICKNESS_PIXELS
     thickness = max(2.0, min(128.0, thickness))
     return thickness / 2.0
 
@@ -454,7 +464,7 @@ def _ransac_line(
     if len(sample) < 2:
         return None
 
-    threshold = _initial_shaft_threshold(points, width, height)
+    threshold = _initial_centerline_threshold(points, width, height)
     rng = random.Random(17)
     best_line: tuple[float, float, float, float] | None = None
     best_score = -1.0

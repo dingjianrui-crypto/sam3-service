@@ -23,11 +23,16 @@ export type FrameMask = {
   prompt_id: string;
   instance_id: string;
   box_xywh: number[];
+  centerline_box_xywh?: number[] | null;
   shaft_box_xywh?: number[] | null;
   score: number | null;
   segmentation:
     | { type: "polygon"; points: number[][] }
     | { type: "rle"; size: number[]; counts: number[] };
+  centerline_segmentation?:
+    | { type: "polygon"; points: number[][] }
+    | { type: "rle"; size: number[]; counts: number[] }
+    | null;
   shaft_segmentation?:
     | { type: "polygon"; points: number[][] }
     | { type: "rle"; size: number[]; counts: number[] }

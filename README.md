@@ -1,6 +1,6 @@
 # SAM 3 Paddle Review
 
-Upload a video, submit text prompts such as `paddle shaft`, process it asynchronously, and review synchronized segmentation overlays in a browser.
+Upload a video, submit text prompts such as `paddle, boat`, process it asynchronously, and review synchronized segmentation overlays in a browser.
 
 The application currently supports a complete mock-mode vertical slice. The SAM 3.1 adapter is included behind the same worker interface and is enabled on the target GPU after the environment feasibility check.
 
@@ -127,7 +127,8 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_MAX_TRACKED_OBJECTS` | `4` | Cap tracked instances to reduce inference memory |
 | `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |
 | `SAM3_POSTPROCESS_BATCH_SIZE` | `1` | Frames accumulated for mask post-processing |
-| `SAM3_SHAFT_THICKNESS_PIXELS` | `8` | Fixed full thickness, in video pixels, for the shaft centerline mask |
+| `SAM3_CENTERLINE_THICKNESS_PIXELS` | `8` | Fixed full thickness, in video pixels, for paddle and boat centerline masks |
+| `SAM3_SHAFT_THICKNESS_PIXELS` | unset | Deprecated fallback for `SAM3_CENTERLINE_THICKNESS_PIXELS` |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
 | `SAM3_PORT` | `8000` | HTTP port |
 | `SAM3_MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
