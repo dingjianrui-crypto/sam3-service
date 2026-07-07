@@ -28,6 +28,8 @@ export function Player({ manifest }: Props) {
   const [opacity, setOpacity] = useState(0.48);
   const [showBoxes, setShowBoxes] = useState(true);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("mask");
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState("");
   const [enabledPrompts, setEnabledPrompts] = useState(
     new Set(manifest.prompts.map((prompt) => prompt.id))
   );
@@ -76,59 +78,13 @@ export function Player({ manifest }: Props) {
       if (!descriptor) return;
       const records = chunksRef.current.get(descriptor.sequence);
       if (!records) return;
-      const tolerance = 500 / Math.max(manifest.video.fps, 1);
-      const nearby = records.filter(
-        (record) =>
-          Math.abs(record.timestamp_ms - timeMs) <= tolerance &&
-          enabledPrompts.has(record.prompt_id)
-      );
-      const centerlines: CenterlineRecord[] = [];
-      for (const record of nearby) {
-        const color = colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
-        const line = getCenterlineLine(record);
-        if (overlayMode === "centerline" && line) {
-          centerlines.push({ record, line, color });
-        }
-        const segmentation =
-          overlayMode === "centerline" &&
-          (record.centerline_segmentation || record.shaft_segmentation)
-            ? (record.centerline_segmentation ?? record.shaft_segmentation)!
-            : record.segmentation;
-        context.save();
-        context.globalAlpha = opacity;
-        context.fillStyle = color;
-        if (segmentation.type === "polygon") {
-          context.beginPath();
-          segmentation.points.forEach(([x, y], index) => {
-            if (index === 0) context.moveTo(x, y);
-            else context.lineTo(x, y);
-          });
-          context.closePath();
-          context.fill();
-        } else {
-          drawRle(context, segmentation, color, opacity);
-        }
-        context.restore();
-        if (showBoxes) {
-          const [x, y, width, height] =
-            overlayMode === "centerline" && (record.centerline_box_xywh || record.shaft_box_xywh)
-              ? (record.centerline_box_xywh ?? record.shaft_box_xywh)!
-              : record.box_xywh;
-          context.strokeStyle = color;
-          context.lineWidth = Math.max(2, canvas.width / 600);
-          context.strokeRect(x, y, width, height);
-          context.fillStyle = color;
-          context.font = `${Math.max(13, canvas.width / 60)}px system-ui`;
-          context.fillText(
-            `${record.instance_id}${record.score == null ? "" : ` · ${record.score.toFixed(2)}`}`,
-            x,
-            Math.max(18, y - 6)
-          );
-        }
-      }
-      if (overlayMode === "centerline") {
-        drawAngleAnnotations(context, centerlines);
-      }
+      const nearby = recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts);
+      drawOverlay(context, nearby, {
+        colorByPrompt,
+        opacity,
+        overlayMode,
+        showBoxes
+      });
     },
     [
       colorByPrompt,
@@ -167,6 +123,140 @@ export function Player({ manifest }: Props) {
       return next;
     });
   }
+
+  const loadAllChunksForExport = useCallback(async () => {
+    const loaded = new Map(chunksRef.current);
+    for (const descriptor of manifest.chunks) {
+      if (loaded.has(descriptor.sequence)) continue;
+      setExportStatus(`Preparing export ${loaded.size + 1}/${manifest.chunks.length}…`);
+      const payload = await getChunk(descriptor.url);
+      loaded.set(descriptor.sequence, payload.frames);
+      chunksRef.current.set(descriptor.sequence, payload.frames);
+    }
+    return loaded;
+  }, [manifest.chunks]);
+
+  const exportCenterlineVideo = useCallback(async () => {
+    if (typeof MediaRecorder === "undefined") {
+      setExportStatus("This browser does not support video export.");
+      return;
+    }
+    if (!HTMLCanvasElement.prototype.captureStream) {
+      setExportStatus("This browser cannot record canvas video.");
+      return;
+    }
+
+    setExporting(true);
+    setExportStatus("Preparing export…");
+    let stream: MediaStream | null = null;
+    let source: VideoWithFrameCallback | null = null;
+    let frameHandle = 0;
+    let fallbackTimer = 0;
+    let drawing = true;
+
+    try {
+      const chunkMap = await loadAllChunksForExport();
+      source = document.createElement("video") as VideoWithFrameCallback;
+      source.crossOrigin = "anonymous";
+      source.muted = true;
+      source.playsInline = true;
+      source.preload = "auto";
+      source.src = manifest.video.url;
+      await waitForVideoMetadata(source);
+      source.currentTime = 0;
+
+      const width = source.videoWidth || manifest.video.width;
+      const height = source.videoHeight || manifest.video.height;
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Could not create export canvas.");
+
+      const fps = Math.max(1, Math.min(60, manifest.video.fps || 30));
+      stream = canvas.captureStream(fps);
+      const mimeType = preferredVideoMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      const parts: BlobPart[] = [];
+      const recording = new Promise<Blob>((resolve, reject) => {
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) parts.push(event.data);
+        };
+        recorder.onerror = () => reject(new Error("Video export failed."));
+        recorder.onstop = () => resolve(new Blob(parts, { type: recorder.mimeType || "video/webm" }));
+      });
+
+      let lastPercent = -1;
+      const drawExportFrame = (mediaTime: number) => {
+        if (!source) return;
+        context.clearRect(0, 0, width, height);
+        context.drawImage(source, 0, 0, width, height);
+        const timeMs = mediaTime * 1000;
+        const descriptor = descriptorForTime(manifest, timeMs);
+        const records = descriptor ? chunkMap.get(descriptor.sequence) : undefined;
+        if (records) {
+          drawOverlay(
+            context,
+            recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts),
+            {
+              colorByPrompt,
+              opacity,
+              overlayMode: "centerline",
+              showBoxes: false
+            }
+          );
+        }
+        const duration = source.duration || manifest.video.duration_ms / 1000;
+        const percent = Math.min(100, Math.floor((mediaTime / Math.max(duration, 0.001)) * 100));
+        if (percent !== lastPercent) {
+          lastPercent = percent;
+          setExportStatus(`Exporting ${percent}%…`);
+        }
+      };
+
+      drawExportFrame(0);
+      if (source.requestVideoFrameCallback) {
+        const callback = (_now: number, metadata: { mediaTime: number }) => {
+          if (!drawing) return;
+          drawExportFrame(metadata.mediaTime);
+          frameHandle = source!.requestVideoFrameCallback!(callback);
+        };
+        frameHandle = source.requestVideoFrameCallback(callback);
+      } else {
+        fallbackTimer = window.setInterval(() => {
+          if (source) drawExportFrame(source.currentTime);
+        }, 1000 / fps);
+      }
+
+      recorder.start(1000);
+      await source.play();
+      await waitForVideoEnded(source);
+      drawing = false;
+      if (frameHandle) source.cancelVideoFrameCallback?.(frameHandle);
+      if (fallbackTimer) window.clearInterval(fallbackTimer);
+      drawExportFrame(source.duration || manifest.video.duration_ms / 1000);
+      if (recorder.state !== "inactive") recorder.stop();
+      const blob = await recording;
+      downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.webm`);
+      setExportStatus("Export complete.");
+    } catch (reason) {
+      setExportStatus(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      drawing = false;
+      if (source && frameHandle) source.cancelVideoFrameCallback?.(frameHandle);
+      if (fallbackTimer) window.clearInterval(fallbackTimer);
+      stream?.getTracks().forEach((track) => track.stop());
+      setExporting(false);
+    }
+  }, [
+    colorByPrompt,
+    enabledPrompts,
+    loadAllChunksForExport,
+    manifest,
+    opacity
+  ]);
 
   return (
     <section className="viewer">
@@ -220,9 +310,134 @@ export function Player({ manifest }: Props) {
           />
           Boxes and IDs
         </label>
+        <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
+          {exporting ? "Exporting…" : "Export"}
+        </button>
+        {exportStatus && <span className="export-status">{exportStatus}</span>}
       </div>
     </section>
   );
+}
+
+function descriptorForTime(manifest: ResultManifest, timeMs: number) {
+  const descriptor = manifest.chunks.find(
+    (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
+  );
+  if (descriptor) return descriptor;
+  const last = manifest.chunks[manifest.chunks.length - 1];
+  if (last && timeMs >= last.start_ms && timeMs <= last.end_ms) return last;
+  return null;
+}
+
+function recordsForTime(
+  records: FrameMask[],
+  timeMs: number,
+  fps: number,
+  enabledPrompts: Set<string>
+) {
+  const tolerance = 500 / Math.max(fps, 1);
+  return records.filter(
+    (record) =>
+      Math.abs(record.timestamp_ms - timeMs) <= tolerance &&
+      enabledPrompts.has(record.prompt_id)
+  );
+}
+
+function drawOverlay(
+  context: CanvasRenderingContext2D,
+  records: FrameMask[],
+  options: {
+    colorByPrompt: Map<string, string>;
+    opacity: number;
+    overlayMode: OverlayMode;
+    showBoxes: boolean;
+  }
+) {
+  const centerlines: CenterlineRecord[] = [];
+  for (const record of records) {
+    const color = options.colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
+    const line = getCenterlineLine(record);
+    if (options.overlayMode === "centerline" && line) {
+      centerlines.push({ record, line, color });
+    }
+    const segmentation =
+      options.overlayMode === "centerline" &&
+      (record.centerline_segmentation || record.shaft_segmentation)
+        ? (record.centerline_segmentation ?? record.shaft_segmentation)!
+        : record.segmentation;
+    context.save();
+    context.globalAlpha = options.opacity;
+    context.fillStyle = color;
+    if (segmentation.type === "polygon") {
+      context.beginPath();
+      segmentation.points.forEach(([x, y], index) => {
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      });
+      context.closePath();
+      context.fill();
+    } else {
+      drawRle(context, segmentation, color, options.opacity);
+    }
+    context.restore();
+    if (options.showBoxes) {
+      const [x, y, width, height] =
+        options.overlayMode === "centerline" &&
+        (record.centerline_box_xywh || record.shaft_box_xywh)
+          ? (record.centerline_box_xywh ?? record.shaft_box_xywh)!
+          : record.box_xywh;
+      context.strokeStyle = color;
+      context.lineWidth = Math.max(2, context.canvas.width / 600);
+      context.strokeRect(x, y, width, height);
+      context.fillStyle = color;
+      context.font = `${Math.max(13, context.canvas.width / 60)}px system-ui`;
+      context.fillText(
+        `${record.instance_id}${record.score == null ? "" : ` · ${record.score.toFixed(2)}`}`,
+        x,
+        Math.max(18, y - 6)
+      );
+    }
+  }
+  if (options.overlayMode === "centerline") {
+    drawAngleAnnotations(context, centerlines);
+  }
+}
+
+function preferredVideoMimeType() {
+  return (
+    [
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm"
+    ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? ""
+  );
+}
+
+function waitForVideoMetadata(video: HTMLVideoElement) {
+  if (video.readyState >= 1) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    video.onloadedmetadata = () => resolve();
+    video.onerror = () => reject(new Error("Could not load video for export."));
+  });
+}
+
+function waitForVideoEnded(video: HTMLVideoElement) {
+  if (video.ended) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    video.onended = () => resolve();
+    video.onerror = () => reject(new Error("Video export playback failed."));
+  });
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function getCenterlineLine(record: FrameMask): [number, number, number, number] | null {

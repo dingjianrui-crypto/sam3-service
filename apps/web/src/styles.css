@@ -599,6 +599,15 @@ h2 {
   background: #07111a;
 }
 
+.export-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.export-status {
+  color: #8299ab;
+}
+
 .checkbox input {
   accent-color: #55d7f2;
 }
