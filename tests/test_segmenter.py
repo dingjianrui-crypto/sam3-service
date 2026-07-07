@@ -7,6 +7,7 @@ from sam3_service.errors import ServiceError
 from sam3_service.segmenter import (
     Sam3Segmenter,
     _configure_sam3_batches,
+    _fit_shaft_mask,
     _patch_sam3_init_state,
 )
 
@@ -157,6 +158,44 @@ class Sam3CompatibilityTest(unittest.TestCase):
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(segmenter.predictor.requests[-1]["type"], "close_session")
         self.assertEqual(segmenter.torch.cuda.empty_cache_calls, 1)
+
+    def test_fits_thick_shaft_mask_from_full_paddle_mask(self) -> None:
+        mask = [[False for _ in range(130)] for _ in range(80)]
+        for y in range(37, 44):
+            for x in range(10, 120):
+                mask[y][x] = True
+        for y in range(24, 57):
+            for x in range(3, 24):
+                mask[y][x] = True
+            for x in range(106, 127):
+                mask[y][x] = True
+        for y in range(5, 13):
+            for x in range(70, 82):
+                mask[y][x] = True
+
+        shaft = _fit_shaft_mask(mask)
+
+        self.assertIsNotNone(shaft)
+        assert shaft is not None
+        self.assertEqual(shaft.segmentation["type"], "rle")
+        self.assertGreaterEqual(shaft.box_xywh[2], 123)
+        self.assertLessEqual(shaft.box_xywh[2], 125)
+        self.assertLess(shaft.box_xywh[3], 20)
+
+        original_area = sum(1 for row in mask for value in row if value)
+        shaft_area = _rle_area(shaft.segmentation)
+        self.assertLess(shaft_area, original_area * 0.65)
+        self.assertGreater(shaft_area, 500)
+
+
+def _rle_area(rle: dict[str, object]) -> int:
+    area = 0
+    value = 0
+    for count in rle["counts"]:  # type: ignore[index]
+        if value == 1:
+            area += int(count)
+        value = 1 - value
+    return area
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import random
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import wraps
@@ -59,6 +60,14 @@ class FrameResult:
     box_xywh: list[float]
     score: float | None
     segmentation: dict[str, Any]
+    shaft_segmentation: dict[str, Any] | None = None
+    shaft_box_xywh: list[float] | None = None
+
+
+@dataclass(frozen=True)
+class ShaftMask:
+    segmentation: dict[str, Any]
+    box_xywh: list[float]
 
 
 class VideoSegmenter(Protocol):
@@ -125,6 +134,8 @@ class MockSegmenter:
                 box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
                 score=0.96,
                 segmentation={"type": "polygon", "points": polygon},
+                shaft_segmentation={"type": "polygon", "points": polygon},
+                shaft_box_xywh=[min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
             )
         progress(total, total)
 
@@ -270,6 +281,7 @@ class Sam3Segmenter:
                 masks = outputs.get("out_binary_masks")
                 for index, object_id in enumerate(object_ids):
                     mask = masks[index]
+                    shaft = _fit_shaft_mask(mask)
                     box = [float(value) for value in boxes[index]]
                     if box and max(abs(value) for value in box) <= 2:
                         box = [
@@ -286,6 +298,8 @@ class Sam3Segmenter:
                         box_xywh=box,
                         score=float(scores[index]) if index < len(scores) else None,
                         segmentation=_encode_uncompressed_rle(mask),
+                        shaft_segmentation=shaft.segmentation if shaft else None,
+                        shaft_box_xywh=shaft.box_xywh if shaft else None,
                     )
                 progress(min(frame_index + 1, total), total)
         except self.torch.OutOfMemoryError as exc:
@@ -327,11 +341,7 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _encode_uncompressed_rle(mask: Any) -> dict[str, Any]:
-    if hasattr(mask, "detach"):
-        mask = mask.detach().cpu()
-    if hasattr(mask, "numpy"):
-        mask = mask.numpy()
-    height, width = mask.shape[-2:]
+    mask, height, width = _coerce_2d_mask(mask)
     counts: list[int] = []
     current = 0
     run = 0
@@ -347,3 +357,225 @@ def _encode_uncompressed_rle(mask: Any) -> dict[str, Any]:
                 current = value
     counts.append(run)
     return {"type": "rle", "size": [height, width], "counts": counts}
+
+
+def _fit_shaft_mask(mask: Any) -> ShaftMask | None:
+    mask, height, width = _coerce_2d_mask(mask)
+    points = _mask_points(mask, height, width)
+    if len(points) < 8:
+        return None
+
+    line = _ransac_line(points, width, height) or _principal_line(points)
+    if line is None:
+        return None
+
+    threshold = _initial_shaft_threshold(points, width, height)
+    inliers = [point for point in points if _line_distance(point, line) <= threshold]
+    if len(inliers) >= max(8, len(points) // 20):
+        refined = _principal_line(inliers)
+        if refined is not None:
+            line = refined
+    else:
+        inliers = points
+
+    inlier_projections = sorted(_line_projection(point, line) for point in inliers)
+    if len(inlier_projections) < 2:
+        return None
+
+    # Fit the shaft direction from the long, thin inliers, but keep the output length
+    # equal to the full detected paddle extent along that direction: blade tip to blade tip.
+    paddle_projections = [_line_projection(point, line) for point in points]
+    start = min(paddle_projections)
+    end = max(paddle_projections)
+    if end - start < 2:
+        return None
+
+    center_start = _percentile(inlier_projections, 25)
+    center_end = _percentile(inlier_projections, 75)
+    center_distances = sorted(
+        _line_distance(point, line)
+        for point in points
+        if center_start <= _line_projection(point, line) <= center_end
+    )
+    if not center_distances:
+        center_distances = sorted(_line_distance(point, line) for point in inliers)
+
+    half_width = _percentile(center_distances, 90) if center_distances else threshold
+    half_width = max(2.0, half_width)
+    half_width = min(half_width, max(4.0, min(width, height) * 0.045))
+
+    rows = _line_band_mask(height, width, line, start, end, half_width)
+    box = _box_from_mask(rows)
+    if box is None:
+        return None
+    return ShaftMask(segmentation=_encode_uncompressed_rle(rows), box_xywh=box)
+
+
+def _coerce_2d_mask(mask: Any) -> tuple[Any, int, int]:
+    if hasattr(mask, "detach"):
+        mask = mask.detach().cpu()
+    if hasattr(mask, "numpy"):
+        mask = mask.numpy()
+
+    shape = getattr(mask, "shape", None)
+    if shape is not None:
+        shape_values = [int(value) for value in shape]
+        while len(shape_values) > 2:
+            mask = mask[0]
+            shape_values = shape_values[1:]
+        return mask, shape_values[-2], shape_values[-1]
+
+    height = len(mask)
+    width = len(mask[0]) if height else 0
+    return mask, height, width
+
+
+def _mask_points(mask: Any, height: int, width: int) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for y in range(height):
+        row = mask[y]
+        for x in range(width):
+            if bool(row[x]):
+                points.append((float(x), float(y)))
+    return points
+
+
+def _initial_shaft_threshold(
+    points: list[tuple[float, float]], width: int, height: int
+) -> float:
+    area_scale = math.sqrt(len(points)) * 0.08
+    frame_scale = min(width, height) * 0.025
+    return max(3.0, min(16.0, max(area_scale, frame_scale)))
+
+
+def _ransac_line(
+    points: list[tuple[float, float]], width: int, height: int
+) -> tuple[float, float, float, float] | None:
+    sample = _subsample(points, 3000)
+    if len(sample) < 2:
+        return None
+
+    threshold = _initial_shaft_threshold(points, width, height)
+    rng = random.Random(17)
+    best_line: tuple[float, float, float, float] | None = None
+    best_score = -1.0
+    iterations = min(160, max(32, len(sample) // 6))
+
+    for _ in range(iterations):
+        first, second = rng.sample(sample, 2)
+        line = _line_from_points(first, second)
+        if line is None:
+            continue
+        projections: list[float] = []
+        for point in sample:
+            if _line_distance(point, line) <= threshold:
+                projections.append(_line_projection(point, line))
+        if len(projections) < 2:
+            continue
+        projections.sort()
+        span = _percentile(projections, 95) - _percentile(projections, 5)
+        score = len(projections) * max(span, 1.0)
+        if score > best_score:
+            best_score = score
+            best_line = line
+
+    return best_line
+
+
+def _subsample(points: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
+    if len(points) <= limit:
+        return points
+    step = math.ceil(len(points) / limit)
+    return points[::step]
+
+
+def _principal_line(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if len(points) < 2:
+        return None
+    center_x = sum(point[0] for point in points) / len(points)
+    center_y = sum(point[1] for point in points) / len(points)
+    xx = sum((point[0] - center_x) ** 2 for point in points)
+    yy = sum((point[1] - center_y) ** 2 for point in points)
+    xy = sum((point[0] - center_x) * (point[1] - center_y) for point in points)
+    if xx == 0 and yy == 0:
+        return None
+    angle = 0.5 * math.atan2(2 * xy, xx - yy)
+    return center_x, center_y, math.cos(angle), math.sin(angle)
+
+
+def _line_from_points(
+    first: tuple[float, float], second: tuple[float, float]
+) -> tuple[float, float, float, float] | None:
+    dx = second[0] - first[0]
+    dy = second[1] - first[1]
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return None
+    return first[0], first[1], dx / length, dy / length
+
+
+def _line_projection(
+    point: tuple[float, float], line: tuple[float, float, float, float]
+) -> float:
+    center_x, center_y, unit_x, unit_y = line
+    return (point[0] - center_x) * unit_x + (point[1] - center_y) * unit_y
+
+
+def _line_distance(
+    point: tuple[float, float], line: tuple[float, float, float, float]
+) -> float:
+    center_x, center_y, unit_x, unit_y = line
+    return abs((point[0] - center_x) * unit_y - (point[1] - center_y) * unit_x)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        raise ValueError("cannot compute percentile of empty values")
+    if len(values) == 1:
+        return values[0]
+    position = (len(values) - 1) * percentile / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[int(position)]
+    weight = position - lower
+    return values[lower] * (1 - weight) + values[upper] * weight
+
+
+def _line_band_mask(
+    height: int,
+    width: int,
+    line: tuple[float, float, float, float],
+    start: float,
+    end: float,
+    half_width: float,
+) -> list[list[bool]]:
+    center_x, center_y, unit_x, unit_y = line
+    rows: list[list[bool]] = []
+    half_width_squared = half_width * half_width
+    for y in range(height):
+        row: list[bool] = []
+        for x in range(width):
+            projection = (x - center_x) * unit_x + (y - center_y) * unit_y
+            distance = (x - center_x) * unit_y - (y - center_y) * unit_x
+            row.append(start <= projection <= end and distance * distance <= half_width_squared)
+        rows.append(row)
+    return rows
+
+
+def _box_from_mask(mask: list[list[bool]]) -> list[float] | None:
+    min_x: int | None = None
+    min_y: int | None = None
+    max_x: int | None = None
+    max_y: int | None = None
+    for y, row in enumerate(mask):
+        for x, value in enumerate(row):
+            if not value:
+                continue
+            min_x = x if min_x is None else min(min_x, x)
+            min_y = y if min_y is None else min(min_y, y)
+            max_x = x if max_x is None else max(max_x, x)
+            max_y = y if max_y is None else max(max_y, y)
+    if min_x is None or min_y is None or max_x is None or max_y is None:
+        return None
+    return [float(min_x), float(min_y), float(max_x - min_x + 1), float(max_y - min_y + 1)]

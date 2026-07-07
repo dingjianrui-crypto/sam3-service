@@ -591,6 +591,14 @@ h2 {
   color: #8299ab;
 }
 
+.viewer-controls select {
+  padding: 6px 8px;
+  color: #dce8f8;
+  border: 1px solid #294052;
+  border-radius: 7px;
+  background: #07111a;
+}
+
 .checkbox input {
   accent-color: #55d7f2;
 }

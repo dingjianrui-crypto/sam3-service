@@ -5,6 +5,8 @@ type Props = {
   manifest: ResultManifest;
 };
 
+type OverlayMode = "paddle" | "shaft";
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
     callback: (now: number, metadata: { mediaTime: number }) => void
@@ -19,6 +21,7 @@ export function Player({ manifest }: Props) {
   const loadingRef = useRef(new Set<number>());
   const [opacity, setOpacity] = useState(0.48);
   const [showBoxes, setShowBoxes] = useState(true);
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>("paddle");
   const [enabledPrompts, setEnabledPrompts] = useState(
     new Set(manifest.prompts.map((prompt) => prompt.id))
   );
@@ -75,23 +78,30 @@ export function Player({ manifest }: Props) {
       );
       for (const record of nearby) {
         const color = colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
+        const segmentation =
+          overlayMode === "shaft" && record.shaft_segmentation
+            ? record.shaft_segmentation
+            : record.segmentation;
         context.save();
         context.globalAlpha = opacity;
         context.fillStyle = color;
-        if (record.segmentation.type === "polygon") {
+        if (segmentation.type === "polygon") {
           context.beginPath();
-          record.segmentation.points.forEach(([x, y], index) => {
+          segmentation.points.forEach(([x, y], index) => {
             if (index === 0) context.moveTo(x, y);
             else context.lineTo(x, y);
           });
           context.closePath();
           context.fill();
         } else {
-          drawRle(context, record.segmentation, color, opacity);
+          drawRle(context, segmentation, color, opacity);
         }
         context.restore();
         if (showBoxes) {
-          const [x, y, width, height] = record.box_xywh;
+          const [x, y, width, height] =
+            overlayMode === "shaft" && record.shaft_box_xywh
+              ? record.shaft_box_xywh
+              : record.box_xywh;
           context.strokeStyle = color;
           context.lineWidth = Math.max(2, canvas.width / 600);
           context.strokeRect(x, y, width, height);
@@ -112,6 +122,7 @@ export function Player({ manifest }: Props) {
       manifest.chunks,
       manifest.video.fps,
       opacity,
+      overlayMode,
       showBoxes
     ]
   );
@@ -175,6 +186,16 @@ export function Player({ manifest }: Props) {
             value={opacity}
             onChange={(event) => setOpacity(Number(event.target.value))}
           />
+        </label>
+        <label>
+          Overlay target
+          <select
+            value={overlayMode}
+            onChange={(event) => setOverlayMode(event.target.value as OverlayMode)}
+          >
+            <option value="paddle">Paddle mask</option>
+            <option value="shaft">Shaft centerline</option>
+          </select>
         </label>
         <label className="checkbox">
           <input
