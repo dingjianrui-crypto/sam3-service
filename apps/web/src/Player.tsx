@@ -321,7 +321,7 @@ function drawAngleAnnotations(
   centerlines: CenterlineRecord[],
   lastPaddleDegree: number | null
 ): number | null {
-  let visibleDegree = lastPaddleDegree;
+  let currentAnnotation: ReturnType<typeof angleAnnotation> = null;
   for (let firstIndex = 0; firstIndex < centerlines.length; firstIndex += 1) {
     for (let secondIndex = firstIndex + 1; secondIndex < centerlines.length; secondIndex += 1) {
       const first = centerlines[firstIndex];
@@ -329,9 +329,14 @@ function drawAngleAnnotations(
       if (first.record.prompt_id === second.record.prompt_id) continue;
       const annotation = angleAnnotation(first.line, second.line);
       if (!annotation) continue;
-      drawAngleAnnotation(context, annotation);
-      visibleDegree = annotation.degrees;
+      currentAnnotation = annotation;
+      break;
     }
+    if (currentAnnotation) break;
+  }
+  const visibleDegree = currentAnnotation?.degrees ?? lastPaddleDegree;
+  if (currentAnnotation) {
+    drawAngleAnnotation(context, currentAnnotation, currentAnnotation.degrees);
   }
   if (visibleDegree != null) {
     drawTopDegreeLabel(context, visibleDegree);
@@ -410,7 +415,8 @@ function drawAngleAnnotation(
     startAngle: number;
     endAngle: number;
     degrees: number;
-  }
+  },
+  displayedDegrees: number = annotation.degrees
 ) {
   const radius = Math.max(24, Math.min(context.canvas.width, context.canvas.height) * 0.07);
   const counterclockwise = annotation.endAngle < annotation.startAngle;
@@ -433,7 +439,7 @@ function drawAngleAnnotation(
   const midAngle = annotation.startAngle + normalizeAngle(annotation.endAngle - annotation.startAngle) / 2;
   const labelX = annotation.x + Math.cos(midAngle) * (radius + 18);
   const labelY = annotation.y + Math.sin(midAngle) * (radius + 18);
-  const label = `${Math.round(annotation.degrees)}°`;
+  const label = `${Math.round(displayedDegrees)}°`;
   context.font = `${Math.max(14, context.canvas.width / 55)}px ${OVERLAY_FONT_FAMILY}`;
   context.textAlign = "center";
   context.textBaseline = "middle";

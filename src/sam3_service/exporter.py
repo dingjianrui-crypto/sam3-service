@@ -285,6 +285,7 @@ def _draw_frame_overlay(
         centerlines.append((record, line, color))
         _draw_line(image, width, height, line, color, max(3, round(min(width, height) * 0.006)))
 
+    current_annotation: dict[str, float] | None = None
     for first_index in range(len(centerlines)):
         for second_index in range(first_index + 1, len(centerlines)):
             first_record, first_line, _first_color = centerlines[first_index]
@@ -293,8 +294,13 @@ def _draw_frame_overlay(
                 continue
             annotation = _angle_annotation(first_line, second_line)
             if annotation is not None:
-                _draw_angle_annotation(image, width, height, annotation)
-                visible_degree = round(annotation["degrees"])
+                current_annotation = annotation
+                break
+        if current_annotation is not None:
+            break
+    if current_annotation is not None:
+        visible_degree = round(current_annotation["degrees"])
+        _draw_angle_annotation(image, width, height, current_annotation, visible_degree)
     if visible_degree is not None and draw_top_label:
         _draw_top_degree_label(image, width, height, visible_degree)
     return visible_degree
@@ -371,6 +377,7 @@ def _draw_angle_annotation(
     width: int,
     height: int,
     annotation: dict[str, float],
+    displayed_degree: int | None = None,
 ) -> None:
     radius = max(24, min(width, height) * 0.07)
     start = annotation["start_angle"]
@@ -385,7 +392,7 @@ def _draw_angle_annotation(
         _draw_circle(image, width, height, x, y, 2.2, yellow)
 
     mid = start + delta / 2
-    label = f"{round(annotation['degrees'])}°"
+    label = f"{round(annotation['degrees'] if displayed_degree is None else displayed_degree)}°"
     label_x = annotation["x"] + math.cos(mid) * (radius + 18)
     label_y = annotation["y"] + math.sin(mid) * (radius + 18)
     _draw_small_degree_label(image, width, height, label_x, label_y, label)
