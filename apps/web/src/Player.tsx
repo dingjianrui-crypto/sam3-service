@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FrameMask, getChunk, ResultManifest } from "./api";
+import { exportJobVideo, FrameMask, getChunk, ResultManifest } from "./api";
 
 type Props = {
   manifest: ResultManifest;
@@ -124,149 +124,19 @@ export function Player({ manifest }: Props) {
     });
   }
 
-  const loadAllChunksForExport = useCallback(async () => {
-    const loaded = new Map(chunksRef.current);
-    for (const descriptor of manifest.chunks) {
-      if (loaded.has(descriptor.sequence)) continue;
-      setExportStatus(`Preparing export ${loaded.size + 1}/${manifest.chunks.length}…`);
-      const payload = await getChunk(descriptor.url);
-      loaded.set(descriptor.sequence, payload.frames);
-      chunksRef.current.set(descriptor.sequence, payload.frames);
-    }
-    return loaded;
-  }, [manifest.chunks]);
-
   const exportCenterlineVideo = useCallback(async () => {
-    if (typeof MediaRecorder === "undefined") {
-      setExportStatus("This browser does not support video export.");
-      return;
-    }
-    if (!HTMLCanvasElement.prototype.captureStream) {
-      setExportStatus("This browser cannot record canvas video.");
-      return;
-    }
-
     setExporting(true);
-    setExportStatus("Preparing export…");
-    let stream: MediaStream | null = null;
-    let source: VideoWithFrameCallback | null = null;
-    let frameHandle = 0;
-    let fallbackTimer = 0;
-    let drawing = true;
-
+    setExportStatus("Rendering MP4 on server…");
     try {
-      const chunkMap = await loadAllChunksForExport();
-      source = document.createElement("video") as VideoWithFrameCallback;
-      source.crossOrigin = "anonymous";
-      source.muted = true;
-      source.playsInline = true;
-      source.preload = "auto";
-      source.src = manifest.video.url;
-      source.load();
-      await waitForVideoMetadata(source);
-      source.currentTime = 0;
-      await waitForVideoFrameReady(source);
-
-      const width = source.videoWidth || manifest.video.width;
-      const height = source.videoHeight || manifest.video.height;
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("Could not create export canvas.");
-
-      const fps = Math.max(1, Math.min(60, manifest.video.fps || 30));
-      stream = canvas.captureStream(fps);
-      const canvasTrack = stream.getVideoTracks()[0] as
-        | (MediaStreamTrack & { requestFrame?: () => void })
-        | undefined;
-      const mimeType = preferredVideoMimeType();
-      const recorderOptions: MediaRecorderOptions = {
-        videoBitsPerSecond: exportVideoBitsPerSecond(width, height, fps)
-      };
-      if (mimeType) recorderOptions.mimeType = mimeType;
-      const recorder = new MediaRecorder(stream, recorderOptions);
-      const parts: BlobPart[] = [];
-      const recording = new Promise<Blob>((resolve, reject) => {
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0) parts.push(event.data);
-        };
-        recorder.onerror = () => reject(new Error("Video export failed."));
-        recorder.onstop = () => resolve(new Blob(parts, { type: recorder.mimeType || "video/webm" }));
-      });
-
-      let lastPercent = -1;
-      const drawExportFrame = (mediaTime: number) => {
-        if (!source) return;
-        context.clearRect(0, 0, width, height);
-        context.drawImage(source, 0, 0, width, height);
-        const timeMs = mediaTime * 1000;
-        const descriptor = descriptorForTime(manifest, timeMs);
-        const records = descriptor ? chunkMap.get(descriptor.sequence) : undefined;
-        if (records) {
-          drawOverlay(
-            context,
-            recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts),
-            {
-              colorByPrompt,
-              opacity,
-              overlayMode: "centerline",
-              showBoxes: false
-            }
-          );
-        }
-        const duration = source.duration || manifest.video.duration_ms / 1000;
-        const percent = Math.min(100, Math.floor((mediaTime / Math.max(duration, 0.001)) * 100));
-        if (percent !== lastPercent) {
-          lastPercent = percent;
-          setExportStatus(`Exporting ${percent}%…`);
-        }
-        canvasTrack?.requestFrame?.();
-      };
-
-      drawExportFrame(0);
-      canvasTrack?.requestFrame?.();
-      if (source.requestVideoFrameCallback) {
-        const callback = (_now: number, metadata: { mediaTime: number }) => {
-          if (!drawing) return;
-          drawExportFrame(metadata.mediaTime);
-          frameHandle = source!.requestVideoFrameCallback!(callback);
-        };
-        frameHandle = source.requestVideoFrameCallback(callback);
-      } else {
-        fallbackTimer = window.setInterval(() => {
-          if (source) drawExportFrame(source.currentTime);
-        }, 1000 / fps);
-      }
-
-      recorder.start(1000);
-      await source.play();
-      await waitForVideoEnded(source);
-      drawing = false;
-      if (frameHandle) source.cancelVideoFrameCallback?.(frameHandle);
-      if (fallbackTimer) window.clearInterval(fallbackTimer);
-      drawExportFrame(source.duration || manifest.video.duration_ms / 1000);
-      if (recorder.state !== "inactive") recorder.stop();
-      const blob = await recording;
-      const extension = videoExtensionForMimeType(blob.type || recorder.mimeType);
-      downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.${extension}`);
+      const blob = await exportJobVideo(manifest.job_id);
+      downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
       setExportStatus("Export complete.");
     } catch (reason) {
       setExportStatus(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      drawing = false;
-      if (source && frameHandle) source.cancelVideoFrameCallback?.(frameHandle);
-      if (fallbackTimer) window.clearInterval(fallbackTimer);
-      stream?.getTracks().forEach((track) => track.stop());
       setExporting(false);
     }
-  }, [
-    colorByPrompt,
-    enabledPrompts,
-    loadAllChunksForExport,
-    manifest,
-    opacity
-  ]);
+  }, [manifest.job_id]);
 
   return (
     <section className="viewer">
@@ -327,16 +197,6 @@ export function Player({ manifest }: Props) {
       </div>
     </section>
   );
-}
-
-function descriptorForTime(manifest: ResultManifest, timeMs: number) {
-  const descriptor = manifest.chunks.find(
-    (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
-  );
-  if (descriptor) return descriptor;
-  const last = manifest.chunks[manifest.chunks.length - 1];
-  if (last && timeMs >= last.start_ms && timeMs <= last.end_ms) return last;
-  return null;
 }
 
 function recordsForTime(
@@ -411,66 +271,6 @@ function drawOverlay(
   if (options.overlayMode === "centerline") {
     drawAngleAnnotations(context, centerlines);
   }
-}
-
-function preferredVideoMimeType() {
-  return (
-    [
-      "video/mp4;codecs=avc1.42E01E",
-      "video/mp4",
-      "video/webm;codecs=vp9",
-      "video/webm;codecs=vp8",
-      "video/webm"
-    ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? ""
-  );
-}
-
-function exportVideoBitsPerSecond(width: number, height: number, fps: number) {
-  const visuallyHighQuality = width * height * fps * 0.28;
-  return Math.round(clamp(visuallyHighQuality, 8_000_000, 120_000_000));
-}
-
-function videoExtensionForMimeType(mimeType: string) {
-  return mimeType.includes("mp4") ? "mp4" : "webm";
-}
-
-function waitForVideoMetadata(video: HTMLVideoElement) {
-  if (video.readyState >= 1) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    video.onloadedmetadata = () => resolve();
-    video.onerror = () => reject(new Error("Could not load video for export."));
-  });
-}
-
-function waitForVideoFrameReady(video: VideoWithFrameCallback) {
-  if (video.readyState >= 2) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      video.onloadeddata = null;
-      video.oncanplay = null;
-      video.onerror = null;
-    };
-    video.onloadeddata = () => {
-      cleanup();
-      resolve();
-    };
-    video.oncanplay = () => {
-      cleanup();
-      resolve();
-    };
-    video.onerror = () => {
-      cleanup();
-      reject(new Error("Could not decode the first video frame for export."));
-    };
-  });
-}
-
-function waitForVideoEnded(video: HTMLVideoElement) {
-  if (video.ended) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    video.onended = () => resolve();
-    video.onerror = () => reject(new Error("Video export playback failed."));
-  });
 }
 
 function downloadBlob(blob: Blob, filename: string) {

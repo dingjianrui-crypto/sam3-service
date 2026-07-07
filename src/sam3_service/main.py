@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from .config import Settings
 from .db import Database, expires_at, utc_now
 from .errors import ServiceError
+from .exporter import export_centerline_video
 from .media import probe_video
 from .schemas import JobCreate, VideoCreate
 from .storage import LocalStorage, sha256_file
@@ -396,6 +397,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ServiceError("NOT_FOUND", "Result chunk was not found.", status_code=404)
         return FileResponse(row["path"], media_type="application/json")
 
+    @app.get("/api/v1/jobs/{job_id}/export")
+    def export_job(job_id: str, request: Request) -> FileResponse:
+        database: Database = request.app.state.database
+        storage: LocalStorage = request.app.state.storage
+        job = database.job_detail(job_id)
+        if not job:
+            raise ServiceError("NOT_FOUND", "Job was not found.", status_code=404)
+        if job["state"] != "completed":
+            raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
+        video = _video_or_404(database, job["video_id"])
+        video_path = Path(video["normalized_path"] or video["source_path"])
+        manifest_path = storage.manifest_path(job_id)
+        if not manifest_path.is_file():
+            raise ServiceError("NOT_FOUND", "Result manifest is unavailable.", status_code=404)
+        rows = database.fetch_all(
+            "SELECT path FROM result_chunks WHERE job_id = ? ORDER BY sequence", (job_id,)
+        )
+        chunk_paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
+        output_path = storage.export_path(job_id)
+        if not output_path.is_file():
+            export_centerline_video(
+                video_path=video_path,
+                output_path=output_path,
+                temporary_dir=storage.export_tmp_dir(job_id),
+                manifest=json.loads(manifest_path.read_text()),
+                chunk_paths=chunk_paths,
+            )
+        return FileResponse(
+            output_path,
+            media_type="video/mp4",
+            filename=f"sam3-{job_id}-centerlines.mp4",
+        )
+
     @app.delete("/api/v1/jobs/{job_id}", status_code=204)
     def delete_job(job_id: str, request: Request) -> None:
         database: Database = request.app.state.database
@@ -509,4 +543,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-

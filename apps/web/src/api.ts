@@ -171,3 +171,12 @@ export function retryJob(jobId: string): Promise<Job> {
 export function deleteJob(jobId: string): Promise<void> {
   return request(`/api/v1/jobs/${jobId}`, { method: "DELETE" });
 }
+
+export async function exportJobVideo(jobId: string): Promise<Blob> {
+  const response = await fetch(`/api/v1/jobs/${jobId}/export`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
+  }
+  return response.blob();
+}

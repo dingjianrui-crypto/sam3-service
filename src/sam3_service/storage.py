@@ -51,6 +51,14 @@ class LocalStorage:
     def manifest_path(self, job_id: str) -> Path:
         return self._safe(self.job_dir(job_id) / "manifest.json")
 
+    def export_path(self, job_id: str) -> Path:
+        return self._safe(self.job_dir(job_id) / "exports" / "centerlines.mp4")
+
+    def export_tmp_dir(self, job_id: str) -> Path:
+        path = self._safe(self.job_dir(job_id) / "exports" / "tmp")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def assemble(self, video_id: str, part_paths: list[Path]) -> tuple[Path, int, str]:
         destination = self.source_path(video_id)
         temporary = destination.with_suffix(".assembling")
@@ -84,4 +92,3 @@ def sha256_file(path: Path) -> str:
         while block := source.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
-
