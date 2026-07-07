@@ -173,7 +173,9 @@ export function deleteJob(jobId: string): Promise<void> {
 }
 
 export async function exportJobVideo(jobId: string): Promise<Blob> {
-  const response = await fetch(`/api/v1/jobs/${jobId}/export`);
+  const response = await fetch(`/api/v1/jobs/${jobId}/export?t=${Date.now()}`, {
+    cache: "no-store"
+  });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);

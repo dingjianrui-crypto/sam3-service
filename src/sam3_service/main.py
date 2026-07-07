@@ -427,6 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             output_path,
             media_type="video/mp4",
             filename=f"sam3-{job_id}-centerlines.mp4",
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.delete("/api/v1/jobs/{job_id}", status_code=204)

@@ -28,6 +28,7 @@ export function Player({ manifest }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
+  const lastPaddleDegreeRef = useRef<number | null>(null);
   const [opacity, setOpacity] = useState(0.48);
   const [showBoxes, setShowBoxes] = useState(true);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("mask");
@@ -78,16 +79,30 @@ export function Player({ manifest }: Props) {
       const descriptor = manifest.chunks.find(
         (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
       );
-      if (!descriptor) return;
+      if (!descriptor) {
+        if (overlayMode === "centerline" && lastPaddleDegreeRef.current != null) {
+          drawTopDegreeLabel(context, lastPaddleDegreeRef.current);
+        }
+        return;
+      }
       const records = chunksRef.current.get(descriptor.sequence);
-      if (!records) return;
+      if (!records) {
+        if (overlayMode === "centerline" && lastPaddleDegreeRef.current != null) {
+          drawTopDegreeLabel(context, lastPaddleDegreeRef.current);
+        }
+        return;
+      }
       const nearby = recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts);
-      drawOverlay(context, nearby, {
+      const visibleDegree = drawOverlay(context, nearby, {
         colorByPrompt,
+        lastPaddleDegree: lastPaddleDegreeRef.current,
         opacity,
         overlayMode,
         showBoxes
       });
+      if (visibleDegree != null) {
+        lastPaddleDegreeRef.current = visibleDegree;
+      }
     },
     [
       colorByPrompt,
@@ -100,6 +115,10 @@ export function Player({ manifest }: Props) {
       showBoxes
     ]
   );
+
+  useEffect(() => {
+    lastPaddleDegreeRef.current = null;
+  }, [manifest.job_id]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -221,11 +240,12 @@ function drawOverlay(
   records: FrameMask[],
   options: {
     colorByPrompt: Map<string, string>;
+    lastPaddleDegree: number | null;
     opacity: number;
     overlayMode: OverlayMode;
     showBoxes: boolean;
   }
-) {
+): number | null {
   const centerlines: CenterlineRecord[] = [];
   for (const record of records) {
     const color = options.colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
@@ -272,8 +292,9 @@ function drawOverlay(
     }
   }
   if (options.overlayMode === "centerline") {
-    drawAngleAnnotations(context, centerlines);
+    return drawAngleAnnotations(context, centerlines, options.lastPaddleDegree);
   }
+  return null;
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -297,9 +318,10 @@ function getCenterlineLine(record: FrameMask): [number, number, number, number] 
 
 function drawAngleAnnotations(
   context: CanvasRenderingContext2D,
-  centerlines: CenterlineRecord[]
-) {
-  let visibleDegree: number | null = null;
+  centerlines: CenterlineRecord[],
+  lastPaddleDegree: number | null
+): number | null {
+  let visibleDegree = lastPaddleDegree;
   for (let firstIndex = 0; firstIndex < centerlines.length; firstIndex += 1) {
     for (let secondIndex = firstIndex + 1; secondIndex < centerlines.length; secondIndex += 1) {
       const first = centerlines[firstIndex];
@@ -308,12 +330,13 @@ function drawAngleAnnotations(
       const annotation = angleAnnotation(first.line, second.line);
       if (!annotation) continue;
       drawAngleAnnotation(context, annotation);
-      visibleDegree ??= annotation.degrees;
+      visibleDegree = annotation.degrees;
     }
   }
   if (visibleDegree != null) {
     drawTopDegreeLabel(context, visibleDegree);
   }
+  return visibleDegree;
 }
 
 function angleAnnotation(
