@@ -431,7 +431,7 @@ function drawTopDegreeLabel(context: CanvasRenderingContext2D, degrees: number) 
     fontSize *= 0.9;
   } while (true);
   const labelX = context.canvas.width / 2;
-  const labelY = Math.max(fontSize * 0.95, context.canvas.height * 0.12);
+  const labelY = Math.max(fontSize * 1.25, context.canvas.height * 0.18);
   context.globalAlpha = 1;
   context.textAlign = "center";
   context.textBaseline = "middle";
@@ -446,6 +446,9 @@ function drawTopDegreeLabel(context: CanvasRenderingContext2D, degrees: number) 
     fontSize + paddingY * 2
   );
   context.fillStyle = "#fff2a8";
+  context.lineWidth = Math.max(2, fontSize * 0.045);
+  context.strokeStyle = "rgba(2, 5, 9, 0.95)";
+  context.strokeText(label, labelX, labelY);
   context.fillText(label, labelX, labelY);
   context.restore();
 }

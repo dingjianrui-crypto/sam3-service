@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
 import zlib
@@ -60,6 +61,8 @@ def export_centerline_video(
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
+    use_subtitle_top_label = _ffmpeg_supports_filter("subtitles")
+    top_degrees: list[int | None] = []
     carried_degree: int | None = None
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
@@ -69,12 +72,25 @@ def export_centerline_video(
         )
         scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
         carried_degree = _draw_frame_overlay(
-            image, width, height, scaled_records, colors, fallback_degree=carried_degree
+            image,
+            width,
+            height,
+            scaled_records,
+            colors,
+            fallback_degree=carried_degree,
+            draw_top_label=not use_subtitle_top_label,
         )
+        top_degrees.append(carried_degree)
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
     filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
-    filter_complex += ";[ov]null[v]"
+    subtitle_path = temporary_dir / "degree-labels.ass"
+    if use_subtitle_top_label and _write_degree_subtitles(
+        subtitle_path, top_degrees, width, height, fps
+    ):
+        filter_complex += f";[ov]subtitles={_ffmpeg_filter_path(subtitle_path)}[v]"
+    else:
+        filter_complex += ";[ov]null[v]"
 
     command = [
         "ffmpeg",
@@ -136,6 +152,83 @@ def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[st
     return frames
 
 
+def _ffmpeg_supports_filter(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+    return any(line.split()[1:2] == [name] for line in result.stdout.splitlines())
+
+
+def _write_degree_subtitles(
+    path: Path,
+    degrees: list[int | None],
+    width: int,
+    height: int,
+    fps: float,
+) -> bool:
+    intervals: list[tuple[int, int, int]] = []
+    start_index: int | None = None
+    active_degree: int | None = None
+    for index, degree in enumerate(degrees + [None]):
+        if degree == active_degree:
+            continue
+        if active_degree is not None and start_index is not None:
+            intervals.append((start_index, index, active_degree))
+        start_index = index if degree is not None else None
+        active_degree = degree
+    if not intervals:
+        return False
+
+    font_size = max(24, round(min(height * 0.07, width * 0.075)))
+    margin_v = max(round(height * 0.14), font_size * 2)
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TopDegree, Arial,{font_size},&H00A8F2FF,&H00FFFFFF,&H00090502,&H99090502,1,0,0,0,100,100,0,0,4,2,0,8,24,24,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = [header]
+    for start_index, end_index, degree in intervals:
+        start = _ass_time(start_index / fps)
+        end = _ass_time(end_index / fps)
+        text = _ass_escape(f"Degree/角度：{degree}")
+        lines.append(f"Dialogue: 0,{start},{end},TopDegree,,0,0,0,,{text}\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    return True
+
+
+def _ass_time(seconds: float) -> str:
+    centiseconds = max(0, round(seconds * 100))
+    hours, remainder = divmod(centiseconds, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    whole_seconds, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
+
+
+def _ass_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+    value = str(path)
+    value = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{value}'"
+
+
 def _records_for_timestamp(
     frames: dict[int, list[dict[str, Any]]],
     timestamps: list[int],
@@ -180,6 +273,7 @@ def _draw_frame_overlay(
     colors: dict[str, Color],
     *,
     fallback_degree: int | None = None,
+    draw_top_label: bool = True,
 ) -> int | None:
     centerlines: list[tuple[dict[str, Any], Line, Color]] = []
     visible_degree: int | None = fallback_degree
@@ -201,7 +295,7 @@ def _draw_frame_overlay(
             if annotation is not None:
                 _draw_angle_annotation(image, width, height, annotation)
                 visible_degree = round(annotation["degrees"])
-    if visible_degree is not None:
+    if visible_degree is not None and draw_top_label:
         _draw_top_degree_label(image, width, height, visible_degree)
     return visible_degree
 
@@ -303,18 +397,110 @@ def _draw_top_degree_label(
     height: int,
     degree: int,
 ) -> None:
+    if _draw_top_degree_label_with_pillow(image, width, height, degree):
+        return
+    _draw_top_degree_label_bitmap(image, width, height, degree)
+
+
+def _draw_top_degree_label_with_pillow(
+    image: bytearray,
+    width: int,
+    height: int,
+    degree: int,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+
+    font_path = _find_export_font()
+    if font_path is None:
+        return False
+
+    text = f"Degree/角度：{degree}"
+    font_size = max(24, round(min(height * 0.07, width * 0.075)))
+    try:
+        font = ImageFont.truetype(str(font_path), font_size)
+    except OSError:
+        return False
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for _attempt in range(8):
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=max(1, round(font_size * 0.05)))
+        text_width = bbox[2] - bbox[0]
+        if text_width <= width * 0.86 or font_size <= 18:
+            break
+        font_size = round(font_size * 0.9)
+        font = ImageFont.truetype(str(font_path), font_size)
+
+    stroke_width = max(1, round(font_size * 0.05))
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    padding_x = round(font_size * 0.42)
+    padding_y = round(font_size * 0.25)
+    left = round(width / 2 - text_width / 2)
+    top = round(max(height * 0.15, font_size * 1.8))
+    box = (
+        left - padding_x,
+        top - padding_y,
+        left + text_width + padding_x,
+        top + text_height + padding_y,
+    )
+    radius = max(4, round(font_size * 0.16))
+    draw.rounded_rectangle(box, radius=radius, fill=(2, 5, 9, 190))
+    draw.text(
+        (left - bbox[0], top - bbox[1]),
+        text,
+        font=font,
+        fill=(255, 242, 168, 255),
+        stroke_width=stroke_width,
+        stroke_fill=(2, 5, 9, 255),
+    )
+    _blend_overlay(image, width, overlay.tobytes())
+    return True
+
+
+def _find_export_font() -> Path | None:
+    configured = os.getenv("SAM3_EXPORT_FONT_PATH")
+    candidates = [
+        Path(configured) if configured else None,
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        Path("/System/Library/Fonts/STHeiti Medium.ttc"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/Library/Fonts/Arial Unicode.ttf"),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return candidate
+    return None
+
+
+def _draw_top_degree_label_bitmap(
+    image: bytearray,
+    width: int,
+    height: int,
+    degree: int,
+) -> None:
     text = f"Degree/角度：{degree}"
     glyphs = [_glyph(character) for character in text]
     unit_width = sum(len(glyph[0]) for glyph in glyphs) + max(0, len(glyphs) - 1) * 0.35
-    desired_scale = max(12, round(min(width, height) / 220) * 4)
+    glyph_height = max(len(glyph) for glyph in glyphs)
+    desired_scale = max(2, round(min(height * 0.08, width * 0.12) / glyph_height))
     scale = max(2, min(desired_scale, math.floor(width * 0.84 / max(unit_width, 1))))
-    gap = max(1, round(scale * 0.35))
+    gap = max(1, round(scale * 0.75))
     text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * (len(glyphs) - 1)
     text_height = max(len(glyph) for glyph in glyphs) * scale
     padding_x = round(scale * 1.4)
     padding_y = round(scale * 0.9)
     left = round(width / 2 - text_width / 2)
-    top = round(max(height * 0.06, scale * 1.2))
+    top = round(max(height * 0.16, scale * 2.0))
     _fill_rect(
         image,
         width,
@@ -327,7 +513,8 @@ def _draw_top_degree_label(
     )
     x = left
     for glyph in glyphs:
-        _draw_bitmap(image, width, height, x, top, glyph, scale, (255, 242, 168, 255))
+        glyph_top = top + (text_height - len(glyph) * scale) // 2
+        _draw_bitmap(image, width, height, x, glyph_top, glyph, scale, (255, 242, 168, 255))
         x += len(glyph[0]) * scale + gap
 
 
@@ -429,9 +616,57 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "r": ("00000", "10110", "11001", "10000", "10000", "10000", "10000"),
     "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
     "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),
-    "角": ("0011110", "0100010", "1111111", "0101010", "0101010", "0111110", "0100010"),
-    "度": ("0011110", "0100000", "1111110", "0101000", "0111100", "0101000", "1010110"),
-    "：": ("0", "1", "1", "0", "1", "1", "0"),
+    "角": (
+        "000111111110000",
+        "001000000010000",
+        "010000000010000",
+        "010111111110000",
+        "010100010010000",
+        "010100010010000",
+        "011111111110000",
+        "010100010010000",
+        "010100010010000",
+        "010111111110000",
+        "010100010010000",
+        "010100010010000",
+        "010000000010000",
+        "010000001010000",
+        "010000000100000",
+    ),
+    "度": (
+        "000111111111000",
+        "000001000000000",
+        "011111111111110",
+        "010000000000000",
+        "010011111110000",
+        "010010000010000",
+        "010010000010000",
+        "010011111110000",
+        "010001001000000",
+        "010001001000000",
+        "010000110000000",
+        "010001111000000",
+        "010010001100000",
+        "010100000110000",
+        "011000000011000",
+    ),
+    "：": (
+        "000",
+        "010",
+        "010",
+        "000",
+        "000",
+        "000",
+        "000",
+        "000",
+        "010",
+        "010",
+        "000",
+        "000",
+        "000",
+        "000",
+        "000",
+    ),
     " ": ("000", "000", "000", "000", "000", "000", "000"),
 }
 
@@ -494,6 +729,21 @@ def _blend_pixel(image: bytearray, width: int, x: int, y: int, color: Color) -> 
     image[index + 1] = round(color[1] * source_alpha + image[index + 1] * inverse)
     image[index + 2] = round(color[2] * source_alpha + image[index + 2] * inverse)
     image[index + 3] = min(255, round(color[3] + image[index + 3] * inverse))
+
+
+def _blend_overlay(image: bytearray, width: int, overlay: bytes) -> None:
+    for index in range(0, len(overlay), 4):
+        alpha = overlay[index + 3]
+        if alpha <= 0:
+            continue
+        pixel = index // 4
+        _blend_pixel(
+            image,
+            width,
+            pixel % width,
+            pixel // width,
+            (overlay[index], overlay[index + 1], overlay[index + 2], alpha),
+        )
 
 
 def _write_png_rgba(path: Path, width: int, height: int, pixels: bytearray) -> None:
