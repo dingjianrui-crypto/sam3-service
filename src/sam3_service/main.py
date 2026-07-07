@@ -407,7 +407,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job["state"] != "completed":
             raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
         video = _video_or_404(database, job["video_id"])
-        video_path = Path(video["normalized_path"] or video["source_path"])
+        video_path = Path(video["source_path"] or video["normalized_path"])
         manifest_path = storage.manifest_path(job_id)
         if not manifest_path.is_file():
             raise ServiceError("NOT_FOUND", "Result manifest is unavailable.", status_code=404)
@@ -416,14 +416,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         chunk_paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
         output_path = storage.export_path(job_id)
-        if not output_path.is_file():
-            export_centerline_video(
-                video_path=video_path,
-                output_path=output_path,
-                temporary_dir=storage.export_tmp_dir(job_id),
-                manifest=json.loads(manifest_path.read_text()),
-                chunk_paths=chunk_paths,
-            )
+        export_centerline_video(
+            video_path=video_path,
+            output_path=output_path,
+            temporary_dir=storage.export_tmp_dir(job_id),
+            manifest=json.loads(manifest_path.read_text()),
+            chunk_paths=chunk_paths,
+        )
         return FileResponse(
             output_path,
             media_type="video/mp4",

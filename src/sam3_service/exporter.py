@@ -5,10 +5,12 @@ import math
 import shutil
 import subprocess
 import zlib
+from bisect import bisect_left
 from pathlib import Path
 from typing import Any
 
 from .errors import ServiceError
+from .media import probe_video
 
 Color = tuple[int, int, int, int]
 Line = tuple[float, float, float, float]
@@ -27,10 +29,18 @@ def export_centerline_video(
     if not chunk_paths:
         raise ServiceError("NOT_FOUND", "Result chunks are unavailable.", status_code=404)
 
-    width = int(manifest["video"]["width"])
-    height = int(manifest["video"]["height"])
-    fps = float(manifest["video"]["fps"] or 30)
-    frame_count = int(manifest["video"]["frame_count"])
+    manifest_video = manifest["video"]
+    manifest_width = int(manifest_video["width"])
+    manifest_height = int(manifest_video["height"])
+    manifest_fps = float(manifest_video["fps"] or 30)
+    video_metadata = probe_video(video_path)
+    width = int(video_metadata["width"] or manifest_width)
+    height = int(video_metadata["height"] or manifest_height)
+    fps = float(video_metadata["fps"] or manifest_fps or 30)
+    frame_count = max(
+        int(video_metadata["frame_count"] or 0),
+        math.ceil(float(video_metadata["duration_ms"] or 0) * fps / 1000),
+    )
     if width <= 0 or height <= 0 or frame_count <= 0:
         raise ServiceError("EXPORT_FAILED", "Result manifest has invalid video metadata.")
 
@@ -45,11 +55,22 @@ def export_centerline_video(
         prompt["id"]: _parse_hex(prompt.get("color", "#35C2FF"))
         for prompt in manifest.get("prompts", [])
     }
-    frames = _load_frames_by_index(chunk_paths)
+    frames = _load_frames_by_timestamp(chunk_paths)
+    frame_timestamps = sorted(frames)
+    scale_x = width / manifest_width if manifest_width > 0 else 1.0
+    scale_y = height / manifest_height if manifest_height > 0 else 1.0
+    result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
+    carried_degree: int | None = None
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
-        records = frames.get(frame_index, [])
-        _draw_frame_overlay(image, width, height, records, colors)
+        timestamp_ms = round(frame_index * 1000 / fps)
+        records = _records_for_timestamp(
+            frames, frame_timestamps, timestamp_ms, result_tolerance_ms
+        )
+        scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
+        carried_degree = _draw_frame_overlay(
+            image, width, height, scaled_records, colors, fallback_degree=carried_degree
+        )
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
     filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
@@ -106,13 +127,49 @@ def export_centerline_video(
     return output_path
 
 
-def _load_frames_by_index(chunk_paths: list[Path]) -> dict[int, list[dict[str, Any]]]:
+def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[str, Any]]]:
     frames: dict[int, list[dict[str, Any]]] = {}
     for path in chunk_paths:
         payload = json.loads(path.read_text())
         for record in payload.get("frames", []):
-            frames.setdefault(int(record["frame_index"]), []).append(record)
+            frames.setdefault(int(record["timestamp_ms"]), []).append(record)
     return frames
+
+
+def _records_for_timestamp(
+    frames: dict[int, list[dict[str, Any]]],
+    timestamps: list[int],
+    timestamp_ms: int,
+    tolerance_ms: float,
+) -> list[dict[str, Any]]:
+    if not timestamps:
+        return []
+    insertion_index = bisect_left(timestamps, timestamp_ms)
+    candidates = []
+    if insertion_index < len(timestamps):
+        candidates.append(timestamps[insertion_index])
+    if insertion_index > 0:
+        candidates.append(timestamps[insertion_index - 1])
+    nearest_timestamp = min(candidates, key=lambda value: abs(value - timestamp_ms))
+    if abs(nearest_timestamp - timestamp_ms) > tolerance_ms:
+        return []
+    return frames[nearest_timestamp]
+
+
+def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dict[str, Any]:
+    if abs(scale_x - 1) < 1e-6 and abs(scale_y - 1) < 1e-6:
+        return record
+    scaled = dict(record)
+    for key in ("centerline_line_xyxy", "shaft_line_xyxy"):
+        values = record.get(key)
+        if values and len(values) == 4:
+            scaled[key] = [
+                float(values[0]) * scale_x,
+                float(values[1]) * scale_y,
+                float(values[2]) * scale_x,
+                float(values[3]) * scale_y,
+            ]
+    return scaled
 
 
 def _draw_frame_overlay(
@@ -121,9 +178,11 @@ def _draw_frame_overlay(
     height: int,
     records: list[dict[str, Any]],
     colors: dict[str, Color],
+    *,
+    fallback_degree: int | None = None,
 ) -> int | None:
     centerlines: list[tuple[dict[str, Any], Line, Color]] = []
-    visible_degree: int | None = None
+    visible_degree: int | None = fallback_degree
     for record in records:
         line = _record_line(record)
         if line is None:
@@ -141,8 +200,7 @@ def _draw_frame_overlay(
             annotation = _angle_annotation(first_line, second_line)
             if annotation is not None:
                 _draw_angle_annotation(image, width, height, annotation)
-                if visible_degree is None:
-                    visible_degree = round(annotation["degrees"])
+                visible_degree = round(annotation["degrees"])
     if visible_degree is not None:
         _draw_top_degree_label(image, width, height, visible_degree)
     return visible_degree

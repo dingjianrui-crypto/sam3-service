@@ -28,7 +28,9 @@ def probe_video(path: Path) -> dict[str, Any]:
         numerator, denominator = stream.get("avg_frame_rate", "0/1").split("/")
         fps = float(numerator) / float(denominator) if float(denominator) else 0.0
         duration = float(payload.get("format", {}).get("duration") or 0)
-        frame_count = int(stream.get("nb_frames") or round(duration * fps))
+        reported_frame_count = int(stream.get("nb_frames") or 0)
+        duration_frame_count = round(duration * fps) if fps > 0 else 0
+        frame_count = max(reported_frame_count, duration_frame_count)
         if not stream.get("width") or not stream.get("height") or duration <= 0:
             raise ValueError("missing video dimensions or duration")
         return {
@@ -82,4 +84,3 @@ def normalize_video(source: Path, destination: Path, metadata: dict[str, Any]) -
             retryable=True,
         ) from exc
     return probe_video(destination)
-
