@@ -52,6 +52,9 @@ def export_centerline_video(
         _draw_frame_overlay(image, width, height, records, colors)
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
+    filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
+    filter_complex += ";[ov]null[v]"
+
     command = [
         "ffmpeg",
         "-y",
@@ -64,7 +67,7 @@ def export_centerline_video(
         "-i",
         str(frames_dir / "%06d.png"),
         "-filter_complex",
-        "[0:v][1:v]overlay=0:0:format=auto[v]",
+        filter_complex,
         "-map",
         "[v]",
         "-map",
@@ -118,8 +121,9 @@ def _draw_frame_overlay(
     height: int,
     records: list[dict[str, Any]],
     colors: dict[str, Color],
-) -> None:
+) -> int | None:
     centerlines: list[tuple[dict[str, Any], Line, Color]] = []
+    visible_degree: int | None = None
     for record in records:
         line = _record_line(record)
         if line is None:
@@ -137,6 +141,11 @@ def _draw_frame_overlay(
             annotation = _angle_annotation(first_line, second_line)
             if annotation is not None:
                 _draw_angle_annotation(image, width, height, annotation)
+                if visible_degree is None:
+                    visible_degree = round(annotation["degrees"])
+    if visible_degree is not None:
+        _draw_top_degree_label(image, width, height, visible_degree)
+    return visible_degree
 
 
 def _record_line(record: dict[str, Any]) -> Line | None:
@@ -225,9 +234,76 @@ def _draw_angle_annotation(
 
     mid = start + delta / 2
     label = f"{round(annotation['degrees'])}°"
-    label_x = annotation["x"] + math.cos(mid) * (radius + 22)
-    label_y = annotation["y"] + math.sin(mid) * (radius + 22)
-    _draw_label(image, width, height, label_x, label_y, label)
+    label_x = annotation["x"] + math.cos(mid) * (radius + 18)
+    label_y = annotation["y"] + math.sin(mid) * (radius + 18)
+    _draw_small_degree_label(image, width, height, label_x, label_y, label)
+
+
+def _draw_top_degree_label(
+    image: bytearray,
+    width: int,
+    height: int,
+    degree: int,
+) -> None:
+    text = f"Degree/角度：{degree}"
+    glyphs = [_glyph(character) for character in text]
+    unit_width = sum(len(glyph[0]) for glyph in glyphs) + max(0, len(glyphs) - 1) * 0.35
+    desired_scale = max(12, round(min(width, height) / 220) * 4)
+    scale = max(2, min(desired_scale, math.floor(width * 0.84 / max(unit_width, 1))))
+    gap = max(1, round(scale * 0.35))
+    text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * (len(glyphs) - 1)
+    text_height = max(len(glyph) for glyph in glyphs) * scale
+    padding_x = round(scale * 1.4)
+    padding_y = round(scale * 0.9)
+    left = round(width / 2 - text_width / 2)
+    top = round(max(height * 0.06, scale * 1.2))
+    _fill_rect(
+        image,
+        width,
+        height,
+        left - padding_x,
+        top - padding_y,
+        text_width + padding_x * 2,
+        text_height + padding_y * 2,
+        (2, 5, 9, 178),
+    )
+    x = left
+    for glyph in glyphs:
+        _draw_bitmap(image, width, height, x, top, glyph, scale, (255, 242, 168, 255))
+        x += len(glyph[0]) * scale + gap
+
+
+def _draw_small_degree_label(
+    image: bytearray,
+    width: int,
+    height: int,
+    center_x: float,
+    center_y: float,
+    text: str,
+) -> None:
+    scale = max(2, round(width / 700))
+    glyphs = [_glyph(character) for character in text]
+    gap = max(1, round(scale * 0.4))
+    text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * (len(glyphs) - 1)
+    text_height = max(len(glyph) for glyph in glyphs) * scale
+    padding_x = 3 * scale
+    padding_y = 2 * scale
+    left = round(center_x - text_width / 2)
+    top = round(center_y - text_height / 2)
+    _fill_rect(
+        image,
+        width,
+        height,
+        left - padding_x,
+        top - padding_y,
+        text_width + padding_x * 2,
+        text_height + padding_y * 2,
+        (2, 5, 9, 200),
+    )
+    x = left
+    for glyph in glyphs:
+        _draw_bitmap(image, width, height, x, top, glyph, scale, (255, 242, 168, 255))
+        x += len(glyph[0]) * scale + gap
 
 
 def _draw_line(
@@ -278,66 +354,44 @@ def _draw_circle(
                 _blend_pixel(image, width, x, y, color)
 
 
-_DIGITS: dict[str, tuple[str, ...]] = {
-    "0": ("111", "101", "101", "101", "111"),
-    "1": ("010", "110", "010", "010", "111"),
-    "2": ("111", "001", "111", "100", "111"),
-    "3": ("111", "001", "111", "001", "111"),
-    "4": ("101", "101", "111", "001", "001"),
-    "5": ("111", "100", "111", "001", "111"),
-    "6": ("111", "100", "111", "101", "111"),
-    "7": ("111", "001", "001", "001", "001"),
-    "8": ("111", "101", "111", "101", "111"),
-    "9": ("111", "101", "111", "001", "111"),
-    "°": ("110", "110", "000", "000", "000"),
+_GLYPHS: dict[str, tuple[str, ...]] = {
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "10000", "11110", "00001", "00001", "11110"),
+    "6": ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "e": ("00000", "01110", "10001", "11111", "10000", "10001", "01110"),
+    "g": ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
+    "r": ("00000", "10110", "11001", "10000", "10000", "10000", "10000"),
+    "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
+    "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),
+    "角": ("0011110", "0100010", "1111111", "0101010", "0101010", "0111110", "0100010"),
+    "度": ("0011110", "0100000", "1111110", "0101000", "0111100", "0101000", "1010110"),
+    "：": ("0", "1", "1", "0", "1", "1", "0"),
+    " ": ("000", "000", "000", "000", "000", "000", "000"),
 }
 
 
-def _draw_label(
-    image: bytearray,
-    width: int,
-    height: int,
-    center_x: float,
-    center_y: float,
-    text: str,
-) -> None:
-    scale = max(2, round(min(width, height) / 220))
-    char_width = 3 * scale
-    char_height = 5 * scale
-    gap = scale
-    text_width = len(text) * char_width + max(0, len(text) - 1) * gap
-    padding = 3 * scale
-    left = round(center_x - text_width / 2)
-    top = round(center_y - char_height / 2)
-    _fill_rect(
-        image,
-        width,
-        height,
-        left - padding,
-        top - padding,
-        text_width + padding * 2,
-        char_height + padding * 2,
-        (2, 5, 9, 210),
-    )
-    x = left
-    for character in text:
-        _draw_bitmap_character(image, width, height, x, top, character, scale, (255, 242, 168, 255))
-        x += char_width + gap
+def _glyph(character: str) -> tuple[str, ...]:
+    return _GLYPHS.get(character, _GLYPHS[" "])
 
 
-def _draw_bitmap_character(
+def _draw_bitmap(
     image: bytearray,
     width: int,
     height: int,
     left: int,
     top: int,
-    character: str,
+    bitmap: tuple[str, ...],
     scale: int,
     color: Color,
 ) -> None:
-    bitmap = _DIGITS.get(character)
-    if not bitmap:
-        return
     for row_index, row in enumerate(bitmap):
         for col_index, value in enumerate(row):
             if value == "1":

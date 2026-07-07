@@ -296,6 +296,7 @@ function drawAngleAnnotations(
   context: CanvasRenderingContext2D,
   centerlines: CenterlineRecord[]
 ) {
+  let visibleDegree: number | null = null;
   for (let firstIndex = 0; firstIndex < centerlines.length; firstIndex += 1) {
     for (let secondIndex = firstIndex + 1; secondIndex < centerlines.length; secondIndex += 1) {
       const first = centerlines[firstIndex];
@@ -304,7 +305,11 @@ function drawAngleAnnotations(
       const annotation = angleAnnotation(first.line, second.line);
       if (!annotation) continue;
       drawAngleAnnotation(context, annotation);
+      visibleDegree ??= annotation.degrees;
     }
+  }
+  if (visibleDegree != null) {
+    drawTopDegreeLabel(context, visibleDegree);
   }
 }
 
@@ -409,6 +414,37 @@ function drawAngleAnnotation(
   const metrics = context.measureText(label);
   context.fillStyle = "rgba(2, 5, 9, 0.78)";
   context.fillRect(labelX - metrics.width / 2 - 6, labelY - 11, metrics.width + 12, 22);
+  context.fillStyle = "#fff2a8";
+  context.fillText(label, labelX, labelY);
+  context.restore();
+}
+
+function drawTopDegreeLabel(context: CanvasRenderingContext2D, degrees: number) {
+  const label = `Degree/角度：${Math.round(degrees)}`;
+  let fontSize = Math.max(84, (context.canvas.width / 55) * 6);
+  context.save();
+  do {
+    context.font = `700 ${fontSize}px system-ui, sans-serif`;
+    if (context.measureText(label).width <= context.canvas.width * 0.86 || fontSize <= 18) {
+      break;
+    }
+    fontSize *= 0.9;
+  } while (true);
+  const labelX = context.canvas.width / 2;
+  const labelY = Math.max(fontSize * 0.95, context.canvas.height * 0.12);
+  context.globalAlpha = 1;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  const metrics = context.measureText(label);
+  const paddingX = fontSize * 0.16;
+  const paddingY = fontSize * 0.12;
+  context.fillStyle = "rgba(2, 5, 9, 0.68)";
+  context.fillRect(
+    labelX - metrics.width / 2 - paddingX,
+    labelY - fontSize / 2 - paddingY,
+    metrics.width + paddingX * 2,
+    fontSize + paddingY * 2
+  );
   context.fillStyle = "#fff2a8";
   context.fillText(label, labelX, labelY);
   context.restore();
