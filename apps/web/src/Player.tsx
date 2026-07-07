@@ -145,8 +145,10 @@ export function Player({ manifest }: Props) {
   return (
     <section className="viewer">
       <div className="video-shell">
-        <video ref={videoRef} src={manifest.video.url} controls playsInline />
-        <canvas ref={canvasRef} />
+        <div className="video-frame">
+          <video ref={videoRef} src={manifest.video.url} controls playsInline />
+          <canvas ref={canvasRef} />
+        </div>
         {status && <div className="video-status">{status}</div>}
       </div>
       <div className="viewer-controls">
@@ -232,4 +234,3 @@ function parseHex(color: string): number[] {
     Number.parseInt(value.slice(4, 6), 16)
   ];
 }
-

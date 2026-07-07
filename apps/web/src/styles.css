@@ -509,13 +509,22 @@ h2 {
   background: #020509;
 }
 
-.video-shell video {
+.video-frame {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.video-frame video {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  height: auto;
   max-height: calc(100vh - 255px);
 }
 
-.video-shell canvas {
+.video-frame canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -617,4 +626,3 @@ h2 {
     min-height: 240px;
   }
 }
-
