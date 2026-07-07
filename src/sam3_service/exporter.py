@@ -276,7 +276,7 @@ def _draw_frame_overlay(
     draw_top_label: bool = True,
 ) -> int | None:
     centerlines: list[tuple[dict[str, Any], Line, Color]] = []
-    visible_degree: int | None = fallback_degree
+    displayed_degree: int | None = fallback_degree
     for record in records:
         line = _record_line(record)
         if line is None:
@@ -299,11 +299,12 @@ def _draw_frame_overlay(
         if current_annotation is not None:
             break
     if current_annotation is not None:
-        visible_degree = round(current_annotation["degrees"])
-        _draw_angle_annotation(image, width, height, current_annotation, visible_degree)
-    if visible_degree is not None and draw_top_label:
-        _draw_top_degree_label(image, width, height, visible_degree)
-    return visible_degree
+        updated_degree = round(current_annotation["degrees"])
+        displayed_degree = updated_degree
+        _draw_angle_annotation(image, width, height, current_annotation, updated_degree)
+    if displayed_degree is not None and draw_top_label:
+        _draw_top_degree_label(image, width, height, displayed_degree)
+    return displayed_degree
 
 
 def _record_line(record: dict[str, Any]) -> Line | None:

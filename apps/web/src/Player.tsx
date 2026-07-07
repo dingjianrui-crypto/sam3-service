@@ -93,15 +93,15 @@ export function Player({ manifest }: Props) {
         return;
       }
       const nearby = recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts);
-      const visibleDegree = drawOverlay(context, nearby, {
+      const degreeResult = drawOverlay(context, nearby, {
         colorByPrompt,
         lastPaddleDegree: lastPaddleDegreeRef.current,
         opacity,
         overlayMode,
         showBoxes
       });
-      if (visibleDegree != null) {
-        lastPaddleDegreeRef.current = visibleDegree;
+      if (degreeResult.updatedDegree != null) {
+        lastPaddleDegreeRef.current = degreeResult.updatedDegree;
       }
     },
     [
@@ -245,7 +245,7 @@ function drawOverlay(
     overlayMode: OverlayMode;
     showBoxes: boolean;
   }
-): number | null {
+): { displayedDegree: number | null; updatedDegree: number | null } {
   const centerlines: CenterlineRecord[] = [];
   for (const record of records) {
     const color = options.colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
@@ -294,7 +294,7 @@ function drawOverlay(
   if (options.overlayMode === "centerline") {
     return drawAngleAnnotations(context, centerlines, options.lastPaddleDegree);
   }
-  return null;
+  return { displayedDegree: null, updatedDegree: null };
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -320,7 +320,7 @@ function drawAngleAnnotations(
   context: CanvasRenderingContext2D,
   centerlines: CenterlineRecord[],
   lastPaddleDegree: number | null
-): number | null {
+): { displayedDegree: number | null; updatedDegree: number | null } {
   let currentAnnotation: ReturnType<typeof angleAnnotation> = null;
   for (let firstIndex = 0; firstIndex < centerlines.length; firstIndex += 1) {
     for (let secondIndex = firstIndex + 1; secondIndex < centerlines.length; secondIndex += 1) {
@@ -334,14 +334,15 @@ function drawAngleAnnotations(
     }
     if (currentAnnotation) break;
   }
-  const visibleDegree = currentAnnotation?.degrees ?? lastPaddleDegree;
+  const updatedDegree = currentAnnotation == null ? null : Math.round(currentAnnotation.degrees);
+  const visibleDegree = updatedDegree ?? lastPaddleDegree;
   if (currentAnnotation) {
-    drawAngleAnnotation(context, currentAnnotation, currentAnnotation.degrees);
+    drawAngleAnnotation(context, currentAnnotation, updatedDegree!);
   }
   if (visibleDegree != null) {
     drawTopDegreeLabel(context, visibleDegree);
   }
-  return visibleDegree;
+  return { displayedDegree: visibleDegree, updatedDegree };
 }
 
 function angleAnnotation(
