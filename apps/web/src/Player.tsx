@@ -239,7 +239,8 @@ export function Player({ manifest }: Props) {
       drawExportFrame(source.duration || manifest.video.duration_ms / 1000);
       if (recorder.state !== "inactive") recorder.stop();
       const blob = await recording;
-      downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.webm`);
+      const extension = videoExtensionForMimeType(blob.type || recorder.mimeType);
+      downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.${extension}`);
       setExportStatus("Export complete.");
     } catch (reason) {
       setExportStatus(reason instanceof Error ? reason.message : String(reason));
@@ -406,11 +407,17 @@ function drawOverlay(
 function preferredVideoMimeType() {
   return (
     [
+      "video/mp4;codecs=avc1.42E01E",
+      "video/mp4",
       "video/webm;codecs=vp9",
       "video/webm;codecs=vp8",
       "video/webm"
     ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? ""
   );
+}
+
+function videoExtensionForMimeType(mimeType: string) {
+  return mimeType.includes("mp4") ? "mp4" : "webm";
 }
 
 function waitForVideoMetadata(video: HTMLVideoElement) {
