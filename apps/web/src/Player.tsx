@@ -162,8 +162,10 @@ export function Player({ manifest }: Props) {
       source.playsInline = true;
       source.preload = "auto";
       source.src = manifest.video.url;
+      source.load();
       await waitForVideoMetadata(source);
       source.currentTime = 0;
+      await waitForVideoFrameReady(source);
 
       const width = source.videoWidth || manifest.video.width;
       const height = source.videoHeight || manifest.video.height;
@@ -175,10 +177,15 @@ export function Player({ manifest }: Props) {
 
       const fps = Math.max(1, Math.min(60, manifest.video.fps || 30));
       stream = canvas.captureStream(fps);
+      const canvasTrack = stream.getVideoTracks()[0] as
+        | (MediaStreamTrack & { requestFrame?: () => void })
+        | undefined;
       const mimeType = preferredVideoMimeType();
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
+      const recorderOptions: MediaRecorderOptions = {
+        videoBitsPerSecond: exportVideoBitsPerSecond(width, height, fps)
+      };
+      if (mimeType) recorderOptions.mimeType = mimeType;
+      const recorder = new MediaRecorder(stream, recorderOptions);
       const parts: BlobPart[] = [];
       const recording = new Promise<Blob>((resolve, reject) => {
         recorder.ondataavailable = (event) => {
@@ -214,9 +221,11 @@ export function Player({ manifest }: Props) {
           lastPercent = percent;
           setExportStatus(`Exporting ${percent}%…`);
         }
+        canvasTrack?.requestFrame?.();
       };
 
       drawExportFrame(0);
+      canvasTrack?.requestFrame?.();
       if (source.requestVideoFrameCallback) {
         const callback = (_now: number, metadata: { mediaTime: number }) => {
           if (!drawing) return;
@@ -416,6 +425,11 @@ function preferredVideoMimeType() {
   );
 }
 
+function exportVideoBitsPerSecond(width: number, height: number, fps: number) {
+  const visuallyHighQuality = width * height * fps * 0.28;
+  return Math.round(clamp(visuallyHighQuality, 8_000_000, 120_000_000));
+}
+
 function videoExtensionForMimeType(mimeType: string) {
   return mimeType.includes("mp4") ? "mp4" : "webm";
 }
@@ -425,6 +439,29 @@ function waitForVideoMetadata(video: HTMLVideoElement) {
   return new Promise<void>((resolve, reject) => {
     video.onloadedmetadata = () => resolve();
     video.onerror = () => reject(new Error("Could not load video for export."));
+  });
+}
+
+function waitForVideoFrameReady(video: VideoWithFrameCallback) {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      video.onloadeddata = null;
+      video.oncanplay = null;
+      video.onerror = null;
+    };
+    video.onloadeddata = () => {
+      cleanup();
+      resolve();
+    };
+    video.oncanplay = () => {
+      cleanup();
+      resolve();
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("Could not decode the first video frame for export."));
+    };
   });
 }
 
