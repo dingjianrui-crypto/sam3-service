@@ -20,6 +20,9 @@ type VideoWithFrameCallback = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+const OVERLAY_FONT_FAMILY =
+  'Arial, Helvetica, system-ui, sans-serif';
+
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -260,7 +263,7 @@ function drawOverlay(
       context.lineWidth = Math.max(2, context.canvas.width / 600);
       context.strokeRect(x, y, width, height);
       context.fillStyle = color;
-      context.font = `${Math.max(13, context.canvas.width / 60)}px system-ui`;
+      context.font = `${Math.max(13, context.canvas.width / 60)}px ${OVERLAY_FONT_FAMILY}`;
       context.fillText(
         `${record.instance_id}${record.score == null ? "" : ` · ${record.score.toFixed(2)}`}`,
         x,
@@ -408,7 +411,7 @@ function drawAngleAnnotation(
   const labelX = annotation.x + Math.cos(midAngle) * (radius + 18);
   const labelY = annotation.y + Math.sin(midAngle) * (radius + 18);
   const label = `${Math.round(annotation.degrees)}°`;
-  context.font = `${Math.max(14, context.canvas.width / 55)}px system-ui`;
+  context.font = `${Math.max(14, context.canvas.width / 55)}px ${OVERLAY_FONT_FAMILY}`;
   context.textAlign = "center";
   context.textBaseline = "middle";
   const metrics = context.measureText(label);
@@ -420,11 +423,11 @@ function drawAngleAnnotation(
 }
 
 function drawTopDegreeLabel(context: CanvasRenderingContext2D, degrees: number) {
-  const label = `Degree/角度：${Math.round(degrees)}`;
+  const label = `Paddle Degree: ${Math.round(degrees)}`;
   let fontSize = Math.max(84, (context.canvas.width / 55) * 6);
   context.save();
   do {
-    context.font = `700 ${fontSize}px system-ui, sans-serif`;
+    context.font = `700 ${fontSize}px ${OVERLAY_FONT_FAMILY}`;
     if (context.measureText(label).width <= context.canvas.width * 0.86 || fontSize <= 18) {
       break;
     }

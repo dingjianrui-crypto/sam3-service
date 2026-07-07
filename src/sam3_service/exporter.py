@@ -84,7 +84,7 @@ def export_centerline_video(
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
     filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
-    subtitle_path = temporary_dir / "degree-labels.ass"
+    subtitle_path = temporary_dir / "paddle-degree-labels.ass"
     if use_subtitle_top_label and _write_degree_subtitles(
         subtitle_path, top_degrees, width, height, fps
     ):
@@ -186,7 +186,7 @@ def _write_degree_subtitles(
     if not intervals:
         return False
 
-    font_size = max(24, round(min(height * 0.07, width * 0.075)))
+    font_size = max(28, round(min(height * 0.085, width * 0.08)))
     margin_v = max(round(height * 0.14), font_size * 2)
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -196,7 +196,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TopDegree, Arial,{font_size},&H00A8F2FF,&H00FFFFFF,&H00090502,&H99090502,1,0,0,0,100,100,0,0,4,2,0,8,24,24,{margin_v},1
+Style: TopDegree, Arial,{font_size},&H00A8F2FF,&H00FFFFFF,&H00090502,&HA0090502,1,0,0,0,100,100,0,0,4,3,0,8,24,24,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -205,7 +205,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for start_index, end_index, degree in intervals:
         start = _ass_time(start_index / fps)
         end = _ass_time(end_index / fps)
-        text = _ass_escape(f"Degree/角度：{degree}")
+        text = _ass_escape(f"Paddle Degree: {degree}")
         lines.append(f"Dialogue: 0,{start},{end},TopDegree,,0,0,0,,{text}\n")
     path.write_text("".join(lines), encoding="utf-8")
     return True
@@ -417,7 +417,7 @@ def _draw_top_degree_label_with_pillow(
     if font_path is None:
         return False
 
-    text = f"Degree/角度：{degree}"
+    text = f"Paddle Degree: {degree}"
     font_size = max(24, round(min(height * 0.07, width * 0.075)))
     try:
         font = ImageFont.truetype(str(font_path), font_size)
@@ -470,10 +470,14 @@ def _find_export_font() -> Path | None:
         Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
         Path("/System/Library/Fonts/STHeiti Medium.ttc"),
         Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/HelveticaNeue.ttc"),
+        Path("/Library/Fonts/Arial.ttf"),
         Path("/Library/Fonts/Arial Unicode.ttf"),
     ]
     for candidate in candidates:
@@ -488,7 +492,7 @@ def _draw_top_degree_label_bitmap(
     height: int,
     degree: int,
 ) -> None:
-    text = f"Degree/角度：{degree}"
+    text = f"Paddle Degree: {degree}"
     glyphs = [_glyph(character) for character in text]
     unit_width = sum(len(glyph[0]) for glyph in glyphs) + max(0, len(glyphs) - 1) * 0.35
     glyph_height = max(len(glyph) for glyph in glyphs)
@@ -611,62 +615,15 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
     "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
     "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "a": ("00000", "01110", "00001", "01111", "10001", "10011", "01101"),
+    "d": ("00001", "00001", "00001", "01111", "10001", "10001", "01111"),
     "e": ("00000", "01110", "10001", "11111", "10000", "10001", "01110"),
     "g": ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
+    "l": ("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
     "r": ("00000", "10110", "11001", "10000", "10000", "10000", "10000"),
-    "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
+    ":": ("000", "010", "010", "000", "010", "010", "000"),
     "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),
-    "角": (
-        "000111111110000",
-        "001000000010000",
-        "010000000010000",
-        "010111111110000",
-        "010100010010000",
-        "010100010010000",
-        "011111111110000",
-        "010100010010000",
-        "010100010010000",
-        "010111111110000",
-        "010100010010000",
-        "010100010010000",
-        "010000000010000",
-        "010000001010000",
-        "010000000100000",
-    ),
-    "度": (
-        "000111111111000",
-        "000001000000000",
-        "011111111111110",
-        "010000000000000",
-        "010011111110000",
-        "010010000010000",
-        "010010000010000",
-        "010011111110000",
-        "010001001000000",
-        "010001001000000",
-        "010000110000000",
-        "010001111000000",
-        "010010001100000",
-        "010100000110000",
-        "011000000011000",
-    ),
-    "：": (
-        "000",
-        "010",
-        "010",
-        "000",
-        "000",
-        "000",
-        "000",
-        "000",
-        "010",
-        "010",
-        "000",
-        "000",
-        "000",
-        "000",
-        "000",
-    ),
     " ": ("000", "000", "000", "000", "000", "000", "000"),
 }
 
