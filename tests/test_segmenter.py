@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sam3_service.errors import ServiceError
 from sam3_service.segmenter import (
@@ -186,6 +187,25 @@ class Sam3CompatibilityTest(unittest.TestCase):
         shaft_area = _rle_area(shaft.segmentation)
         self.assertLess(shaft_area, original_area * 0.65)
         self.assertGreater(shaft_area, 500)
+
+    def test_uses_fixed_configured_shaft_thickness(self) -> None:
+        mask = [[False for _ in range(80)] for _ in range(50)]
+        for y in range(23, 28):
+            for x in range(5, 75):
+                mask[y][x] = True
+        for y in range(12, 39):
+            for x in range(5, 16):
+                mask[y][x] = True
+            for x in range(64, 75):
+                mask[y][x] = True
+
+        with patch.dict("os.environ", {"SAM3_SHAFT_THICKNESS_PIXELS": "12"}):
+            shaft = _fit_shaft_mask(mask)
+
+        self.assertIsNotNone(shaft)
+        assert shaft is not None
+        self.assertGreaterEqual(shaft.box_xywh[3], 11)
+        self.assertLessEqual(shaft.box_xywh[3], 13)
 
 
 def _rle_area(rle: dict[str, object]) -> int:

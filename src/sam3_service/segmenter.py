@@ -18,6 +18,7 @@ _SAM3_SESSION_OPTIONS = {
     "offload_video_to_cpu",
     "video_loader_type",
 }
+_DEFAULT_SHAFT_THICKNESS_PIXELS = 8.0
 
 
 def _patch_sam3_init_state(predictor: Any) -> None:
@@ -390,19 +391,7 @@ def _fit_shaft_mask(mask: Any) -> ShaftMask | None:
     if end - start < 2:
         return None
 
-    center_start = _percentile(inlier_projections, 25)
-    center_end = _percentile(inlier_projections, 75)
-    center_distances = sorted(
-        _line_distance(point, line)
-        for point in points
-        if center_start <= _line_projection(point, line) <= center_end
-    )
-    if not center_distances:
-        center_distances = sorted(_line_distance(point, line) for point in inliers)
-
-    half_width = _percentile(center_distances, 90) if center_distances else threshold
-    half_width = max(2.0, half_width)
-    half_width = min(half_width, max(4.0, min(width, height) * 0.045))
+    half_width = _fixed_shaft_half_width()
 
     rows = _line_band_mask(height, width, line, start, end, half_width)
     box = _box_from_mask(rows)
@@ -446,6 +435,16 @@ def _initial_shaft_threshold(
     area_scale = math.sqrt(len(points)) * 0.08
     frame_scale = min(width, height) * 0.025
     return max(3.0, min(16.0, max(area_scale, frame_scale)))
+
+
+def _fixed_shaft_half_width() -> float:
+    raw = os.getenv("SAM3_SHAFT_THICKNESS_PIXELS", str(_DEFAULT_SHAFT_THICKNESS_PIXELS))
+    try:
+        thickness = float(raw)
+    except ValueError:
+        thickness = _DEFAULT_SHAFT_THICKNESS_PIXELS
+    thickness = max(2.0, min(128.0, thickness))
+    return thickness / 2.0
 
 
 def _ransac_line(

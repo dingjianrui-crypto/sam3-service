@@ -127,6 +127,7 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_MAX_TRACKED_OBJECTS` | `4` | Cap tracked instances to reduce inference memory |
 | `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |
 | `SAM3_POSTPROCESS_BATCH_SIZE` | `1` | Frames accumulated for mask post-processing |
+| `SAM3_SHAFT_THICKNESS_PIXELS` | `8` | Fixed full thickness, in video pixels, for the shaft centerline mask |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
 | `SAM3_PORT` | `8000` | HTTP port |
 | `SAM3_MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
