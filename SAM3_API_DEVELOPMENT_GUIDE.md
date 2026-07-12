@@ -647,6 +647,9 @@ Common status codes:
 ## Operational Notes
 
 - The API currently assumes the secure deployment network is the authorization boundary. Put it behind your own authentication/TLS layer before exposing it outside a trusted network.
+- Remote clients can call the API when the server binds to a reachable address such as `SAM3_HOST=0.0.0.0` and the network path is open.
+- Browser applications served from a different origin need that origin listed in `SAM3_CORS_ALLOW_ORIGINS`, for example `http://localhost:5173,https://review.example.com`.
+- Server-to-server clients are not subject to browser CORS checks.
 - Results are chunked by time; default chunk duration is controlled by `SAM3_RESULT_CHUNK_SECONDS`.
 - Upload chunk size is controlled by `SAM3_UPLOAD_CHUNK_BYTES`.
 - The real worker uses `SAM3_SEGMENTER=sam3`; local development can use `SAM3_SEGMENTER=mock`.

@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings
 from .db import Database, expires_at, utc_now
@@ -44,6 +45,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    if configured.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(configured.cors_allow_origins),
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

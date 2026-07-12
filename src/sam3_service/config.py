@@ -19,6 +19,7 @@ class Settings:
     max_prompts: int
     chunk_size_bytes: int
     result_chunk_seconds: int
+    cors_allow_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -47,6 +48,7 @@ class Settings:
             max_prompts=int(os.getenv("SAM3_MAX_PROMPTS", "3")),
             chunk_size_bytes=int(os.getenv("SAM3_UPLOAD_CHUNK_BYTES", str(8 * 1024 * 1024))),
             result_chunk_seconds=int(os.getenv("SAM3_RESULT_CHUNK_SECONDS", "2")),
+            cors_allow_origins=_csv_env("SAM3_CORS_ALLOW_ORIGINS"),
         )
 
     def ensure_directories(self) -> None:
@@ -54,3 +56,8 @@ class Settings:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         for name in ("uploads", "videos", "jobs", "tmp"):
             (self.data_dir / name).mkdir(parents=True, exist_ok=True)
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(item.strip() for item in raw.split(",") if item.strip())

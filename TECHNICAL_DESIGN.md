@@ -583,7 +583,8 @@ For the MVP, network access to the secure environment is the authorization bound
 Retain these low-cost protections:
 
 - bind only to the private interface selected in deployment configuration;
-- serve the client and API from the same origin and do not enable CORS;
+- serve the client and API from the same origin by default;
+- keep CORS disabled unless a separate browser application must call the API, then allow only explicit origins through `SAM3_CORS_ALLOW_ORIGINS`;
 - cap request body, chunk, prompt, and result-query sizes;
 - run the API and worker as separate unprivileged operating-system users;
 - expose CUDA/model credentials only to the worker process;

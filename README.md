@@ -133,10 +133,13 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_SHAFT_THICKNESS_PIXELS` | unset | Deprecated fallback for `SAM3_CENTERLINE_THICKNESS_PIXELS` |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
 | `SAM3_PORT` | `8000` | HTTP port |
+| `SAM3_CORS_ALLOW_ORIGINS` | unset | Comma-separated browser origins allowed to call the API, for example `http://localhost:5173,https://review.example.com` |
 | `SAM3_MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
 | `SAM3_MAX_VIDEO_DURATION_SECONDS` | `300` | Maximum duration |
 | `SAM3_MAX_PROMPTS` | `3` | Maximum prompts per job |
 | `SAM3_UPLOAD_CHUNK_BYTES` | `8388608` | Upload part size |
+
+Remote clients can call the API when the server binds to a reachable address, for example `SAM3_HOST=0.0.0.0`, and firewalls or reverse proxies allow the port. Browser apps served from another origin also need `SAM3_CORS_ALLOW_ORIGINS` to include their exact scheme, host, and port. Server-to-server clients do not use browser CORS checks.
 
 ## Linux daemon deployment with systemd
 
@@ -242,6 +245,8 @@ SAM3_STATIC_DIR=/opt/sam3/apps/web/dist
 # Bind to the server's private address where possible.
 SAM3_HOST=0.0.0.0
 SAM3_PORT=8000
+# Only needed for browser apps served from another origin.
+# SAM3_CORS_ALLOW_ORIGINS=http://localhost:5173,https://review.example.com
 
 SAM3_SEGMENTER=sam3
 SAM3_OFFLINE=1
