@@ -688,7 +688,7 @@ Query parameters:
 | `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
 | `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
 
-For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target. For example, if four paddle instances are detected, the exported video can show four stacked labels such as `Paddle 1: 42°`, `Paddle 2: 51°`, `Paddle 3: 37°`, and `Paddle 4: 48°`. The same degree is also drawn near each paddle centerline.
+For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
 ## Error Format
 

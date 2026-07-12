@@ -42,6 +42,13 @@ class DegreeLabel:
     color: Color
 
 
+@dataclass(frozen=True)
+class DegreeLabelEntry:
+    text: str
+    label: DegreeLabel
+    text_color: Color
+
+
 def export_centerline_video(
     *,
     video_path: Path,
@@ -281,8 +288,9 @@ def _draw_frame_overlay(
 
     labels = _degree_labels(centerlines, export_options)
     displayed_labels = labels or fallback_labels
-    for label in labels:
-        _draw_target_degree_marker(image, width, height, label)
+    active_entries = _degree_label_entries(labels)
+    for entry in active_entries:
+        _draw_target_degree_marker(image, width, height, entry)
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     return labels or fallback_labels
@@ -370,8 +378,9 @@ def _draw_target_degree_marker(
     image: bytearray,
     width: int,
     height: int,
-    label: DegreeLabel,
+    entry: DegreeLabelEntry,
 ) -> None:
+    label = entry.label
     center_x, center_y = _line_center(label.line)
     dx = label.line[2] - label.line[0]
     dy = label.line[3] - label.line[1]
@@ -387,7 +396,15 @@ def _draw_target_degree_marker(
         label.color,
         max(2, round(min(width, height) * 0.003)),
     )
-    _draw_small_degree_label(image, width, height, label_x, label_y, f"{label.degree}°")
+    _draw_small_degree_label(
+        image,
+        width,
+        height,
+        label_x,
+        label_y,
+        entry.text,
+        entry.text_color,
+    )
 
 
 def _draw_degree_label_block(
@@ -402,8 +419,33 @@ def _draw_degree_label_block(
     _draw_degree_label_block_bitmap(image, width, height, labels, options)
 
 
-def _degree_label_lines(labels: list[DegreeLabel]) -> list[str]:
-    return [f"Paddle {index}: {label.degree}°" for index, label in enumerate(labels, start=1)]
+def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
+    highlight_index = _highlighted_degree_index(labels)
+    entries: list[DegreeLabelEntry] = []
+    for index, label in enumerate(labels, start=1):
+        text_color = (
+            (255, 82, 96, 255)
+            if highlight_index is not None and index - 1 == highlight_index
+            else (255, 242, 168, 255)
+        )
+        entries.append(
+            DegreeLabelEntry(
+                text=f"{index}: {label.degree}°",
+                label=label,
+                text_color=text_color,
+            )
+        )
+    return entries
+
+
+def _highlighted_degree_index(labels: list[DegreeLabel]) -> int | None:
+    if len(labels) <= 3:
+        return None
+    average = sum(label.degree for label in labels) / len(labels)
+    return max(
+        range(len(labels)),
+        key=lambda index: abs(labels[index].degree - average),
+    )
 
 
 def _draw_degree_label_block_with_pillow(
@@ -428,17 +470,19 @@ def _draw_degree_label_block_with_pillow(
     except OSError:
         return False
 
-    lines = _degree_label_lines(labels)
+    entries = _degree_label_entries(labels)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     stroke_width = max(1, round(font_size * 0.05))
-    line_boxes = [
-        draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width) for line in lines
+    text_boxes = [
+        draw.textbbox((0, 0), entry.text, font=font, stroke_width=stroke_width)
+        for entry in entries
     ]
-    text_width = max(box[2] - box[0] for box in line_boxes)
-    line_heights = [box[3] - box[1] for box in line_boxes]
-    line_gap = max(4, round(font_size * 0.28))
-    text_height = sum(line_heights) + line_gap * max(0, len(lines) - 1)
+    item_gap = max(12, round(font_size * 0.75))
+    item_widths = [box[2] - box[0] for box in text_boxes]
+    item_heights = [box[3] - box[1] for box in text_boxes]
+    text_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
+    text_height = max(item_heights)
     padding_x = round(font_size * 0.55)
     padding_y = round(font_size * 0.4)
     left = round(width / 2 - text_width / 2)
@@ -453,17 +497,20 @@ def _draw_degree_label_block_with_pillow(
     )
     radius = max(4, round(font_size * 0.16))
     draw.rounded_rectangle(box, radius=radius, fill=(2, 5, 9, 190))
-    y = top
-    for line, bbox, line_height in zip(lines, line_boxes, line_heights):
+    x = left
+    for entry, bbox, item_width, item_height in zip(
+        entries, text_boxes, item_widths, item_heights
+    ):
+        y = top + (text_height - item_height) / 2
         draw.text(
-            (left - bbox[0], y - bbox[1]),
-            line,
+            (x - bbox[0], y - bbox[1]),
+            entry.text,
             font=font,
-            fill=(255, 242, 168, 255),
+            fill=entry.text_color,
             stroke_width=stroke_width,
             stroke_fill=(2, 5, 9, 255),
         )
-        y += line_height + line_gap
+        x += item_width + item_gap
     _blend_overlay(image, width, overlay.tobytes())
     return True
 
@@ -475,19 +522,18 @@ def _draw_degree_label_block_bitmap(
     labels: list[DegreeLabel],
     options: ExportOptions,
 ) -> None:
-    lines = _degree_label_lines(labels)
+    entries = _degree_label_entries(labels)
     font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
     scale = max(2, round(font_size / 7))
     gap = max(1, round(scale * 0.75))
-    line_gap = max(2, round(scale * 1.4))
-    glyph_lines = [[_glyph(character) for character in line] for line in lines]
-    line_widths = [
+    item_gap = max(3 * scale, round(font_size * 0.75))
+    glyph_items = [[_glyph(character) for character in entry.text] for entry in entries]
+    item_widths = [
         sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(0, len(glyphs) - 1)
-        for glyphs in glyph_lines
+        for glyphs in glyph_items
     ]
-    text_width = max(line_widths)
-    line_height = 7 * scale
-    text_height = len(lines) * line_height + max(0, len(lines) - 1) * line_gap
+    text_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
+    text_height = 7 * scale
     padding_x = round(scale * 2.2)
     padding_y = round(scale * 1.5)
     left = round(width / 2 - text_width / 2)
@@ -503,13 +549,12 @@ def _draw_degree_label_block_bitmap(
         text_height + padding_y * 2,
         (2, 5, 9, 178),
     )
-    y = top
-    for glyphs, line_width in zip(glyph_lines, line_widths):
-        x = round(width / 2 - line_width / 2)
+    x = left
+    for entry, glyphs, item_width in zip(entries, glyph_items, item_widths):
         for glyph in glyphs:
-            _draw_bitmap(image, width, height, x, y, glyph, scale, (255, 242, 168, 255))
+            _draw_bitmap(image, width, height, x, top, glyph, scale, entry.text_color)
             x += len(glyph[0]) * scale + gap
-        y += line_height + line_gap
+        x += item_gap - gap
 
 
 def _find_export_font() -> Path | None:
@@ -543,6 +588,7 @@ def _draw_small_degree_label(
     center_x: float,
     center_y: float,
     text: str,
+    text_color: Color = (255, 242, 168, 255),
 ) -> None:
     scale = max(2, round(width / 700))
     glyphs = [_glyph(character) for character in text]
@@ -565,7 +611,7 @@ def _draw_small_degree_label(
     )
     x = left
     for glyph in glyphs:
-        _draw_bitmap(image, width, height, x, top, glyph, scale, (255, 242, 168, 255))
+        _draw_bitmap(image, width, height, x, top, glyph, scale, text_color)
         x += len(glyph[0]) * scale + gap
 
 
