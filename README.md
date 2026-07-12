@@ -45,6 +45,8 @@ Open `http://127.0.0.1:8000`. API documentation is available at `/docs`.
 
 For live web development, run `npm run dev` under `apps/web`; Vite proxies `/api` to port 8000.
 
+For external application integration details, see [SAM3_API_DEVELOPMENT_GUIDE.md](SAM3_API_DEVELOPMENT_GUIDE.md).
+
 ## Real SAM 3.1 worker
 
 SAM 3 is an optional dependency because the API and mock worker do not need its large GPU stack. Install the pinned upstream package into this project's `.venv` with:

@@ -253,15 +253,14 @@ def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dic
     if abs(scale_x - 1) < 1e-6 and abs(scale_y - 1) < 1e-6:
         return record
     scaled = dict(record)
-    for key in ("centerline_line_xyxy", "shaft_line_xyxy"):
-        values = record.get(key)
-        if values and len(values) == 4:
-            scaled[key] = [
-                float(values[0]) * scale_x,
-                float(values[1]) * scale_y,
-                float(values[2]) * scale_x,
-                float(values[3]) * scale_y,
-            ]
+    values = record.get("centerline_line_xyxy")
+    if values and len(values) == 4:
+        scaled["centerline_line_xyxy"] = [
+            float(values[0]) * scale_x,
+            float(values[1]) * scale_y,
+            float(values[2]) * scale_x,
+            float(values[3]) * scale_y,
+        ]
     return scaled
 
 
@@ -308,7 +307,7 @@ def _draw_frame_overlay(
 
 
 def _record_line(record: dict[str, Any]) -> Line | None:
-    values = record.get("centerline_line_xyxy") or record.get("shaft_line_xyxy")
+    values = record.get("centerline_line_xyxy")
     if not values or len(values) != 4:
         return None
     try:

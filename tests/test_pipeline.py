@@ -121,9 +121,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(chunk["frames"][0]["centerline_segmentation"]["type"], "polygon")
         self.assertIsNotNone(chunk["frames"][0]["centerline_box_xywh"])
         self.assertEqual(len(chunk["frames"][0]["centerline_line_xyxy"]), 4)
-        self.assertEqual(chunk["frames"][0]["shaft_segmentation"]["type"], "polygon")
-        self.assertIsNotNone(chunk["frames"][0]["shaft_box_xywh"])
-        self.assertEqual(len(chunk["frames"][0]["shaft_line_xyxy"]), 4)
+        self.assertNotIn("shaft_segmentation", chunk["frames"][0])
+        self.assertNotIn("shaft_box_xywh", chunk["frames"][0])
+        self.assertNotIn("shaft_line_xyxy", chunk["frames"][0])
 
     def test_only_one_worker_claims_a_job(self) -> None:
         now = utc_now()

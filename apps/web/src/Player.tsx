@@ -254,9 +254,8 @@ function drawOverlay(
       centerlines.push({ record, line, color });
     }
     const segmentation =
-      options.overlayMode === "centerline" &&
-      (record.centerline_segmentation || record.shaft_segmentation)
-        ? (record.centerline_segmentation ?? record.shaft_segmentation)!
+      options.overlayMode === "centerline" && record.centerline_segmentation
+        ? record.centerline_segmentation
         : record.segmentation;
     context.save();
     context.globalAlpha = options.opacity;
@@ -275,9 +274,8 @@ function drawOverlay(
     context.restore();
     if (options.showBoxes) {
       const [x, y, width, height] =
-        options.overlayMode === "centerline" &&
-        (record.centerline_box_xywh || record.shaft_box_xywh)
-          ? (record.centerline_box_xywh ?? record.shaft_box_xywh)!
+        options.overlayMode === "centerline" && record.centerline_box_xywh
+          ? record.centerline_box_xywh
           : record.box_xywh;
       context.strokeStyle = color;
       context.lineWidth = Math.max(2, context.canvas.width / 600);
@@ -309,7 +307,7 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 function getCenterlineLine(record: FrameMask): [number, number, number, number] | null {
-  const line = record.centerline_line_xyxy ?? record.shaft_line_xyxy;
+  const line = record.centerline_line_xyxy;
   if (!line || line.length !== 4 || line.some((value) => !Number.isFinite(value))) {
     return null;
   }
