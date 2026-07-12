@@ -11,10 +11,20 @@ export type Job = {
     percent: number;
   };
   prompts: Prompt[];
+  settings: JobSettings;
   model_name?: string;
   attempt: number;
   error?: { code: string; message: string; retryable: boolean } | null;
   created_at: string;
+};
+
+export type JobSettings = {
+  working_max_dimension?: number;
+  include_boxes?: boolean;
+  score_threshold: number;
+  redetect_interval_frames: number;
+  max_detections_per_frame: number;
+  dedupe_iou_threshold: number;
 };
 
 export type FrameMask = {
@@ -121,7 +131,11 @@ export async function uploadVideo(
   return created.video_id;
 }
 
-export async function createJob(videoId: string, prompts: string[]): Promise<Job> {
+export async function createJob(
+  videoId: string,
+  prompts: string[],
+  settings: JobSettings
+): Promise<Job> {
   const created = await request<{ job_id: string }>("/api/v1/jobs", {
     method: "POST",
     headers: {
@@ -131,7 +145,7 @@ export async function createJob(videoId: string, prompts: string[]): Promise<Job
     body: JSON.stringify({
       video_id: videoId,
       prompts: prompts.map((text) => ({ text })),
-      settings: { score_threshold: 0.5, include_boxes: true }
+      settings: { ...settings, include_boxes: true }
     })
   });
   return getJob(created.job_id);

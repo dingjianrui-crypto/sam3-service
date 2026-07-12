@@ -22,7 +22,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -165,7 +166,8 @@ h2 {
   font-weight: 700;
 }
 
-.field input {
+.field input,
+.field select {
   width: 100%;
   padding: 11px 12px;
   color: #e8f5ff;
@@ -175,9 +177,29 @@ h2 {
   background: #0c1b2b;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: #4ccae8;
   box-shadow: 0 0 0 3px rgba(76, 202, 232, 0.12);
+}
+
+.settings-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #18364d;
+  border-radius: 8px;
+  background: #091827;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.settings-grid .field {
+  min-width: 0;
 }
 
 .primary,

@@ -288,7 +288,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "status_url": f"/api/v1/jobs/{existing['id']}",
                 }
         job_id = uuid.uuid4().hex
-        settings_payload = payload.settings.model_dump()
+        settings_payload = _job_settings_payload(payload.settings.model_dump(), configured)
         settings_payload["idempotency_key"] = idempotency_key
         now = utc_now()
         with database.transaction(immediate=True) as connection:
@@ -499,6 +499,37 @@ def _public_video(video: dict[str, Any]) -> dict[str, Any]:
         "expires_at",
     )
     return {key: video.get(key) for key in fields}
+
+
+def _job_settings_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    requested_max = payload.get("max_detections_per_frame")
+    if requested_max is None:
+        requested_max = min(
+            settings.default_max_detections_per_frame,
+            settings.max_detections_per_frame_limit,
+        )
+    elif int(requested_max) > settings.max_detections_per_frame_limit:
+        raise ServiceError(
+            "INVALID_SETTINGS",
+            "max_detections_per_frame exceeds the service limit of "
+            f"{settings.max_detections_per_frame_limit}.",
+        )
+    requested_max = int(requested_max)
+
+    redetect_interval = payload.get("redetect_interval_frames")
+    if redetect_interval is None:
+        redetect_interval = settings.default_redetect_interval_frames
+
+    dedupe_iou = payload.get("dedupe_iou_threshold")
+    if dedupe_iou is None:
+        dedupe_iou = settings.default_dedupe_iou_threshold
+
+    return {
+        **payload,
+        "redetect_interval_frames": max(0, int(redetect_interval)),
+        "max_detections_per_frame": requested_max,
+        "dedupe_iou_threshold": max(0.0, min(1.0, float(dedupe_iou))),
+    }
 
 
 def _public_job(job: dict[str, Any] | None) -> dict[str, Any]:

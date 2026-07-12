@@ -32,7 +32,10 @@ class PromptCreate(BaseModel):
 class JobSettings(BaseModel):
     working_max_dimension: int = Field(default=1280, ge=320, le=1920)
     include_boxes: bool = True
-    score_threshold: float = Field(default=0.5, ge=0, le=1)
+    score_threshold: float = Field(default=0.3, ge=0, le=1)
+    redetect_interval_frames: int | None = Field(default=None, ge=0, le=300)
+    max_detections_per_frame: int | None = Field(default=None, ge=1, le=256)
+    dedupe_iou_threshold: float | None = Field(default=None, ge=0, le=1)
 
 
 class JobCreate(BaseModel):
@@ -50,4 +53,3 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
-

@@ -148,7 +148,10 @@ Request:
   "settings": {
     "working_max_dimension": 1280,
     "include_boxes": true,
-    "score_threshold": 0.5
+    "score_threshold": 0.3,
+    "redetect_interval_frames": 1,
+    "max_detections_per_frame": 13,
+    "dedupe_iou_threshold": 0.6
   }
 }
 ```
@@ -160,8 +163,13 @@ Fields:
 | `video_id` | string | A completed video ID |
 | `prompts` | array | Text prompts, one to `SAM3_MAX_PROMPTS`; each text is normalized whitespace and max 80 chars |
 | `settings.score_threshold` | number | Model confidence threshold, `0` to `1` |
+| `settings.redetect_interval_frames` | integer | How often to re-run text grounding; `0` keeps frame-0-only tracking, `1` attempts every frame |
+| `settings.max_detections_per_frame` | integer | Maximum kept detections per prompt per frame after de-duplication; defaults to 13 and cannot exceed `SAM3_MAX_DETECTIONS_PER_FRAME` |
+| `settings.dedupe_iou_threshold` | number | Same-frame box IoU above which lower-scored duplicate detections are dropped |
 | `settings.include_boxes` | boolean | Reserved client preference; current chunks include boxes |
 | `settings.working_max_dimension` | integer | Accepted range `320` to `1920`; reserved for processing-size control |
+
+For paddle scenes with up to four paddlers, the recall-first default is `max_detections_per_frame: 13`: up to three visible paddle parts per paddler, plus room for a boat/reference prompt when used separately. Increase the service-side SAM3 object cap above this, for example `SAM3_MAX_TRACKED_OBJECTS=16` or `24`, so duplicate candidates do not consume all model slots before API de-duplication.
 
 Response:
 
@@ -196,7 +204,10 @@ Response:
   "settings": {
     "working_max_dimension": 1280,
     "include_boxes": true,
-    "score_threshold": 0.5,
+    "score_threshold": 0.3,
+    "redetect_interval_frames": 1,
+    "max_detections_per_frame": 13,
+    "dedupe_iou_threshold": 0.6,
     "idempotency_key": "..."
   },
   "model_name": "sam3.1-object-multiplex",
@@ -373,7 +384,13 @@ async function runSegmentation(file, prompts) {
     body: JSON.stringify({
       video_id: videoId,
       prompts: prompts.map((text) => ({ text })),
-      settings: { score_threshold: 0.5, include_boxes: true }
+      settings: {
+        score_threshold: 0.3,
+        redetect_interval_frames: 1,
+        max_detections_per_frame: 13,
+        dedupe_iou_threshold: 0.6,
+        include_boxes: true
+      }
     })
   });
 

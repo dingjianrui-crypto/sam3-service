@@ -74,6 +74,38 @@ class _SessionPredictor:
         return iter(())
 
 
+class _DensePromptPredictor:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+        self.stream_requests = 0
+
+    def handle_request(self, request: dict[str, object]) -> dict[str, object]:
+        self.requests.append(request)
+        if request["type"] == "start_session":
+            return {"session_id": "session"}
+        if request["type"] == "add_prompt":
+            frame_index = int(request["frame_index"])
+            mask = [[False for _ in range(10)] for _ in range(10)]
+            for y in range(2, 8):
+                for x in range(2, 8):
+                    mask[y][x] = True
+            return {
+                "frame_index": frame_index,
+                "outputs": {
+                    "out_obj_ids": [1, 2],
+                    "out_boxes_xywh": [[2, 2, 6, 6], [2.5, 2.5, 6, 6]],
+                    "out_probs": [0.9, 0.8],
+                    "out_binary_masks": [mask, mask],
+                },
+            }
+        return {"is_success": "true"}
+
+    def handle_stream_request(self, request: dict[str, object]):
+        self.requests.append(request)
+        self.stream_requests += 1
+        return iter(())
+
+
 class Sam3CompatibilityTest(unittest.TestCase):
     def test_removes_session_options_rejected_by_model(self) -> None:
         model = _ModelWithoutOffloadOptions()
@@ -127,6 +159,7 @@ class Sam3CompatibilityTest(unittest.TestCase):
             "prompt",
             "paddle",
             0.5,
+            {},
             lambda _done, _total: None,
             lambda: False,
         )
@@ -148,6 +181,7 @@ class Sam3CompatibilityTest(unittest.TestCase):
             "prompt",
             "paddle",
             0.5,
+            {},
             lambda _done, _total: None,
             lambda: False,
         )
@@ -159,6 +193,39 @@ class Sam3CompatibilityTest(unittest.TestCase):
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(segmenter.predictor.requests[-1]["type"], "close_session")
         self.assertEqual(segmenter.torch.cuda.empty_cache_calls, 1)
+
+    def test_dense_redetection_prompts_every_frame_and_limits_duplicates(self) -> None:
+        segmenter = Sam3Segmenter.__new__(Sam3Segmenter)
+        segmenter.torch = _Torch()
+        segmenter.predictor = _DensePromptPredictor()
+        segmenter.offload_video_to_cpu = True
+
+        frames = list(
+            segmenter.segment(
+                Path("/tmp/video.mp4"),
+                {"frame_count": 3, "fps": 10, "width": 10, "height": 10},
+                "prompt",
+                "paddle",
+                0.3,
+                {
+                    "redetect_interval_frames": 1,
+                    "max_detections_per_frame": 1,
+                    "dedupe_iou_threshold": 0.5,
+                },
+                lambda _done, _total: None,
+                lambda: False,
+            )
+        )
+
+        prompt_frames = [
+            request["frame_index"]
+            for request in segmenter.predictor.requests
+            if request["type"] == "add_prompt"
+        ]
+        self.assertEqual(prompt_frames, [0, 1, 2])
+        self.assertEqual([frame.frame_index for frame in frames], [0, 1, 2])
+        self.assertEqual({frame.instance_id for frame in frames}, {"prompt:1"})
+        self.assertEqual(segmenter.predictor.stream_requests, 0)
 
     def test_fits_thick_centerline_mask_from_full_paddle_mask(self) -> None:
         mask = [[False for _ in range(130)] for _ in range(80)]

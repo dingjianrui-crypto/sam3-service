@@ -102,7 +102,8 @@ class Worker:
                     metadata,
                     prompt["id"],
                     prompt["text"],
-                    float(settings.get("score_threshold", 0.5)),
+                    float(settings.get("score_threshold", 0.3)),
+                    settings,
                     progress,
                     lambda: self._cancel_requested(job_id),
                 )

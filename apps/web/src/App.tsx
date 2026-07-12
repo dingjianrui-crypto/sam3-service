@@ -6,6 +6,7 @@ import {
   getJob,
   getManifest,
   Job,
+  JobSettings,
   listJobs,
   ResultManifest,
   retryJob,
@@ -20,12 +21,37 @@ const ACTIVE_STATES = new Set([
   "postprocessing"
 ]);
 
+type DetectionMode = "recall" | "balanced" | "fast" | "custom";
+
+const DETECTION_PRESETS: Record<Exclude<DetectionMode, "custom">, JobSettings> = {
+  recall: {
+    score_threshold: 0.3,
+    redetect_interval_frames: 1,
+    max_detections_per_frame: 13,
+    dedupe_iou_threshold: 0.6
+  },
+  balanced: {
+    score_threshold: 0.35,
+    redetect_interval_frames: 10,
+    max_detections_per_frame: 13,
+    dedupe_iou_threshold: 0.6
+  },
+  fast: {
+    score_threshold: 0.5,
+    redetect_interval_frames: 0,
+    max_detections_per_frame: 13,
+    dedupe_iou_threshold: 0.6
+  }
+};
+
 export default function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selected, setSelected] = useState<Job | null>(null);
   const [manifest, setManifest] = useState<ResultManifest | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState("paddle, boat");
+  const [detectionMode, setDetectionMode] = useState<DetectionMode>("recall");
+  const [jobSettings, setJobSettings] = useState<JobSettings>(DETECTION_PRESETS.recall);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -76,7 +102,8 @@ export default function App() {
         prompt
           .split(",")
           .map((item) => item.trim())
-          .filter(Boolean)
+          .filter(Boolean),
+        jobSettings
       );
       setSelected(created);
       setFile(null);
@@ -96,6 +123,18 @@ export default function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
+  }
+
+  function setPreset(mode: DetectionMode) {
+    setDetectionMode(mode);
+    if (mode !== "custom") {
+      setJobSettings(DETECTION_PRESETS[mode]);
+    }
+  }
+
+  function updateJobSetting<K extends keyof JobSettings>(key: K, value: JobSettings[K]) {
+    setDetectionMode("custom");
+    setJobSettings((current) => ({ ...current, [key]: value }));
   }
 
   return (
@@ -143,6 +182,91 @@ export default function App() {
               />
               <small>Separate up to three prompts with commas.</small>
             </label>
+            <div className="settings-panel">
+              <label className="field">
+                <span>Detection mode</span>
+                <select
+                  value={detectionMode}
+                  disabled={busy}
+                  onChange={(event) => setPreset(event.target.value as DetectionMode)}
+                >
+                  <option value="recall">Recall first</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="fast">Fast tracking</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <div className="settings-grid">
+                <label className="field">
+                  <span>Detect interval</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="300"
+                    step="1"
+                    value={jobSettings.redetect_interval_frames}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateJobSetting(
+                        "redetect_interval_frames",
+                        Math.max(0, Number(event.target.value))
+                      )
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Max detections</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="64"
+                    step="1"
+                    value={jobSettings.max_detections_per_frame}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateJobSetting(
+                        "max_detections_per_frame",
+                        Math.max(1, Number(event.target.value))
+                      )
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Score threshold</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={jobSettings.score_threshold}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateJobSetting(
+                        "score_threshold",
+                        Math.min(1, Math.max(0, Number(event.target.value)))
+                      )
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Dedupe IoU</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={jobSettings.dedupe_iou_threshold}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateJobSetting(
+                        "dedupe_iou_threshold",
+                        Math.min(1, Math.max(0, Number(event.target.value)))
+                      )
+                    }
+                  />
+                </label>
+              </div>
+            </div>
             {busy && (
               <div className="upload-progress">
                 <span style={{ width: `${uploadProgress}%` }} />

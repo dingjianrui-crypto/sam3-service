@@ -126,9 +126,13 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_CHECKPOINT_PATH` | unset | Local SAM 3.1 checkpoint; skips automatic download |
 | `SAM3_OFFLINE` | `0` | Require local checkpoint and disable Hugging Face network access |
 | `SAM3_OFFLOAD_VIDEO_TO_CPU` | `1` | Keep decoded video frames in CPU memory to reduce GPU use |
-| `SAM3_MAX_TRACKED_OBJECTS` | `4` | Cap tracked instances to reduce inference memory |
+| `SAM3_MAX_TRACKED_OBJECTS` | `16` | Cap tracked instances to reduce inference memory |
 | `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |
 | `SAM3_POSTPROCESS_BATCH_SIZE` | `1` | Frames accumulated for mask post-processing |
+| `SAM3_DEFAULT_REDETECT_INTERVAL_FRAMES` | `1` | Default per-job prompt re-detection interval; `0` means only frame 0, `1` means every frame |
+| `SAM3_DEFAULT_MAX_DETECTIONS_PER_FRAME` | `13` | Default per-job kept detections per prompt per frame after de-duplication |
+| `SAM3_MAX_DETECTIONS_PER_FRAME` | `64` | Hard service limit for requested per-frame detections |
+| `SAM3_DEFAULT_DEDUPE_IOU_THRESHOLD` | `0.6` | Default same-frame IoU threshold for dropping duplicate detections |
 | `SAM3_CENTERLINE_THICKNESS_PIXELS` | `8` | Fixed full thickness, in video pixels, for paddle and boat centerline masks |
 | `SAM3_SHAFT_THICKNESS_PIXELS` | unset | Deprecated fallback for `SAM3_CENTERLINE_THICKNESS_PIXELS` |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |

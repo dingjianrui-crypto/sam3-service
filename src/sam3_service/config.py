@@ -19,6 +19,10 @@ class Settings:
     max_prompts: int
     chunk_size_bytes: int
     result_chunk_seconds: int
+    default_redetect_interval_frames: int
+    default_max_detections_per_frame: int
+    max_detections_per_frame_limit: int
+    default_dedupe_iou_threshold: float
     cors_allow_origins: tuple[str, ...] = ()
 
     @classmethod
@@ -48,6 +52,18 @@ class Settings:
             max_prompts=int(os.getenv("SAM3_MAX_PROMPTS", "3")),
             chunk_size_bytes=int(os.getenv("SAM3_UPLOAD_CHUNK_BYTES", str(8 * 1024 * 1024))),
             result_chunk_seconds=int(os.getenv("SAM3_RESULT_CHUNK_SECONDS", "2")),
+            default_redetect_interval_frames=max(
+                0, int(os.getenv("SAM3_DEFAULT_REDETECT_INTERVAL_FRAMES", "1"))
+            ),
+            default_max_detections_per_frame=max(
+                1, int(os.getenv("SAM3_DEFAULT_MAX_DETECTIONS_PER_FRAME", "13"))
+            ),
+            max_detections_per_frame_limit=max(
+                1, int(os.getenv("SAM3_MAX_DETECTIONS_PER_FRAME", "64"))
+            ),
+            default_dedupe_iou_threshold=max(
+                0.0, min(1.0, float(os.getenv("SAM3_DEFAULT_DEDUPE_IOU_THRESHOLD", "0.6")))
+            ),
             cors_allow_origins=_csv_env("SAM3_CORS_ALLOW_ORIGINS"),
         )
 

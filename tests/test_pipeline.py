@@ -31,6 +31,10 @@ class PipelineTest(unittest.TestCase):
             max_prompts=3,
             chunk_size_bytes=1024 * 1024,
             result_chunk_seconds=1,
+            default_redetect_interval_frames=1,
+            default_max_detections_per_frame=13,
+            max_detections_per_frame_limit=64,
+            default_dedupe_iou_threshold=0.6,
         )
         self.settings.ensure_directories()
         self.database = Database(self.settings.database_path)

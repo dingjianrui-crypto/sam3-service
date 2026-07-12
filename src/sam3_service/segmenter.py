@@ -73,6 +73,13 @@ class CenterlineMask:
     line_xyxy: list[float]
 
 
+@dataclass(frozen=True)
+class DetectionSettings:
+    redetect_interval_frames: int
+    max_detections_per_frame: int
+    dedupe_iou_threshold: float
+
+
 class VideoSegmenter(Protocol):
     model_name: str
 
@@ -83,6 +90,7 @@ class VideoSegmenter(Protocol):
         prompt_id: str,
         prompt: str,
         score_threshold: float,
+        job_settings: dict[str, Any],
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
     ) -> Iterable[FrameResult]: ...
@@ -98,10 +106,11 @@ class MockSegmenter:
         prompt_id: str,
         prompt: str,
         score_threshold: float,
+        job_settings: dict[str, Any],
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
     ) -> Iterable[FrameResult]:
-        del video_path, prompt, score_threshold
+        del video_path, prompt, score_threshold, job_settings
         width = int(metadata["width"])
         height = int(metadata["height"])
         fps = float(metadata["fps"])
@@ -223,7 +232,7 @@ class Sam3Segmenter:
         self.offload_video_to_cpu = os.getenv(
             "SAM3_OFFLOAD_VIDEO_TO_CPU", "1"
         ).lower() in {"1", "true", "yes"}
-        max_tracked_objects = max(1, int(os.getenv("SAM3_MAX_TRACKED_OBJECTS", "4")))
+        max_tracked_objects = max(1, int(os.getenv("SAM3_MAX_TRACKED_OBJECTS", "16")))
         grounding_batch_size = max(1, int(os.getenv("SAM3_GROUNDING_BATCH_SIZE", "1")))
         postprocess_batch_size = max(1, int(os.getenv("SAM3_POSTPROCESS_BATCH_SIZE", "1")))
         self.predictor = build_sam3_multiplex_video_predictor(
@@ -246,12 +255,14 @@ class Sam3Segmenter:
         prompt_id: str,
         prompt: str,
         score_threshold: float,
+        job_settings: dict[str, Any],
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
     ) -> Iterable[FrameResult]:
         session_id: str | None = None
         total = int(metadata["frame_count"])
         fps = float(metadata["fps"])
+        detection_settings = _detection_settings(job_settings)
         try:
             response = self.predictor.handle_request(
                 {
@@ -261,15 +272,34 @@ class Sam3Segmenter:
                 }
             )
             session_id = response["session_id"]
-            self.predictor.handle_request(
-                {
-                    "type": "add_prompt",
-                    "session_id": session_id,
-                    "frame_index": 0,
-                    "text": prompt,
-                    "output_prob_thresh": score_threshold,
-                }
-            )
+            emitted_prompt_frames: set[int] = set()
+            for frame_index in _redetect_anchor_frames(total, detection_settings):
+                if cancelled():
+                    raise JobCancelled()
+                prompt_response = self.predictor.handle_request(
+                    {
+                        "type": "add_prompt",
+                        "session_id": session_id,
+                        "frame_index": frame_index,
+                        "text": prompt,
+                        "output_prob_thresh": score_threshold,
+                    }
+                )
+                prompt_results = _frame_results_from_response(
+                    prompt_response,
+                    metadata,
+                    prompt_id,
+                    frame_index,
+                    fps,
+                    detection_settings,
+                )
+                if prompt_results:
+                    emitted_prompt_frames.add(frame_index)
+                    yield from prompt_results
+                progress(min(frame_index + 1, total), total)
+            if len(emitted_prompt_frames) == total:
+                progress(total, total)
+                return
             for response in self.predictor.handle_stream_request(
                 {
                     "type": "propagate_in_video",
@@ -283,34 +313,17 @@ class Sam3Segmenter:
                     )
                     raise JobCancelled()
                 frame_index = int(response["frame_index"])
-                outputs = response["outputs"]
-                object_ids = _as_list(outputs.get("out_obj_ids"))
-                boxes = _as_list(outputs.get("out_boxes_xywh"))
-                scores = _as_list(outputs.get("out_probs"))
-                masks = outputs.get("out_binary_masks")
-                for index, object_id in enumerate(object_ids):
-                    mask = masks[index]
-                    centerline = _fit_centerline_mask(mask)
-                    box = [float(value) for value in boxes[index]]
-                    if box and max(abs(value) for value in box) <= 2:
-                        box = [
-                            box[0] * float(metadata["width"]),
-                            box[1] * float(metadata["height"]),
-                            box[2] * float(metadata["width"]),
-                            box[3] * float(metadata["height"]),
-                        ]
-                    yield FrameResult(
-                        frame_index=frame_index,
-                        timestamp_ms=round(frame_index * 1000 / fps),
-                        prompt_id=prompt_id,
-                        instance_id=f"{prompt_id}:{int(object_id)}",
-                        box_xywh=box,
-                        score=float(scores[index]) if index < len(scores) else None,
-                        segmentation=_encode_uncompressed_rle(mask),
-                        centerline_segmentation=centerline.segmentation if centerline else None,
-                        centerline_box_xywh=centerline.box_xywh if centerline else None,
-                        centerline_line_xyxy=centerline.line_xyxy if centerline else None,
-                    )
+                if frame_index in emitted_prompt_frames:
+                    progress(min(frame_index + 1, total), total)
+                    continue
+                yield from _frame_results_from_response(
+                    response,
+                    metadata,
+                    prompt_id,
+                    frame_index,
+                    fps,
+                    detection_settings,
+                )
                 progress(min(frame_index + 1, total), total)
         except self.torch.OutOfMemoryError as exc:
             raise ServiceError(
@@ -338,6 +351,133 @@ def create_segmenter(
     if name in {"sam3", "sam3.1"}:
         return Sam3Segmenter(checkpoint_path, offline=offline)
     raise ServiceError("INVALID_CONFIGURATION", f"Unknown segmenter: {name}")
+
+
+def _detection_settings(job_settings: dict[str, Any]) -> DetectionSettings:
+    return DetectionSettings(
+        redetect_interval_frames=max(0, int(job_settings.get("redetect_interval_frames", 0))),
+        max_detections_per_frame=max(1, int(job_settings.get("max_detections_per_frame", 13))),
+        dedupe_iou_threshold=max(
+            0.0, min(1.0, float(job_settings.get("dedupe_iou_threshold", 0.6)))
+        ),
+    )
+
+
+def _redetect_anchor_frames(total: int, settings: DetectionSettings) -> list[int]:
+    if total <= 0:
+        return [0]
+    if settings.redetect_interval_frames <= 0:
+        return [0]
+    anchors = list(range(0, total, settings.redetect_interval_frames))
+    if not anchors:
+        return [0]
+    return anchors
+
+
+def _frame_results_from_response(
+    response: dict[str, Any],
+    metadata: dict[str, Any],
+    prompt_id: str,
+    fallback_frame_index: int,
+    fps: float,
+    settings: DetectionSettings,
+) -> list[FrameResult]:
+    outputs = response.get("outputs")
+    if not isinstance(outputs, dict):
+        return []
+
+    frame_index = int(response.get("frame_index", fallback_frame_index))
+    object_ids = _as_list(outputs.get("out_obj_ids"))
+    boxes = _as_list(outputs.get("out_boxes_xywh"))
+    scores = _as_list(outputs.get("out_probs"))
+    masks = outputs.get("out_binary_masks")
+    if masks is None:
+        return []
+
+    results: list[FrameResult] = []
+    for index, object_id in enumerate(object_ids):
+        if index >= len(masks):
+            continue
+        mask = masks[index]
+        centerline = _fit_centerline_mask(mask)
+        box = _scaled_box(boxes[index], metadata) if index < len(boxes) else _box_from_any_mask(mask)
+        if box is None:
+            continue
+        results.append(
+            FrameResult(
+                frame_index=frame_index,
+                timestamp_ms=round(frame_index * 1000 / fps),
+                prompt_id=prompt_id,
+                instance_id=f"{prompt_id}:{int(object_id)}",
+                box_xywh=box,
+                score=float(scores[index]) if index < len(scores) else None,
+                segmentation=_encode_uncompressed_rle(mask),
+                centerline_segmentation=centerline.segmentation if centerline else None,
+                centerline_box_xywh=centerline.box_xywh if centerline else None,
+                centerline_line_xyxy=centerline.line_xyxy if centerline else None,
+            )
+        )
+    return _dedupe_frame_results(results, settings)
+
+
+def _scaled_box(raw_box: Any, metadata: dict[str, Any]) -> list[float] | None:
+    box = [float(value) for value in raw_box]
+    if len(box) != 4:
+        return None
+    if max(abs(value) for value in box) <= 2:
+        return [
+            box[0] * float(metadata["width"]),
+            box[1] * float(metadata["height"]),
+            box[2] * float(metadata["width"]),
+            box[3] * float(metadata["height"]),
+        ]
+    return box
+
+
+def _box_from_any_mask(mask: Any) -> list[float] | None:
+    mask, height, width = _coerce_2d_mask(mask)
+    rows = [[bool(mask[y][x]) for x in range(width)] for y in range(height)]
+    return _box_from_mask(rows)
+
+
+def _dedupe_frame_results(
+    results: list[FrameResult], settings: DetectionSettings
+) -> list[FrameResult]:
+    ordered = sorted(
+        results,
+        key=lambda result: (
+            result.score if result.score is not None else 0.0,
+            _box_area(result.box_xywh),
+        ),
+        reverse=True,
+    )
+    kept: list[FrameResult] = []
+    for result in ordered:
+        if any(
+            _box_iou(result.box_xywh, existing.box_xywh) > settings.dedupe_iou_threshold
+            for existing in kept
+        ):
+            continue
+        kept.append(result)
+        if len(kept) >= settings.max_detections_per_frame:
+            break
+    return sorted(kept, key=lambda result: result.instance_id)
+
+
+def _box_area(box: list[float]) -> float:
+    return max(0.0, box[2]) * max(0.0, box[3]) if len(box) == 4 else 0.0
+
+
+def _box_iou(first: list[float], second: list[float]) -> float:
+    if len(first) != 4 or len(second) != 4:
+        return 0.0
+    left = max(first[0], second[0])
+    top = max(first[1], second[1])
+    right = min(first[0] + first[2], second[0] + second[2])
+    bottom = min(first[1] + first[3], second[1] + second[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    union = _box_area(first) + _box_area(second) - intersection
+    return intersection / union if union > 0 else 0.0
 
 
 def _as_list(value: Any) -> list[Any]:
