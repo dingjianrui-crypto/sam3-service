@@ -169,6 +169,22 @@ Fields:
 | `settings.include_boxes` | boolean | Reserved client preference; current chunks include boxes |
 | `settings.working_max_dimension` | integer | Accepted range `320` to `1920`; reserved for processing-size control |
 
+Detection mode presets used by the web UI:
+
+| Mode | `score_threshold` | `redetect_interval_frames` | `max_detections_per_frame` | `dedupe_iou_threshold` | Use when |
+|---|---:|---:|---:|---:|---|
+| `Recall first` | `0.3` | `1` | `13` | `0.6` | Paddle count, visibility, or camera zoom changes over time; prioritize finding as many paddle parts as possible |
+| `Balanced` | `0.35` | `10` | `13` | `0.6` | Need recovery from drift or new objects, but every-frame grounding is too slow |
+| `Fast tracking` | `0.5` | `0` | `13` | `0.6` | Objects are already visible at frame 0 and speed matters more than rediscovery |
+| `Custom` | user-defined | user-defined | user-defined | user-defined | Advanced tuning for a specific video, GPU budget, or false-positive/false-negative balance |
+
+Mode semantics:
+
+- `redetect_interval_frames: 0` keeps the original behavior: text grounding runs on frame 0, then SAM3 propagation handles later frames.
+- `redetect_interval_frames: 1` attempts text grounding on every frame, then de-duplicates and caps detections before storing results.
+- Values above `1` re-ground on periodic anchor frames, for example `10` means frame `0, 10, 20, ...`.
+- `max_detections_per_frame` is applied per prompt after same-frame de-duplication. The service rejects values above `SAM3_MAX_DETECTIONS_PER_FRAME`.
+
 For paddle scenes with up to four paddlers, the recall-first default is `max_detections_per_frame: 13`: up to three visible paddle parts per paddler, plus room for a boat/reference prompt when used separately. Increase the service-side SAM3 object cap above this, for example `SAM3_MAX_TRACKED_OBJECTS=16` or `24`, so duplicate candidates do not consume all model slots before API de-duplication.
 
 Response:
@@ -662,6 +678,17 @@ For noisy masks, add RANSAC before the principal-component step:
 Returns an MP4 with centerlines and angle annotations over the original video.
 
 Use this endpoint when another application needs a quick visual artifact rather than raw analytical data. For analytics, prefer the manifest and chunks because they preserve per-frame masks, lines, boxes, scores, prompt IDs, and instance IDs.
+
+Query parameters:
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `angle_label_position` | `top` or `bottom` | `top` | Vertical placement for the stacked degree label block |
+| `angle_label_font_size` | integer, `12` to `96` | `32` | Font size in video pixels for the burned-in degree labels |
+| `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
+| `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
+
+For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target. For example, if four paddle instances are detected, the exported video can show four stacked labels such as `Paddle 1: 42°`, `Paddle 2: 51°`, `Paddle 3: 37°`, and `Paddle 4: 48°`. The same degree is also drawn near each paddle centerline.
 
 ## Error Format
 

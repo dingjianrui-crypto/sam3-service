@@ -613,7 +613,8 @@ h2 {
   color: #8299ab;
 }
 
-.viewer-controls select {
+.viewer-controls select,
+.viewer-controls input[type="number"] {
   padding: 6px 8px;
   color: #dce8f8;
   border: 1px solid #294052;
@@ -637,6 +638,17 @@ h2 {
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+}
+
+.export-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.export-controls input[type="number"] {
+  width: 74px;
 }
 
 .export-button:disabled {

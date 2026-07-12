@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import zlib
 from bisect import bisect_left
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,30 @@ from .media import probe_video
 
 Color = tuple[int, int, int, int]
 Line = tuple[float, float, float, float]
+LabelPosition = str
+
+
+@dataclass(frozen=True)
+class ExportOptions:
+    angle_label_position: LabelPosition = "top"
+    angle_label_font_size: int | None = None
+    reference_prompt_id: str | None = None
+    target_prompt_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Centerline:
+    record: dict[str, Any]
+    line: Line
+    color: Color
+
+
+@dataclass(frozen=True)
+class DegreeLabel:
+    instance_id: str
+    degree: int
+    line: Line
+    color: Color
 
 
 def export_centerline_video(
@@ -24,6 +49,7 @@ def export_centerline_video(
     temporary_dir: Path,
     manifest: dict[str, Any],
     chunk_paths: list[Path],
+    options: ExportOptions | None = None,
 ) -> Path:
     if not video_path.is_file():
         raise ServiceError("NOT_FOUND", "Video content is unavailable.", status_code=404)
@@ -45,6 +71,7 @@ def export_centerline_video(
     if width <= 0 or height <= 0 or frame_count <= 0:
         raise ServiceError("EXPORT_FAILED", "Result manifest has invalid video metadata.")
 
+    export_options = _normalize_export_options(options, manifest, width, height)
     if temporary_dir.exists():
         shutil.rmtree(temporary_dir)
     frames_dir = temporary_dir / "frames"
@@ -61,9 +88,7 @@ def export_centerline_video(
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
-    use_subtitle_top_label = _ffmpeg_supports_filter("subtitles")
-    top_degrees: list[int | None] = []
-    carried_degree: int | None = None
+    carried_labels: list[DegreeLabel] = []
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
         timestamp_ms = round(frame_index * 1000 / fps)
@@ -71,26 +96,19 @@ def export_centerline_video(
             frames, frame_timestamps, timestamp_ms, result_tolerance_ms
         )
         scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
-        carried_degree = _draw_frame_overlay(
+        carried_labels = _draw_frame_overlay(
             image,
             width,
             height,
             scaled_records,
             colors,
-            fallback_degree=carried_degree,
-            draw_top_label=not use_subtitle_top_label,
+            export_options=export_options,
+            fallback_labels=carried_labels,
         )
-        top_degrees.append(carried_degree)
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
     filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
-    subtitle_path = temporary_dir / "paddle-degree-labels.ass"
-    if use_subtitle_top_label and _write_degree_subtitles(
-        subtitle_path, top_degrees, width, height, fps
-    ):
-        filter_complex += f";[ov]subtitles={_ffmpeg_filter_path(subtitle_path)}[v]"
-    else:
-        filter_complex += ";[ov]null[v]"
+    filter_complex += ";[ov]null[v]"
 
     command = [
         "ffmpeg",
@@ -152,81 +170,59 @@ def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[st
     return frames
 
 
-def _ffmpeg_supports_filter(name: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return False
-    return any(line.split()[1:2] == [name] for line in result.stdout.splitlines())
-
-
-def _write_degree_subtitles(
-    path: Path,
-    degrees: list[int | None],
+def _normalize_export_options(
+    options: ExportOptions | None,
+    manifest: dict[str, Any],
     width: int,
     height: int,
-    fps: float,
-) -> bool:
-    intervals: list[tuple[int, int, int]] = []
-    start_index: int | None = None
-    active_degree: int | None = None
-    for index, degree in enumerate(degrees + [None]):
-        if degree == active_degree:
-            continue
-        if active_degree is not None and start_index is not None:
-            intervals.append((start_index, index, active_degree))
-        start_index = index if degree is not None else None
-        active_degree = degree
-    if not intervals:
-        return False
-
-    font_size = max(28, round(min(height * 0.085, width * 0.08)))
-    margin_v = max(round(height * 0.14), font_size * 2)
-    header = f"""[Script Info]
-ScriptType: v4.00+
-PlayResX: {width}
-PlayResY: {height}
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TopDegree, Arial,{font_size},&H00A8F2FF,&H00FFFFFF,&H00090502,&HA0090502,1,0,0,0,100,100,0,0,4,3,0,8,24,24,{margin_v},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    lines = [header]
-    for start_index, end_index, degree in intervals:
-        start = _ass_time(start_index / fps)
-        end = _ass_time(end_index / fps)
-        text = _ass_escape(f"Paddle Degree: {degree}")
-        lines.append(f"Dialogue: 0,{start},{end},TopDegree,,0,0,0,,{text}\n")
-    path.write_text("".join(lines), encoding="utf-8")
-    return True
+) -> ExportOptions:
+    prompts = manifest.get("prompts", [])
+    prompt_ids = tuple(prompt["id"] for prompt in prompts if prompt.get("id"))
+    requested = options or ExportOptions()
+    reference_prompt_id = requested.reference_prompt_id
+    if reference_prompt_id not in prompt_ids:
+        reference_prompt_id = _default_reference_prompt_id(prompts)
+    target_prompt_ids = tuple(
+        prompt_id for prompt_id in requested.target_prompt_ids if prompt_id in prompt_ids
+    )
+    if not target_prompt_ids:
+        target_prompt_ids = _default_target_prompt_ids(prompts, reference_prompt_id)
+    position = (
+        requested.angle_label_position
+        if requested.angle_label_position in {"top", "bottom"}
+        else "top"
+    )
+    default_font_size = max(18, round(min(height * 0.045, width * 0.038)))
+    font_size = requested.angle_label_font_size or default_font_size
+    return ExportOptions(
+        angle_label_position=position,
+        angle_label_font_size=max(12, min(96, int(font_size))),
+        reference_prompt_id=reference_prompt_id,
+        target_prompt_ids=target_prompt_ids,
+    )
 
 
-def _ass_time(seconds: float) -> str:
-    centiseconds = max(0, round(seconds * 100))
-    hours, remainder = divmod(centiseconds, 360000)
-    minutes, remainder = divmod(remainder, 6000)
-    whole_seconds, centiseconds = divmod(remainder, 100)
-    return f"{hours}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
+def _default_reference_prompt_id(prompts: list[dict[str, Any]]) -> str | None:
+    for prompt in prompts:
+        if "boat" in str(prompt.get("text", "")).lower():
+            return prompt.get("id")
+    if len(prompts) > 1:
+        return prompts[1].get("id")
+    return prompts[0].get("id") if prompts else None
 
 
-def _ass_escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-
-
-def _ffmpeg_filter_path(path: Path) -> str:
-    value = str(path)
-    value = value.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{value}'"
+def _default_target_prompt_ids(
+    prompts: list[dict[str, Any]], reference_prompt_id: str | None
+) -> tuple[str, ...]:
+    preferred = [
+        prompt["id"]
+        for prompt in prompts
+        if prompt.get("id") != reference_prompt_id
+        and "paddle" in str(prompt.get("text", "")).lower()
+    ]
+    if preferred:
+        return tuple(preferred)
+    return tuple(prompt["id"] for prompt in prompts if prompt.get("id") != reference_prompt_id)
 
 
 def _records_for_timestamp(
@@ -271,39 +267,25 @@ def _draw_frame_overlay(
     records: list[dict[str, Any]],
     colors: dict[str, Color],
     *,
-    fallback_degree: int | None = None,
-    draw_top_label: bool = True,
-) -> int | None:
-    centerlines: list[tuple[dict[str, Any], Line, Color]] = []
-    displayed_degree: int | None = fallback_degree
+    export_options: ExportOptions,
+    fallback_labels: list[DegreeLabel],
+) -> list[DegreeLabel]:
+    centerlines: list[Centerline] = []
     for record in records:
         line = _record_line(record)
         if line is None:
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
-        centerlines.append((record, line, color))
+        centerlines.append(Centerline(record=record, line=line, color=color))
         _draw_line(image, width, height, line, color, max(3, round(min(width, height) * 0.006)))
 
-    current_annotation: dict[str, float] | None = None
-    for first_index in range(len(centerlines)):
-        for second_index in range(first_index + 1, len(centerlines)):
-            first_record, first_line, _first_color = centerlines[first_index]
-            second_record, second_line, _second_color = centerlines[second_index]
-            if first_record["prompt_id"] == second_record["prompt_id"]:
-                continue
-            annotation = _angle_annotation(first_line, second_line)
-            if annotation is not None:
-                current_annotation = annotation
-                break
-        if current_annotation is not None:
-            break
-    if current_annotation is not None:
-        updated_degree = round(current_annotation["degrees"])
-        displayed_degree = updated_degree
-        _draw_angle_annotation(image, width, height, current_annotation, updated_degree)
-    if displayed_degree is not None and draw_top_label:
-        _draw_top_degree_label(image, width, height, displayed_degree)
-    return displayed_degree
+    labels = _degree_labels(centerlines, export_options)
+    displayed_labels = labels or fallback_labels
+    for label in labels:
+        _draw_target_degree_marker(image, width, height, label)
+    if displayed_labels:
+        _draw_degree_label_block(image, width, height, displayed_labels, export_options)
+    return labels or fallback_labels
 
 
 def _record_line(record: dict[str, Any]) -> Line | None:
@@ -319,10 +301,58 @@ def _record_line(record: dict[str, Any]) -> Line | None:
     return line  # type: ignore[return-value]
 
 
-def _angle_annotation(first: Line, second: Line) -> dict[str, float] | None:
-    intersection = _segment_intersection(first, second)
-    if intersection is None:
-        return None
+def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> list[DegreeLabel]:
+    if not options.reference_prompt_id or not options.target_prompt_ids:
+        return []
+    references = [
+        centerline
+        for centerline in centerlines
+        if centerline.record.get("prompt_id") == options.reference_prompt_id
+    ]
+    if not references:
+        return []
+    target_prompt_ids = set(options.target_prompt_ids)
+    targets = [
+        centerline
+        for centerline in centerlines
+        if centerline.record.get("prompt_id") in target_prompt_ids
+    ]
+    labels: list[DegreeLabel] = []
+    for target in sorted(
+        targets,
+        key=lambda item: (_line_center(item.line)[0], item.record.get("instance_id", "")),
+    ):
+        reference = _nearest_centerline(target, references)
+        degrees = _line_angle_degrees(target.line, reference.line)
+        if degrees is None:
+            continue
+        labels.append(
+            DegreeLabel(
+                instance_id=str(target.record.get("instance_id", "")),
+                degree=round(degrees),
+                line=target.line,
+                color=target.color,
+            )
+        )
+    return labels
+
+
+def _nearest_centerline(target: Centerline, references: list[Centerline]) -> Centerline:
+    target_x, target_y = _line_center(target.line)
+    return min(
+        references,
+        key=lambda reference: math.hypot(
+            target_x - _line_center(reference.line)[0],
+            target_y - _line_center(reference.line)[1],
+        ),
+    )
+
+
+def _line_center(line: Line) -> tuple[float, float]:
+    return (line[0] + line[2]) / 2, (line[1] + line[3]) / 2
+
+
+def _line_angle_degrees(first: Line, second: Line) -> float | None:
     first_vector = _normalize((first[2] - first[0], first[3] - first[1]))
     second_vector = _normalize((second[2] - second[0], second[3] - second[1]))
     if first_vector is None or second_vector is None:
@@ -333,87 +363,55 @@ def _angle_annotation(first: Line, second: Line) -> dict[str, float] | None:
     degrees = math.degrees(radians)
     if not math.isfinite(degrees) or degrees < 2:
         return None
-
-    first_angle = math.atan2(first_vector[1], first_vector[0])
-    second_angle = math.atan2(second_vector[1], second_vector[0])
-    delta = _normalize_angle(second_angle - first_angle)
-    if abs(delta) > math.pi:
-        delta -= math.copysign(math.tau, delta)
-    return {
-        "x": intersection[0],
-        "y": intersection[1],
-        "start_angle": first_angle,
-        "end_angle": first_angle + delta,
-        "degrees": min(degrees, 180 - degrees),
-    }
+    return min(degrees, 180 - degrees)
 
 
-def _segment_intersection(first: Line, second: Line) -> tuple[float, float] | None:
-    x1, y1, x2, y2 = first
-    x3, y3, x4, y4 = second
-    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denominator) < 1e-6:
-        return None
-    first_det = x1 * y2 - y1 * x2
-    second_det = x3 * y4 - y3 * x4
-    x = (first_det * (x3 - x4) - (x1 - x2) * second_det) / denominator
-    y = (first_det * (y3 - y4) - (y1 - y2) * second_det) / denominator
-    if not _point_on_segment(x, y, first) or not _point_on_segment(x, y, second):
-        return None
-    return x, y
-
-
-def _point_on_segment(x: float, y: float, line: Line) -> bool:
-    x1, y1, x2, y2 = line
-    tolerance = 1.5
-    return (
-        min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance
-        and min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance
+def _draw_target_degree_marker(
+    image: bytearray,
+    width: int,
+    height: int,
+    label: DegreeLabel,
+) -> None:
+    center_x, center_y = _line_center(label.line)
+    dx = label.line[2] - label.line[0]
+    dy = label.line[3] - label.line[1]
+    length = max(math.hypot(dx, dy), 1.0)
+    offset = max(18, min(width, height) * 0.035)
+    label_x = center_x + (-dy / length) * offset
+    label_y = center_y + (dx / length) * offset
+    _draw_line(
+        image,
+        width,
+        height,
+        (center_x, center_y, label_x, label_y),
+        label.color,
+        max(2, round(min(width, height) * 0.003)),
     )
+    _draw_small_degree_label(image, width, height, label_x, label_y, f"{label.degree}°")
 
 
-def _draw_angle_annotation(
+def _draw_degree_label_block(
     image: bytearray,
     width: int,
     height: int,
-    annotation: dict[str, float],
-    displayed_degree: int | None = None,
+    labels: list[DegreeLabel],
+    options: ExportOptions,
 ) -> None:
-    radius = max(24, min(width, height) * 0.07)
-    start = annotation["start_angle"]
-    end = annotation["end_angle"]
-    delta = _normalize_angle(end - start)
-    steps = max(12, int(abs(delta) * radius / 2))
-    yellow = (255, 242, 168, 255)
-    for step in range(steps + 1):
-        angle = start + delta * step / max(steps, 1)
-        x = annotation["x"] + math.cos(angle) * radius
-        y = annotation["y"] + math.sin(angle) * radius
-        _draw_circle(image, width, height, x, y, 2.2, yellow)
-
-    mid = start + delta / 2
-    label = f"{round(annotation['degrees'] if displayed_degree is None else displayed_degree)}°"
-    label_x = annotation["x"] + math.cos(mid) * (radius + 18)
-    label_y = annotation["y"] + math.sin(mid) * (radius + 18)
-    _draw_small_degree_label(image, width, height, label_x, label_y, label)
-
-
-def _draw_top_degree_label(
-    image: bytearray,
-    width: int,
-    height: int,
-    degree: int,
-) -> None:
-    if _draw_top_degree_label_with_pillow(image, width, height, degree):
+    if _draw_degree_label_block_with_pillow(image, width, height, labels, options):
         return
-    _draw_top_degree_label_bitmap(image, width, height, degree)
+    _draw_degree_label_block_bitmap(image, width, height, labels, options)
 
 
-def _draw_top_degree_label_with_pillow(
+def _degree_label_lines(labels: list[DegreeLabel]) -> list[str]:
+    return [f"Paddle {index}: {label.degree}°" for index, label in enumerate(labels, start=1)]
+
+
+def _draw_degree_label_block_with_pillow(
     image: bytearray,
     width: int,
     height: int,
-    degree: int,
+    labels: list[DegreeLabel],
+    options: ExportOptions,
 ) -> bool:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -424,31 +422,29 @@ def _draw_top_degree_label_with_pillow(
     if font_path is None:
         return False
 
-    text = f"Paddle Degree: {degree}"
-    font_size = max(24, round(min(height * 0.07, width * 0.075)))
+    font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
     try:
         font = ImageFont.truetype(str(font_path), font_size)
     except OSError:
         return False
 
+    lines = _degree_label_lines(labels)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    for _attempt in range(8):
-        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=max(1, round(font_size * 0.05)))
-        text_width = bbox[2] - bbox[0]
-        if text_width <= width * 0.86 or font_size <= 18:
-            break
-        font_size = round(font_size * 0.9)
-        font = ImageFont.truetype(str(font_path), font_size)
-
     stroke_width = max(1, round(font_size * 0.05))
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    padding_x = round(font_size * 0.42)
-    padding_y = round(font_size * 0.25)
+    line_boxes = [
+        draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width) for line in lines
+    ]
+    text_width = max(box[2] - box[0] for box in line_boxes)
+    line_heights = [box[3] - box[1] for box in line_boxes]
+    line_gap = max(4, round(font_size * 0.28))
+    text_height = sum(line_heights) + line_gap * max(0, len(lines) - 1)
+    padding_x = round(font_size * 0.55)
+    padding_y = round(font_size * 0.4)
     left = round(width / 2 - text_width / 2)
-    top = round(max(height * 0.15, font_size * 1.8))
+    margin = max(round(height * 0.055), font_size)
+    top = margin if options.angle_label_position == "top" else height - margin - text_height
+    top = max(margin, min(top, height - margin - text_height))
     box = (
         left - padding_x,
         top - padding_y,
@@ -457,16 +453,63 @@ def _draw_top_degree_label_with_pillow(
     )
     radius = max(4, round(font_size * 0.16))
     draw.rounded_rectangle(box, radius=radius, fill=(2, 5, 9, 190))
-    draw.text(
-        (left - bbox[0], top - bbox[1]),
-        text,
-        font=font,
-        fill=(255, 242, 168, 255),
-        stroke_width=stroke_width,
-        stroke_fill=(2, 5, 9, 255),
-    )
+    y = top
+    for line, bbox, line_height in zip(lines, line_boxes, line_heights):
+        draw.text(
+            (left - bbox[0], y - bbox[1]),
+            line,
+            font=font,
+            fill=(255, 242, 168, 255),
+            stroke_width=stroke_width,
+            stroke_fill=(2, 5, 9, 255),
+        )
+        y += line_height + line_gap
     _blend_overlay(image, width, overlay.tobytes())
     return True
+
+
+def _draw_degree_label_block_bitmap(
+    image: bytearray,
+    width: int,
+    height: int,
+    labels: list[DegreeLabel],
+    options: ExportOptions,
+) -> None:
+    lines = _degree_label_lines(labels)
+    font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    scale = max(2, round(font_size / 7))
+    gap = max(1, round(scale * 0.75))
+    line_gap = max(2, round(scale * 1.4))
+    glyph_lines = [[_glyph(character) for character in line] for line in lines]
+    line_widths = [
+        sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(0, len(glyphs) - 1)
+        for glyphs in glyph_lines
+    ]
+    text_width = max(line_widths)
+    line_height = 7 * scale
+    text_height = len(lines) * line_height + max(0, len(lines) - 1) * line_gap
+    padding_x = round(scale * 2.2)
+    padding_y = round(scale * 1.5)
+    left = round(width / 2 - text_width / 2)
+    margin = max(round(height * 0.055), font_size)
+    top = margin if options.angle_label_position == "top" else height - margin - text_height
+    _fill_rect(
+        image,
+        width,
+        height,
+        left - padding_x,
+        top - padding_y,
+        text_width + padding_x * 2,
+        text_height + padding_y * 2,
+        (2, 5, 9, 178),
+    )
+    y = top
+    for glyphs, line_width in zip(glyph_lines, line_widths):
+        x = round(width / 2 - line_width / 2)
+        for glyph in glyphs:
+            _draw_bitmap(image, width, height, x, y, glyph, scale, (255, 242, 168, 255))
+            x += len(glyph[0]) * scale + gap
+        y += line_height + line_gap
 
 
 def _find_export_font() -> Path | None:
@@ -491,42 +534,6 @@ def _find_export_font() -> Path | None:
         if candidate and candidate.is_file():
             return candidate
     return None
-
-
-def _draw_top_degree_label_bitmap(
-    image: bytearray,
-    width: int,
-    height: int,
-    degree: int,
-) -> None:
-    text = f"Paddle Degree: {degree}"
-    glyphs = [_glyph(character) for character in text]
-    unit_width = sum(len(glyph[0]) for glyph in glyphs) + max(0, len(glyphs) - 1) * 0.35
-    glyph_height = max(len(glyph) for glyph in glyphs)
-    desired_scale = max(2, round(min(height * 0.08, width * 0.12) / glyph_height))
-    scale = max(2, min(desired_scale, math.floor(width * 0.84 / max(unit_width, 1))))
-    gap = max(1, round(scale * 0.75))
-    text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * (len(glyphs) - 1)
-    text_height = max(len(glyph) for glyph in glyphs) * scale
-    padding_x = round(scale * 1.4)
-    padding_y = round(scale * 0.9)
-    left = round(width / 2 - text_width / 2)
-    top = round(max(height * 0.16, scale * 2.0))
-    _fill_rect(
-        image,
-        width,
-        height,
-        left - padding_x,
-        top - padding_y,
-        text_width + padding_x * 2,
-        text_height + padding_y * 2,
-        (2, 5, 9, 178),
-    )
-    x = left
-    for glyph in glyphs:
-        glyph_top = top + (text_height - len(glyph) * scale) // 2
-        _draw_bitmap(image, width, height, x, glyph_top, glyph, scale, (255, 242, 168, 255))
-        x += len(glyph[0]) * scale + gap
 
 
 def _draw_small_degree_label(
@@ -587,26 +594,6 @@ def _draw_line(
             closest_x = x1 + t * dx
             closest_y = y1 + t * dy
             if (x - closest_x) ** 2 + (y - closest_y) ** 2 <= radius * radius:
-                _blend_pixel(image, width, x, y, color)
-
-
-def _draw_circle(
-    image: bytearray,
-    width: int,
-    height: int,
-    center_x: float,
-    center_y: float,
-    radius: float,
-    color: Color,
-) -> None:
-    min_x = max(0, math.floor(center_x - radius))
-    max_x = min(width - 1, math.ceil(center_x + radius))
-    min_y = max(0, math.floor(center_y - radius))
-    max_y = min(height - 1, math.ceil(center_y + radius))
-    radius_sq = radius * radius
-    for y in range(min_y, max_y + 1):
-        for x in range(min_x, max_x + 1):
-            if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius_sq:
                 _blend_pixel(image, width, x, y, color)
 
 
@@ -720,7 +707,12 @@ def _write_png_rgba(path: Path, width: int, height: int, pixels: bytearray) -> N
     payload = b"".join(
         [
             b"\x89PNG\r\n\x1a\n",
-            _png_chunk(b"IHDR", width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00"),
+            _png_chunk(
+                b"IHDR",
+                width.to_bytes(4, "big")
+                + height.to_bytes(4, "big")
+                + b"\x08\x06\x00\x00\x00",
+            ),
             _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=1)),
             _png_chunk(b"IEND", b""),
         ]
@@ -759,11 +751,3 @@ def _dot(first: tuple[float, float], second: tuple[float, float]) -> float:
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
-
-
-def _normalize_angle(angle: float) -> float:
-    while angle <= -math.pi:
-        angle += math.tau
-    while angle > math.pi:
-        angle -= math.tau
-    return angle

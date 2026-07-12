@@ -67,6 +67,13 @@ export type ResultManifest = {
   }[];
 };
 
+export type ExportVideoOptions = {
+  angle_label_position: "top" | "bottom";
+  angle_label_font_size: number;
+  reference_prompt_id?: string;
+  target_prompt_ids?: string[];
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -180,8 +187,22 @@ export function deleteJob(jobId: string): Promise<void> {
   return request(`/api/v1/jobs/${jobId}`, { method: "DELETE" });
 }
 
-export async function exportJobVideo(jobId: string): Promise<Blob> {
-  const response = await fetch(`/api/v1/jobs/${jobId}/export?t=${Date.now()}`, {
+export async function exportJobVideo(
+  jobId: string,
+  options: ExportVideoOptions
+): Promise<Blob> {
+  const params = new URLSearchParams({
+    t: String(Date.now()),
+    angle_label_position: options.angle_label_position,
+    angle_label_font_size: String(options.angle_label_font_size)
+  });
+  if (options.reference_prompt_id) {
+    params.set("reference_prompt_id", options.reference_prompt_id);
+  }
+  if (options.target_prompt_ids?.length) {
+    params.set("target_prompt_ids", options.target_prompt_ids.join(","));
+  }
+  const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"
   });
   if (!response.ok) {

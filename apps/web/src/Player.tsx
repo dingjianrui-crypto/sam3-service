@@ -19,6 +19,8 @@ type AngleConfig = {
   targetPromptIds: Set<string>;
 };
 
+type ExportLabelPosition = "top" | "bottom";
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
     callback: (now: number, metadata: { mediaTime: number }) => void
@@ -48,6 +50,8 @@ export function Player({ manifest }: Props) {
   const [angleEnabled, setAngleEnabled] = useState(false);
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
+  const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
+  const [exportFontSize, setExportFontSize] = useState(32);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
   const [enabledPrompts, setEnabledPrompts] = useState(
@@ -171,7 +175,12 @@ export function Player({ manifest }: Props) {
     setExporting(true);
     setExportStatus("Rendering MP4 on server…");
     try {
-      const blob = await exportJobVideo(manifest.job_id);
+      const blob = await exportJobVideo(manifest.job_id, {
+        angle_label_position: exportLabelPosition,
+        angle_label_font_size: exportFontSize,
+        reference_prompt_id: angleReferencePromptId,
+        target_prompt_ids: [...angleTargetPromptIds]
+      });
       downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
       setExportStatus("Export complete.");
     } catch (reason) {
@@ -179,7 +188,13 @@ export function Player({ manifest }: Props) {
     } finally {
       setExporting(false);
     }
-  }, [manifest.job_id]);
+  }, [
+    angleReferencePromptId,
+    angleTargetPromptIds,
+    exportFontSize,
+    exportLabelPosition,
+    manifest.job_id
+  ]);
 
   return (
     <section className="viewer">
@@ -288,10 +303,35 @@ export function Player({ manifest }: Props) {
             </div>
           </div>
         )}
-        <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
-          {exporting ? "Exporting…" : "Export"}
-        </button>
-        {exportStatus && <span className="export-status">{exportStatus}</span>}
+        <div className="export-controls">
+          <label>
+            Label position
+            <select
+              value={exportLabelPosition}
+              onChange={(event) => setExportLabelPosition(event.target.value as ExportLabelPosition)}
+            >
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+            </select>
+          </label>
+          <label>
+            Font size
+            <input
+              type="number"
+              min="12"
+              max="96"
+              step="2"
+              value={exportFontSize}
+              onChange={(event) =>
+                setExportFontSize(Math.min(96, Math.max(12, Number(event.target.value))))
+              }
+            />
+          </label>
+          <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
+            {exporting ? "Exporting…" : "Export"}
+          </button>
+          {exportStatus && <span className="export-status">{exportStatus}</span>}
+        </div>
       </div>
     </section>
   );

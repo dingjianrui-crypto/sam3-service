@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings
 from .db import Database, expires_at, utc_now
 from .errors import ServiceError
-from .exporter import export_centerline_video
+from .exporter import ExportOptions, export_centerline_video
 from .media import probe_video
 from .schemas import JobCreate, VideoCreate
 from .storage import LocalStorage, sha256_file
@@ -406,7 +406,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(row["path"], media_type="application/json")
 
     @app.get("/api/v1/jobs/{job_id}/export")
-    def export_job(job_id: str, request: Request) -> FileResponse:
+    def export_job(
+        job_id: str,
+        request: Request,
+        angle_label_position: str = Query(default="top", pattern="^(top|bottom)$"),
+        angle_label_font_size: int = Query(default=32, ge=12, le=96),
+        reference_prompt_id: str | None = Query(default=None),
+        target_prompt_ids: str | None = Query(default=None),
+    ) -> FileResponse:
         database: Database = request.app.state.database
         storage: LocalStorage = request.app.state.storage
         job = database.job_detail(job_id)
@@ -430,6 +437,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             temporary_dir=storage.export_tmp_dir(job_id),
             manifest=json.loads(manifest_path.read_text()),
             chunk_paths=chunk_paths,
+            options=ExportOptions(
+                angle_label_position=angle_label_position,
+                angle_label_font_size=angle_label_font_size,
+                reference_prompt_id=reference_prompt_id,
+                target_prompt_ids=tuple(
+                    item.strip() for item in (target_prompt_ids or "").split(",") if item.strip()
+                ),
+            ),
         )
         return FileResponse(
             output_path,
