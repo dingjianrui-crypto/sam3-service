@@ -599,6 +599,24 @@ h2 {
   background: #07111a;
 }
 
+.angle-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid #1c3a4f;
+  border-radius: 8px;
+  background: #071522;
+}
+
+.angle-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
 .export-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;

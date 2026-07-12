@@ -502,6 +502,35 @@ function clamp(value, min, max) {
 }
 ```
 
+For multiple paddles against one boat centerline, group records by `prompt_id` for the current frame, choose the boat prompt as the reference, and calculate each paddle instance against that reference:
+
+```js
+function paddleAnglesForFrame(records, boatPromptId, paddlePromptIds) {
+  const boat = records.find(
+    (record) => record.prompt_id === boatPromptId && record.centerline_line_xyxy
+  );
+  if (!boat) return [];
+
+  return records
+    .filter(
+      (record) =>
+        paddlePromptIds.has(record.prompt_id) &&
+        record.centerline_line_xyxy
+    )
+    .map((paddle) => ({
+      paddle_instance_id: paddle.instance_id,
+      boat_instance_id: boat.instance_id,
+      degrees: angleBetweenLines(
+        paddle.centerline_line_xyxy,
+        boat.centerline_line_xyxy
+      )
+    }))
+    .filter((item) => item.degrees != null);
+}
+```
+
+The API intentionally does not emit angle records because different applications may choose different reference prompts, pairing rules, or smoothing behavior.
+
 Intersection point for two centerline segments:
 
 ```js
