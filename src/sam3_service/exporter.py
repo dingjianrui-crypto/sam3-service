@@ -23,6 +23,7 @@ LabelPosition = str
 class ExportOptions:
     angle_label_position: LabelPosition = "top"
     angle_label_font_size: int | None = None
+    include_spm: bool = False
     reference_prompt_id: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
 
@@ -47,6 +48,82 @@ class DegreeLabelEntry:
     text: str
     label: DegreeLabel
     text_color: Color
+
+
+@dataclass(frozen=True)
+class SpmEstimate:
+    instantaneous: float | None
+    average: float | None
+
+
+class SpmEstimator:
+    def __init__(self, *, window_ms: int = 8000) -> None:
+        self.window_ms = window_ms
+        self._tracks: dict[int, _SpmTrack] = {}
+
+    def update(self, timestamp_ms: int, labels: list[DegreeLabel]) -> SpmEstimate:
+        for index, label in enumerate(labels):
+            self._tracks.setdefault(index, _SpmTrack()).update(timestamp_ms, float(label.degree))
+        recent_values: list[float] = []
+        average_values: list[float] = []
+        for track in self._tracks.values():
+            recent = track.instantaneous_spm(timestamp_ms, self.window_ms)
+            average = track.average_spm()
+            if recent is not None:
+                recent_values.append(recent)
+            if average is not None:
+                average_values.append(average)
+        return SpmEstimate(
+            instantaneous=_mean(recent_values),
+            average=_mean(average_values),
+        )
+
+
+class _SpmTrack:
+    def __init__(self) -> None:
+        self.samples: list[tuple[int, float]] = []
+        self.events_ms: list[int] = []
+        self._last_slope = 0
+        self._last_extreme_ms: int | None = None
+        self._last_extreme_degree: float | None = None
+
+    def update(self, timestamp_ms: int, degree: float) -> None:
+        if self.samples and timestamp_ms <= self.samples[-1][0]:
+            return
+        self.samples.append((timestamp_ms, degree))
+        if len(self.samples) > 5:
+            self.samples = self.samples[-5:]
+        if len(self.samples) < 3:
+            return
+        previous_degree = self.samples[-2][1]
+        slope = _sign(degree - previous_degree, epsilon=1.5)
+        if slope == 0:
+            return
+        if self._last_slope and slope != self._last_slope:
+            event_ms, event_degree = self.samples[-2]
+            self._record_event(event_ms, event_degree)
+        self._last_slope = slope
+
+    def _record_event(self, timestamp_ms: int, degree: float) -> None:
+        if self._last_extreme_ms is not None:
+            interval_ms = timestamp_ms - self._last_extreme_ms
+            prominence = abs(degree - float(self._last_extreme_degree or degree))
+            if interval_ms < 350 or interval_ms > 3500 or prominence < 8:
+                return
+        self.events_ms.append(timestamp_ms)
+        self._last_extreme_ms = timestamp_ms
+        self._last_extreme_degree = degree
+
+    def instantaneous_spm(self, timestamp_ms: int, window_ms: int) -> float | None:
+        events = [
+            event
+            for event in self.events_ms
+            if timestamp_ms - window_ms <= event <= timestamp_ms
+        ]
+        return _spm_from_events(events)
+
+    def average_spm(self) -> float | None:
+        return _spm_from_events(self.events_ms)
 
 
 def export_centerline_video(
@@ -96,6 +173,7 @@ def export_centerline_video(
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     carried_labels: list[DegreeLabel] = []
+    spm_estimator = SpmEstimator()
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
         timestamp_ms = round(frame_index * 1000 / fps)
@@ -111,6 +189,8 @@ def export_centerline_video(
             colors,
             export_options=export_options,
             fallback_labels=carried_labels,
+            timestamp_ms=timestamp_ms,
+            spm_estimator=spm_estimator,
         )
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
 
@@ -204,6 +284,7 @@ def _normalize_export_options(
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
+        include_spm=bool(requested.include_spm),
         reference_prompt_id=reference_prompt_id,
         target_prompt_ids=target_prompt_ids,
     )
@@ -276,6 +357,8 @@ def _draw_frame_overlay(
     *,
     export_options: ExportOptions,
     fallback_labels: list[DegreeLabel],
+    timestamp_ms: int,
+    spm_estimator: SpmEstimator,
 ) -> list[DegreeLabel]:
     centerlines: list[Centerline] = []
     for record in records:
@@ -293,6 +376,9 @@ def _draw_frame_overlay(
         _draw_target_degree_marker(image, width, height, entry)
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
+    if export_options.include_spm:
+        estimate = spm_estimator.update(timestamp_ms, labels)
+        _draw_spm_label(image, width, height, estimate, export_options)
     return labels or fallback_labels
 
 
@@ -557,6 +643,97 @@ def _draw_degree_label_block_bitmap(
         x += item_gap - gap
 
 
+def _draw_spm_label(
+    image: bytearray,
+    width: int,
+    height: int,
+    estimate: SpmEstimate,
+    options: ExportOptions,
+) -> None:
+    text = (
+        f"Inst SPM: {_format_spm(estimate.instantaneous)}   "
+        f"Avg SPM: {_format_spm(estimate.average)}"
+    )
+    if _draw_spm_label_with_pillow(image, width, height, text, options):
+        return
+    _draw_spm_label_bitmap(image, width, height, text, options)
+
+
+def _format_spm(value: float | None) -> str:
+    return "--" if value is None else str(round(value))
+
+
+def _spm_label_top(height: int, text_height: int, font_size: int, options: ExportOptions) -> int:
+    margin = max(round(height * 0.055), font_size)
+    position = "bottom" if options.angle_label_position == "top" else "top"
+    if position == "top":
+        return margin
+    return max(margin, height - margin - text_height)
+
+
+def _draw_spm_label_with_pillow(
+    image: bytearray,
+    width: int,
+    height: int,
+    text: str,
+    options: ExportOptions,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+
+    font_path = _find_export_font()
+    if font_path is None:
+        return False
+
+    font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    try:
+        font = ImageFont.truetype(str(font_path), font_size)
+    except OSError:
+        return False
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    stroke_width = max(1, round(font_size * 0.06))
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    left = round(width / 2 - text_width / 2)
+    top = _spm_label_top(height, text_height, font_size, options)
+    draw.text(
+        (left - bbox[0], top - bbox[1]),
+        text,
+        font=font,
+        fill=(235, 245, 255, 255),
+        stroke_width=stroke_width,
+        stroke_fill=(2, 5, 9, 255),
+    )
+    _blend_overlay(image, width, overlay.tobytes())
+    return True
+
+
+def _draw_spm_label_bitmap(
+    image: bytearray,
+    width: int,
+    height: int,
+    text: str,
+    options: ExportOptions,
+) -> None:
+    font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    scale = max(2, round(font_size / 7))
+    gap = max(1, round(scale * 0.75))
+    glyphs = [_glyph(character) for character in text]
+    text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(0, len(glyphs) - 1)
+    text_height = 7 * scale
+    x = round(width / 2 - text_width / 2)
+    y = _spm_label_top(height, text_height, font_size, options)
+    for glyph in glyphs:
+        _draw_bitmap(image, width, height, x + scale, y + scale, glyph, scale, (2, 5, 9, 255))
+        _draw_bitmap(image, width, height, x, y, glyph, scale, (235, 245, 255, 255))
+        x += len(glyph[0]) * scale + gap
+
+
 def _find_export_font() -> Path | None:
     configured = os.getenv("SAM3_EXPORT_FONT_PATH")
     candidates = [
@@ -654,15 +831,24 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
     "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
     "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
     "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
     "a": ("00000", "01110", "00001", "01111", "10001", "10011", "01101"),
     "d": ("00001", "00001", "00001", "01111", "10001", "10001", "01111"),
     "e": ("00000", "01110", "10001", "11111", "10000", "10001", "01110"),
     "g": ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
     "l": ("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "n": ("00000", "10110", "11001", "10001", "10001", "10001", "10001"),
     "r": ("00000", "10110", "11001", "10000", "10000", "10000", "10000"),
+    "s": ("00000", "01111", "10000", "01110", "00001", "11110", "00000"),
+    "t": ("00100", "00100", "11111", "00100", "00100", "00101", "00010"),
+    "v": ("00000", "10001", "10001", "10001", "01010", "01010", "00100"),
     ":": ("000", "010", "010", "000", "010", "010", "000"),
+    "-": ("000", "000", "000", "111", "000", "000", "000"),
     "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),
     " ": ("000", "000", "000", "000", "000", "000", "000"),
 }
@@ -782,6 +968,43 @@ def _parse_hex(value: str) -> Color:
         int(stripped[4:6], 16),
         255,
     )
+
+
+def _sign(value: float, *, epsilon: float) -> int:
+    if value > epsilon:
+        return 1
+    if value < -epsilon:
+        return -1
+    return 0
+
+
+def _spm_from_events(events_ms: list[int]) -> float | None:
+    if len(events_ms) < 2:
+        return None
+    intervals = [
+        (later - earlier) / 1000
+        for earlier, later in zip(events_ms, events_ms[1:])
+        if 350 <= later - earlier <= 3500
+    ]
+    if not intervals:
+        return None
+    return 60 / _median(intervals)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _normalize(vector: tuple[float, float]) -> tuple[float, float] | None:

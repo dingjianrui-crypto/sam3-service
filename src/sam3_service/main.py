@@ -411,6 +411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         angle_label_position: str = Query(default="top", pattern="^(top|bottom)$"),
         angle_label_font_size: int = Query(default=32, ge=12, le=96),
+        include_spm: bool = Query(default=False),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
     ) -> FileResponse:
@@ -440,6 +441,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             options=ExportOptions(
                 angle_label_position=angle_label_position,
                 angle_label_font_size=angle_label_font_size,
+                include_spm=include_spm,
                 reference_prompt_id=reference_prompt_id,
                 target_prompt_ids=tuple(
                     item.strip() for item in (target_prompt_ids or "").split(",") if item.strip()

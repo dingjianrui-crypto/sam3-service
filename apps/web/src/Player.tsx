@@ -52,6 +52,7 @@ export function Player({ manifest }: Props) {
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
   const [exportFontSize, setExportFontSize] = useState(32);
+  const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
   const [enabledPrompts, setEnabledPrompts] = useState(
@@ -178,6 +179,7 @@ export function Player({ manifest }: Props) {
       const blob = await exportJobVideo(manifest.job_id, {
         angle_label_position: exportLabelPosition,
         angle_label_font_size: exportFontSize,
+        include_spm: exportSpmEnabled,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds]
       });
@@ -193,6 +195,7 @@ export function Player({ manifest }: Props) {
     angleTargetPromptIds,
     exportFontSize,
     exportLabelPosition,
+    exportSpmEnabled,
     manifest.job_id
   ]);
 
@@ -326,6 +329,14 @@ export function Player({ manifest }: Props) {
                 setExportFontSize(Math.min(96, Math.max(12, Number(event.target.value))))
               }
             />
+          </label>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={exportSpmEnabled}
+              onChange={(event) => setExportSpmEnabled(event.target.checked)}
+            />
+            SPM
           </label>
           <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
             {exporting ? "Exporting…" : "Export"}
