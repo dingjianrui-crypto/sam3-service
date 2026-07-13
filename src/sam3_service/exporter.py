@@ -572,9 +572,13 @@ def _draw_degree_label_block_with_pillow(
     padding_x = round(font_size * 0.55)
     padding_y = round(font_size * 0.4)
     left = round(width / 2 - text_width / 2)
-    margin = max(round(height * 0.055), font_size)
-    top = margin if options.angle_label_position == "top" else height - margin - text_height
-    top = max(margin, min(top, height - margin - text_height))
+    top = _metric_label_top(
+        width,
+        height,
+        text_height,
+        font_size,
+        options.angle_label_position,
+    )
     box = (
         left - padding_x,
         top - padding_y,
@@ -623,8 +627,13 @@ def _draw_degree_label_block_bitmap(
     padding_x = round(scale * 2.2)
     padding_y = round(scale * 1.5)
     left = round(width / 2 - text_width / 2)
-    margin = max(round(height * 0.055), font_size)
-    top = margin if options.angle_label_position == "top" else height - margin - text_height
+    top = _metric_label_top(
+        width,
+        height,
+        text_height,
+        font_size,
+        options.angle_label_position,
+    )
     _fill_rect(
         image,
         width,
@@ -663,12 +672,34 @@ def _format_spm(value: float | None) -> str:
     return "--" if value is None else str(round(value))
 
 
-def _spm_label_top(height: int, text_height: int, font_size: int, options: ExportOptions) -> int:
-    margin = max(round(height * 0.055), font_size)
-    position = "bottom" if options.angle_label_position == "top" else "top"
+def _metric_label_margin(width: int, height: int, font_size: int) -> int:
+    if height > width:
+        return max(round(height * 0.16), font_size)
+    return max(round(height * 0.055), font_size)
+
+
+def _metric_label_top(
+    width: int,
+    height: int,
+    text_height: int,
+    font_size: int,
+    position: LabelPosition,
+) -> int:
+    margin = _metric_label_margin(width, height, font_size)
     if position == "top":
         return margin
     return max(margin, height - margin - text_height)
+
+
+def _spm_label_top(
+    width: int,
+    height: int,
+    text_height: int,
+    font_size: int,
+    options: ExportOptions,
+) -> int:
+    position = "bottom" if options.angle_label_position == "top" else "top"
+    return _metric_label_top(width, height, text_height, font_size, position)
 
 
 def _draw_spm_label_with_pillow(
@@ -700,7 +731,7 @@ def _draw_spm_label_with_pillow(
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     left = round(width / 2 - text_width / 2)
-    top = _spm_label_top(height, text_height, font_size, options)
+    top = _spm_label_top(width, height, text_height, font_size, options)
     draw.text(
         (left - bbox[0], top - bbox[1]),
         text,
@@ -727,7 +758,7 @@ def _draw_spm_label_bitmap(
     text_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(0, len(glyphs) - 1)
     text_height = 7 * scale
     x = round(width / 2 - text_width / 2)
-    y = _spm_label_top(height, text_height, font_size, options)
+    y = _spm_label_top(width, height, text_height, font_size, options)
     for glyph in glyphs:
         _draw_bitmap(image, width, height, x + scale, y + scale, glyph, scale, (2, 5, 9, 255))
         _draw_bitmap(image, width, height, x, y, glyph, scale, (235, 245, 255, 255))

@@ -9,6 +9,7 @@ from sam3_service.exporter import (
     SpmEstimator,
     _degree_label_entries,
     _degree_labels,
+    _metric_label_top,
     _spm_label_top,
 )
 
@@ -89,13 +90,22 @@ class ExporterTest(unittest.TestCase):
 
     def test_spm_label_uses_opposite_side_from_angle_label(self) -> None:
         self.assertGreater(
-            _spm_label_top(100, 10, 12, ExportOptions(angle_label_position="top")),
+            _spm_label_top(100, 100, 10, 12, ExportOptions(angle_label_position="top")),
             70,
         )
         self.assertLess(
-            _spm_label_top(100, 10, 12, ExportOptions(angle_label_position="bottom")),
+            _spm_label_top(100, 100, 10, 12, ExportOptions(angle_label_position="bottom")),
             30,
         )
+
+    def test_portrait_metric_labels_move_toward_center(self) -> None:
+        landscape_top = _metric_label_top(1920, 1080, 30, 32, "top")
+        portrait_top = _metric_label_top(1080, 1920, 30, 32, "top")
+        portrait_bottom = _metric_label_top(1080, 1920, 30, 32, "bottom")
+
+        self.assertGreater(portrait_top, landscape_top)
+        self.assertGreater(portrait_bottom, 1500)
+        self.assertLess(portrait_bottom, 1700)
 
 
 if __name__ == "__main__":

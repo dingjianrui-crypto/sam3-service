@@ -693,6 +693,8 @@ For each exported frame, the server finds every target centerline, matches it to
 
 When `include_spm=true`, the export estimates cadence from the degree time series and draws `Inst SPM` and `Avg SPM` as text only, without a background panel. If the angle labels are at the top, SPM is drawn near the bottom; if angle labels are at the bottom, SPM is drawn near the top.
 
+For portrait videos, top and bottom metric overlays are automatically moved farther from the video edges so they sit closer to the centerline of the frame.
+
 ## Error Format
 
 Errors return a JSON body:
