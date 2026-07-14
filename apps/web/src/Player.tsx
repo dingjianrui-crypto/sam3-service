@@ -386,9 +386,19 @@ function recordsForTime(
   enabledPrompts: Set<string>
 ) {
   const tolerance = 500 / Math.max(fps, 1);
+  let nearestTimestamp: number | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const record of records) {
+    const distance = Math.abs(record.timestamp_ms - timeMs);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestTimestamp = record.timestamp_ms;
+    }
+  }
+  if (nearestTimestamp == null || nearestDistance > tolerance) return [];
   return records.filter(
     (record) =>
-      Math.abs(record.timestamp_ms - timeMs) <= tolerance &&
+      record.timestamp_ms === nearestTimestamp &&
       enabledPrompts.has(record.prompt_id)
   );
 }
@@ -426,7 +436,7 @@ function drawOverlay(
   const centerlines: CenterlineRecord[] = [];
   for (const record of records) {
     const color = options.colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
-    const line = getCenterlineLine(record);
+    const line = getCenterlineLine(record, context.canvas.width, context.canvas.height);
     if (line) {
       centerlines.push({ record, line, color });
     }
@@ -452,7 +462,7 @@ function drawOverlay(
     if (options.showBoxes) {
       const [x, y, width, height] =
         options.overlayMode === "centerline" && record.centerline_box_xywh
-          ? record.centerline_box_xywh
+          ? scaleCenterlineBox(record, context.canvas.width, context.canvas.height)
           : record.box_xywh;
       context.strokeStyle = color;
       context.lineWidth = Math.max(2, context.canvas.width / 600);
@@ -482,12 +492,39 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function getCenterlineLine(record: FrameMask): [number, number, number, number] | null {
+function getCenterlineLine(
+  record: FrameMask,
+  canvasWidth: number,
+  canvasHeight: number
+): [number, number, number, number] | null {
   const line = record.centerline_line_xyxy;
   if (!line || line.length !== 4 || line.some((value) => !Number.isFinite(value))) {
     return null;
   }
-  return [line[0], line[1], line[2], line[3]];
+  const [scaleX, scaleY] = centerlineCoordinateScale(record, canvasWidth, canvasHeight);
+  return [line[0] * scaleX, line[1] * scaleY, line[2] * scaleX, line[3] * scaleY];
+}
+
+function scaleCenterlineBox(
+  record: FrameMask,
+  canvasWidth: number,
+  canvasHeight: number
+): [number, number, number, number] {
+  const box = record.centerline_box_xywh ?? record.box_xywh;
+  const [scaleX, scaleY] = centerlineCoordinateScale(record, canvasWidth, canvasHeight);
+  return [box[0] * scaleX, box[1] * scaleY, box[2] * scaleX, box[3] * scaleY];
+}
+
+function centerlineCoordinateScale(
+  record: FrameMask,
+  canvasWidth: number,
+  canvasHeight: number
+): [number, number] {
+  const segmentation = record.centerline_segmentation;
+  if (!segmentation || segmentation.type !== "rle") return [1, 1];
+  const [maskHeight, maskWidth] = segmentation.size;
+  if (!maskWidth || !maskHeight) return [1, 1];
+  return [canvasWidth / maskWidth, canvasHeight / maskHeight];
 }
 
 function drawAngleAnnotations(

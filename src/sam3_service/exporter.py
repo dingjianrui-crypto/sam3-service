@@ -349,7 +349,7 @@ def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dic
         return record
     scaled = dict(record)
     values = record.get("centerline_line_xyxy")
-    if values and len(values) == 4:
+    if values and len(values) == 4 and _centerline_rle_size(record) is None:
         scaled["centerline_line_xyxy"] = [
             float(values[0]) * scale_x,
             float(values[1]) * scale_y,
@@ -373,7 +373,7 @@ def _draw_frame_overlay(
 ) -> list[DegreeLabel]:
     centerlines: list[Centerline] = []
     for record in records:
-        line = _record_line(record)
+        line = _record_line(record, width, height)
         if line is None:
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
@@ -393,17 +393,50 @@ def _draw_frame_overlay(
     return labels or fallback_labels
 
 
-def _record_line(record: dict[str, Any]) -> Line | None:
+def _record_line(record: dict[str, Any], width: int, height: int) -> Line | None:
     values = record.get("centerline_line_xyxy")
     if not values or len(values) != 4:
         return None
     try:
-        line = tuple(float(value) for value in values)
+        scale_x, scale_y = _centerline_coordinate_scale(record, width, height)
+        line = (
+            float(values[0]) * scale_x,
+            float(values[1]) * scale_y,
+            float(values[2]) * scale_x,
+            float(values[3]) * scale_y,
+        )
     except (TypeError, ValueError):
         return None
     if not all(math.isfinite(value) for value in line):
         return None
     return line  # type: ignore[return-value]
+
+
+def _centerline_coordinate_scale(
+    record: dict[str, Any],
+    width: int,
+    height: int,
+) -> tuple[float, float]:
+    size = _centerline_rle_size(record)
+    if size is None:
+        return (1.0, 1.0)
+    mask_height, mask_width = size
+    if mask_width <= 0 or mask_height <= 0:
+        return (1.0, 1.0)
+    return (width / mask_width, height / mask_height)
+
+
+def _centerline_rle_size(record: dict[str, Any]) -> tuple[int, int] | None:
+    segmentation = record.get("centerline_segmentation")
+    if not isinstance(segmentation, dict) or segmentation.get("type") != "rle":
+        return None
+    size = segmentation.get("size")
+    if not isinstance(size, list | tuple) or len(size) != 2:
+        return None
+    try:
+        return (int(size[0]), int(size[1]))
+    except (TypeError, ValueError):
+        return None
 
 
 def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> list[DegreeLabel]:

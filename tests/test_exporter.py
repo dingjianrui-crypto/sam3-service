@@ -10,6 +10,7 @@ from sam3_service.exporter import (
     _degree_label_entries,
     _degree_labels,
     _metric_label_top,
+    _record_line,
     _spm_label_top,
 )
 
@@ -74,6 +75,22 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual([entry.text for entry in entries], ["42°"])
+
+    def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
+        line = _record_line(
+            {
+                "centerline_line_xyxy": [10, 20, 30, 40],
+                "centerline_segmentation": {
+                    "type": "rle",
+                    "size": [100, 200],
+                    "counts": [],
+                },
+            },
+            400,
+            300,
+        )
+
+        self.assertEqual(line, (20, 60, 60, 120))
 
     def test_spm_estimator_reports_instant_and_average(self) -> None:
         estimator = SpmEstimator(window_ms=5000)
