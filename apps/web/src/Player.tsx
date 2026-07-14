@@ -51,6 +51,7 @@ export function Player({ manifest }: Props) {
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
+  const [exportSpmPosition, setExportSpmPosition] = useState<ExportLabelPosition>("bottom");
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -180,6 +181,7 @@ export function Player({ manifest }: Props) {
         angle_label_position: exportLabelPosition,
         angle_label_font_size: exportFontSize,
         include_spm: exportSpmEnabled,
+        spm_label_position: exportSpmPosition,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds]
       });
@@ -195,6 +197,7 @@ export function Player({ manifest }: Props) {
     angleTargetPromptIds,
     exportFontSize,
     exportLabelPosition,
+    exportSpmPosition,
     exportSpmEnabled,
     manifest.job_id
   ]);
@@ -308,7 +311,7 @@ export function Player({ manifest }: Props) {
         )}
         <div className="export-controls">
           <label>
-            Label position
+            Degree position
             <select
               value={exportLabelPosition}
               onChange={(event) => setExportLabelPosition(event.target.value as ExportLabelPosition)}
@@ -337,6 +340,16 @@ export function Player({ manifest }: Props) {
               onChange={(event) => setExportSpmEnabled(event.target.checked)}
             />
             SPM
+          </label>
+          <label>
+            SPM position
+            <select
+              value={exportSpmPosition}
+              onChange={(event) => setExportSpmPosition(event.target.value as ExportLabelPosition)}
+            >
+              <option value="bottom">Bottom</option>
+              <option value="top">Top</option>
+            </select>
           </label>
           <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
             {exporting ? "Exporting…" : "Export"}

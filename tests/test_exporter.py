@@ -61,6 +61,20 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(entries[3].text_color, (255, 82, 96, 255))
         self.assertTrue(all(entry.text_color != (255, 82, 96, 255) for entry in entries[:3]))
 
+    def test_single_degree_label_omits_index(self) -> None:
+        entries = _degree_label_entries(
+            [
+                DegreeLabel(
+                    instance_id="paddle:1",
+                    degree=42,
+                    line=(0, 0, 1, 1),
+                    color=(53, 194, 255, 255),
+                )
+            ]
+        )
+
+        self.assertEqual([entry.text for entry in entries], ["42°"])
+
     def test_spm_estimator_reports_instant_and_average(self) -> None:
         estimator = SpmEstimator(window_ms=5000)
         estimate = None
@@ -96,6 +110,28 @@ class ExporterTest(unittest.TestCase):
         self.assertLess(
             _spm_label_top(100, 100, 10, 12, ExportOptions(angle_label_position="bottom")),
             30,
+        )
+
+    def test_spm_label_position_can_be_configured(self) -> None:
+        self.assertLess(
+            _spm_label_top(
+                100,
+                100,
+                10,
+                12,
+                ExportOptions(angle_label_position="top", spm_label_position="top"),
+            ),
+            30,
+        )
+        self.assertGreater(
+            _spm_label_top(
+                100,
+                100,
+                10,
+                12,
+                ExportOptions(angle_label_position="bottom", spm_label_position="bottom"),
+            ),
+            70,
         )
 
     def test_portrait_metric_labels_move_toward_center(self) -> None:

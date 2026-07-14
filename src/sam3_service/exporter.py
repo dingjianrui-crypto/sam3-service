@@ -17,6 +17,8 @@ from .media import probe_video
 Color = tuple[int, int, int, int]
 Line = tuple[float, float, float, float]
 LabelPosition = str
+DEGREE_LABEL_TITLE = "桨叶角度"
+SPM_LABEL_TITLE = "桨频"
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class ExportOptions:
     angle_label_position: LabelPosition = "top"
     angle_label_font_size: int | None = None
     include_spm: bool = False
+    spm_label_position: LabelPosition | None = None
     reference_prompt_id: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
 
@@ -281,10 +284,14 @@ def _normalize_export_options(
     )
     default_font_size = max(18, round(min(height * 0.045, width * 0.038)))
     font_size = requested.angle_label_font_size or default_font_size
+    spm_position = requested.spm_label_position
+    if spm_position not in {"top", "bottom"}:
+        spm_position = "bottom" if position == "top" else "top"
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
         include_spm=bool(requested.include_spm),
+        spm_label_position=spm_position,
         reference_prompt_id=reference_prompt_id,
         target_prompt_ids=target_prompt_ids,
     )
@@ -508,6 +515,7 @@ def _draw_degree_label_block(
 def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
     highlight_index = _highlighted_degree_index(labels)
     entries: list[DegreeLabelEntry] = []
+    show_index = len(labels) > 1
     for index, label in enumerate(labels, start=1):
         text_color = (
             (255, 82, 96, 255)
@@ -516,7 +524,7 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
         )
         entries.append(
             DegreeLabelEntry(
-                text=f"{index}: {label.degree}°",
+                text=f"{index}: {label.degree}°" if show_index else f"{label.degree}°",
                 label=label,
                 text_color=text_color,
             )
@@ -551,8 +559,10 @@ def _draw_degree_label_block_with_pillow(
         return False
 
     font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    title_font_size = max(12, round(font_size * 0.72))
     try:
         font = ImageFont.truetype(str(font_path), font_size)
+        title_font = ImageFont.truetype(str(font_path), title_font_size)
     except OSError:
         return False
 
@@ -567,31 +577,52 @@ def _draw_degree_label_block_with_pillow(
     item_gap = max(12, round(font_size * 0.75))
     item_widths = [box[2] - box[0] for box in text_boxes]
     item_heights = [box[3] - box[1] for box in text_boxes]
-    text_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
-    text_height = max(item_heights)
+    value_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
+    value_height = max(item_heights)
+    title_bbox = draw.textbbox(
+        (0, 0),
+        DEGREE_LABEL_TITLE,
+        font=title_font,
+        stroke_width=stroke_width,
+    )
+    title_width = title_bbox[2] - title_bbox[0]
+    title_height = title_bbox[3] - title_bbox[1]
+    title_gap = max(4, round(font_size * 0.2))
+    block_width = max(value_width, title_width)
+    block_height = title_height + title_gap + value_height
     padding_x = round(font_size * 0.55)
     padding_y = round(font_size * 0.4)
-    left = round(width / 2 - text_width / 2)
+    left = round(width / 2 - block_width / 2)
     top = _metric_label_top(
         width,
         height,
-        text_height,
+        block_height,
         font_size,
         options.angle_label_position,
     )
     box = (
         left - padding_x,
         top - padding_y,
-        left + text_width + padding_x,
-        top + text_height + padding_y,
+        left + block_width + padding_x,
+        top + block_height + padding_y,
     )
     radius = max(4, round(font_size * 0.16))
     draw.rounded_rectangle(box, radius=radius, fill=(2, 5, 9, 190))
-    x = left
+    title_left = left + round((block_width - title_width) / 2)
+    draw.text(
+        (title_left - title_bbox[0], top - title_bbox[1]),
+        DEGREE_LABEL_TITLE,
+        font=title_font,
+        fill=(235, 245, 255, 255),
+        stroke_width=stroke_width,
+        stroke_fill=(2, 5, 9, 255),
+    )
+    value_top = top + title_height + title_gap
+    x = left + round((block_width - value_width) / 2)
     for entry, bbox, item_width, item_height in zip(
         entries, text_boxes, item_widths, item_heights
     ):
-        y = top + (text_height - item_height) / 2
+        y = value_top + (value_height - item_height) / 2
         draw.text(
             (x - bbox[0], y - bbox[1]),
             entry.text,
@@ -698,7 +729,9 @@ def _spm_label_top(
     font_size: int,
     options: ExportOptions,
 ) -> int:
-    position = "bottom" if options.angle_label_position == "top" else "top"
+    position = options.spm_label_position or (
+        "bottom" if options.angle_label_position == "top" else "top"
+    )
     return _metric_label_top(width, height, text_height, font_size, position)
 
 
@@ -719,8 +752,10 @@ def _draw_spm_label_with_pillow(
         return False
 
     font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    title_font_size = max(12, round(font_size * 0.72))
     try:
         font = ImageFont.truetype(str(font_path), font_size)
+        title_font = ImageFont.truetype(str(font_path), title_font_size)
     except OSError:
         return False
 
@@ -730,10 +765,30 @@ def _draw_spm_label_with_pillow(
     bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
-    left = round(width / 2 - text_width / 2)
-    top = _spm_label_top(width, height, text_height, font_size, options)
+    title_bbox = draw.textbbox(
+        (0, 0),
+        SPM_LABEL_TITLE,
+        font=title_font,
+        stroke_width=stroke_width,
+    )
+    title_width = title_bbox[2] - title_bbox[0]
+    title_height = title_bbox[3] - title_bbox[1]
+    title_gap = max(4, round(font_size * 0.2))
+    block_height = title_height + title_gap + text_height
+    top = _spm_label_top(width, height, block_height, font_size, options)
+    title_left = round(width / 2 - title_width / 2)
     draw.text(
-        (left - bbox[0], top - bbox[1]),
+        (title_left - title_bbox[0], top - title_bbox[1]),
+        SPM_LABEL_TITLE,
+        font=title_font,
+        fill=(235, 245, 255, 255),
+        stroke_width=stroke_width,
+        stroke_fill=(2, 5, 9, 255),
+    )
+    text_left = round(width / 2 - text_width / 2)
+    text_top = top + title_height + title_gap
+    draw.text(
+        (text_left - bbox[0], text_top - bbox[1]),
         text,
         font=font,
         fill=(235, 245, 255, 255),
