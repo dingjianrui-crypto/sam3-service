@@ -686,15 +686,15 @@ Query parameters:
 | `angle_label_position` | `top` or `bottom` | `top` | Vertical placement for the stacked degree label block |
 | `angle_label_font_size` | integer, `12` to `96` | `32` | Font size in video pixels for the burned-in degree labels |
 | `include_spm` | boolean | `false` | Draw instantaneous and average SPM |
-| `spm_label_position` | `top` or `bottom` | opposite `angle_label_position` | Vertical placement for the SPM metrics |
+| `metric_center_offset_percent` | number, `0` to `45` | `5.5` landscape, `16` portrait | Distance from the nearest video edge toward the centerline for both metric rows |
 | `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
 | `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
 
-For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
+For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
-When `include_spm=true`, the export estimates cadence from the degree time series and draws `Inst SPM` and `Avg SPM` under the Chinese title `桨频` as text only, without a background panel. If `spm_label_position` is omitted, SPM keeps the previous automatic placement: angle labels at the top put SPM near the bottom, and angle labels at the bottom put SPM near the top. The export renderer uses the configured CJK-capable font path when available, then falls back to installed Ubuntu CJK fonts such as Noto Sans CJK.
+When `include_spm=true`, the export estimates cadence from the degree time series and draws `瞬时桨频` and `平均桨频` under the Chinese title `桨频` as text only, without a background panel. SPM is always placed on the side opposite `angle_label_position`: angle labels at the top put SPM near the bottom, and angle labels at the bottom put SPM near the top. The export renderer uses the configured CJK-capable font path when available, then falls back to installed Ubuntu CJK fonts such as Noto Sans CJK.
 
-For portrait videos, top and bottom metric overlays are automatically moved farther from the video edges so they sit closer to the centerline of the frame.
+For portrait videos, the default `metric_center_offset_percent` is higher so top and bottom metric overlays sit closer to the centerline of the frame. Passing `metric_center_offset_percent` overrides that default for both the degree row and the SPM row.
 
 ## Error Format
 

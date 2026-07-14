@@ -31,6 +31,10 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 const OVERLAY_FONT_FAMILY =
   'Arial, Helvetica, system-ui, sans-serif';
 
+function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
+  return manifest.video.height > manifest.video.width ? 16 : 5.5;
+}
+
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,7 +55,9 @@ export function Player({ manifest }: Props) {
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
-  const [exportSpmPosition, setExportSpmPosition] = useState<ExportLabelPosition>("bottom");
+  const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
+    defaultMetricCenterOffsetPercent(manifest)
+  );
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -60,6 +66,11 @@ export function Player({ manifest }: Props) {
     new Set(manifest.prompts.map((prompt) => prompt.id))
   );
   const [status, setStatus] = useState("Loading result…");
+
+  useEffect(() => {
+    setExportMetricCenterOffsetPercent(defaultMetricCenterOffsetPercent(manifest));
+  }, [manifest.job_id, manifest.video.height, manifest.video.width]);
+
   const colorByPrompt = useMemo(
     () => new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.color])),
     [manifest]
@@ -181,7 +192,7 @@ export function Player({ manifest }: Props) {
         angle_label_position: exportLabelPosition,
         angle_label_font_size: exportFontSize,
         include_spm: exportSpmEnabled,
-        spm_label_position: exportSpmPosition,
+        metric_center_offset_percent: exportMetricCenterOffsetPercent,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds]
       });
@@ -197,7 +208,7 @@ export function Player({ manifest }: Props) {
     angleTargetPromptIds,
     exportFontSize,
     exportLabelPosition,
-    exportSpmPosition,
+    exportMetricCenterOffsetPercent,
     exportSpmEnabled,
     manifest.job_id
   ]);
@@ -328,9 +339,26 @@ export function Player({ manifest }: Props) {
               max="96"
               step="2"
               value={exportFontSize}
-              onChange={(event) =>
-                setExportFontSize(Math.min(96, Math.max(12, Number(event.target.value))))
-              }
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
+              }}
+            />
+          </label>
+          <label>
+            Center offset %
+            <input
+              type="number"
+              min="0"
+              max="45"
+              step="0.5"
+              value={exportMetricCenterOffsetPercent}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setExportMetricCenterOffsetPercent(
+                  Number.isFinite(value) ? clamp(value, 0, 45) : 0
+                );
+              }}
             />
           </label>
           <label className="checkbox">
@@ -340,16 +368,6 @@ export function Player({ manifest }: Props) {
               onChange={(event) => setExportSpmEnabled(event.target.checked)}
             />
             SPM
-          </label>
-          <label>
-            SPM position
-            <select
-              value={exportSpmPosition}
-              onChange={(event) => setExportSpmPosition(event.target.value as ExportLabelPosition)}
-            >
-              <option value="bottom">Bottom</option>
-              <option value="top">Top</option>
-            </select>
           </label>
           <button className="secondary export-button" disabled={exporting} onClick={exportCenterlineVideo}>
             {exporting ? "Exporting…" : "Export"}

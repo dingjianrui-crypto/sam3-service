@@ -112,28 +112,6 @@ class ExporterTest(unittest.TestCase):
             30,
         )
 
-    def test_spm_label_position_can_be_configured(self) -> None:
-        self.assertLess(
-            _spm_label_top(
-                100,
-                100,
-                10,
-                12,
-                ExportOptions(angle_label_position="top", spm_label_position="top"),
-            ),
-            30,
-        )
-        self.assertGreater(
-            _spm_label_top(
-                100,
-                100,
-                10,
-                12,
-                ExportOptions(angle_label_position="bottom", spm_label_position="bottom"),
-            ),
-            70,
-        )
-
     def test_portrait_metric_labels_move_toward_center(self) -> None:
         landscape_top = _metric_label_top(1920, 1080, 30, 32, "top")
         portrait_top = _metric_label_top(1080, 1920, 30, 32, "top")
@@ -142,6 +120,23 @@ class ExporterTest(unittest.TestCase):
         self.assertGreater(portrait_top, landscape_top)
         self.assertGreater(portrait_bottom, 1500)
         self.assertLess(portrait_bottom, 1700)
+
+    def test_metric_center_offset_percent_controls_both_positions(self) -> None:
+        self.assertEqual(_metric_label_top(1000, 1000, 10, 12, "top", 25), 250)
+        self.assertEqual(_metric_label_top(1000, 1000, 10, 12, "bottom", 25), 740)
+        self.assertEqual(
+            _spm_label_top(
+                1000,
+                1000,
+                10,
+                12,
+                ExportOptions(
+                    angle_label_position="top",
+                    metric_center_offset_percent=25,
+                ),
+            ),
+            740,
+        )
 
 
 if __name__ == "__main__":

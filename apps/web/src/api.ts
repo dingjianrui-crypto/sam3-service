@@ -71,7 +71,7 @@ export type ExportVideoOptions = {
   angle_label_position: "top" | "bottom";
   angle_label_font_size: number;
   include_spm: boolean;
-  spm_label_position?: "top" | "bottom";
+  metric_center_offset_percent: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
 };
@@ -197,11 +197,9 @@ export async function exportJobVideo(
     t: String(Date.now()),
     angle_label_position: options.angle_label_position,
     angle_label_font_size: String(options.angle_label_font_size),
-    include_spm: String(options.include_spm)
+    include_spm: String(options.include_spm),
+    metric_center_offset_percent: String(options.metric_center_offset_percent)
   });
-  if (options.spm_label_position) {
-    params.set("spm_label_position", options.spm_label_position);
-  }
   if (options.reference_prompt_id) {
     params.set("reference_prompt_id", options.reference_prompt_id);
   }

@@ -19,6 +19,10 @@ Line = tuple[float, float, float, float]
 LabelPosition = str
 DEGREE_LABEL_TITLE = "桨叶角度"
 SPM_LABEL_TITLE = "桨频"
+SPM_INSTANT_LABEL = "瞬时桨频"
+SPM_AVERAGE_LABEL = "平均桨频"
+LANDSCAPE_METRIC_CENTER_OFFSET_PERCENT = 5.5
+PORTRAIT_METRIC_CENTER_OFFSET_PERCENT = 16.0
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,7 @@ class ExportOptions:
     angle_label_position: LabelPosition = "top"
     angle_label_font_size: int | None = None
     include_spm: bool = False
-    spm_label_position: LabelPosition | None = None
+    metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
 
@@ -284,14 +288,14 @@ def _normalize_export_options(
     )
     default_font_size = max(18, round(min(height * 0.045, width * 0.038)))
     font_size = requested.angle_label_font_size or default_font_size
-    spm_position = requested.spm_label_position
-    if spm_position not in {"top", "bottom"}:
-        spm_position = "bottom" if position == "top" else "top"
+    metric_center_offset_percent = requested.metric_center_offset_percent
+    if metric_center_offset_percent is None:
+        metric_center_offset_percent = _default_metric_center_offset_percent(width, height)
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
         include_spm=bool(requested.include_spm),
-        spm_label_position=spm_position,
+        metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         target_prompt_ids=target_prompt_ids,
     )
@@ -590,8 +594,6 @@ def _draw_degree_label_block_with_pillow(
     title_gap = max(4, round(font_size * 0.2))
     block_width = max(value_width, title_width)
     block_height = title_height + title_gap + value_height
-    padding_x = round(font_size * 0.55)
-    padding_y = round(font_size * 0.4)
     left = round(width / 2 - block_width / 2)
     top = _metric_label_top(
         width,
@@ -599,15 +601,8 @@ def _draw_degree_label_block_with_pillow(
         block_height,
         font_size,
         options.angle_label_position,
+        options.metric_center_offset_percent,
     )
-    box = (
-        left - padding_x,
-        top - padding_y,
-        left + block_width + padding_x,
-        top + block_height + padding_y,
-    )
-    radius = max(4, round(font_size * 0.16))
-    draw.rounded_rectangle(box, radius=radius, fill=(2, 5, 9, 190))
     title_left = left + round((block_width - title_width) / 2)
     draw.text(
         (title_left - title_bbox[0], top - title_bbox[1]),
@@ -655,8 +650,6 @@ def _draw_degree_label_block_bitmap(
     ]
     text_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
     text_height = 7 * scale
-    padding_x = round(scale * 2.2)
-    padding_y = round(scale * 1.5)
     left = round(width / 2 - text_width / 2)
     top = _metric_label_top(
         width,
@@ -664,20 +657,21 @@ def _draw_degree_label_block_bitmap(
         text_height,
         font_size,
         options.angle_label_position,
-    )
-    _fill_rect(
-        image,
-        width,
-        height,
-        left - padding_x,
-        top - padding_y,
-        text_width + padding_x * 2,
-        text_height + padding_y * 2,
-        (2, 5, 9, 178),
+        options.metric_center_offset_percent,
     )
     x = left
     for entry, glyphs, item_width in zip(entries, glyph_items, item_widths):
         for glyph in glyphs:
+            _draw_bitmap(
+                image,
+                width,
+                height,
+                x + scale,
+                top + scale,
+                glyph,
+                scale,
+                (2, 5, 9, 255),
+            )
             _draw_bitmap(image, width, height, x, top, glyph, scale, entry.text_color)
             x += len(glyph[0]) * scale + gap
         x += item_gap - gap
@@ -691,8 +685,8 @@ def _draw_spm_label(
     options: ExportOptions,
 ) -> None:
     text = (
-        f"Inst SPM: {_format_spm(estimate.instantaneous)}   "
-        f"Avg SPM: {_format_spm(estimate.average)}"
+        f"{SPM_INSTANT_LABEL}: {_format_spm(estimate.instantaneous)}   "
+        f"{SPM_AVERAGE_LABEL}: {_format_spm(estimate.average)}"
     )
     if _draw_spm_label_with_pillow(image, width, height, text, options):
         return
@@ -703,10 +697,24 @@ def _format_spm(value: float | None) -> str:
     return "--" if value is None else str(round(value))
 
 
-def _metric_label_margin(width: int, height: int, font_size: int) -> int:
+def _default_metric_center_offset_percent(width: int, height: int) -> float:
     if height > width:
-        return max(round(height * 0.16), font_size)
-    return max(round(height * 0.055), font_size)
+        return PORTRAIT_METRIC_CENTER_OFFSET_PERCENT
+    return LANDSCAPE_METRIC_CENTER_OFFSET_PERCENT
+
+
+def _metric_label_margin(
+    width: int,
+    height: int,
+    font_size: int,
+    center_offset_percent: float | None = None,
+) -> int:
+    percent = (
+        _default_metric_center_offset_percent(width, height)
+        if center_offset_percent is None
+        else center_offset_percent
+    )
+    return max(round(height * max(0.0, min(45.0, percent)) / 100), font_size)
 
 
 def _metric_label_top(
@@ -715,8 +723,9 @@ def _metric_label_top(
     text_height: int,
     font_size: int,
     position: LabelPosition,
+    center_offset_percent: float | None = None,
 ) -> int:
-    margin = _metric_label_margin(width, height, font_size)
+    margin = _metric_label_margin(width, height, font_size, center_offset_percent)
     if position == "top":
         return margin
     return max(margin, height - margin - text_height)
@@ -729,10 +738,15 @@ def _spm_label_top(
     font_size: int,
     options: ExportOptions,
 ) -> int:
-    position = options.spm_label_position or (
-        "bottom" if options.angle_label_position == "top" else "top"
+    position = "bottom" if options.angle_label_position == "top" else "top"
+    return _metric_label_top(
+        width,
+        height,
+        text_height,
+        font_size,
+        position,
+        options.metric_center_offset_percent,
     )
-    return _metric_label_top(width, height, text_height, font_size, position)
 
 
 def _draw_spm_label_with_pillow(
