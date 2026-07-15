@@ -23,6 +23,10 @@ SPM_INSTANT_LABEL = "瞬时桨频"
 SPM_AVERAGE_LABEL = "平均桨频"
 LANDSCAPE_METRIC_CENTER_OFFSET_PERCENT = 5.5
 PORTRAIT_METRIC_CENTER_OFFSET_PERCENT = 16.0
+SPM_MIN_INTERVAL_MS = 500
+SPM_MAX_INTERVAL_MS = 3500
+SPM_MIN_INTERVALS = 3
+SPM_MIN_PROMINENCE_DEGREES = 10
 
 
 @dataclass(frozen=True)
@@ -114,8 +118,15 @@ class _SpmTrack:
     def _record_event(self, timestamp_ms: int, degree: float) -> None:
         if self._last_extreme_ms is not None:
             interval_ms = timestamp_ms - self._last_extreme_ms
-            prominence = abs(degree - float(self._last_extreme_degree or degree))
-            if interval_ms < 350 or interval_ms > 3500 or prominence < 8:
+            previous_degree = (
+                degree if self._last_extreme_degree is None else self._last_extreme_degree
+            )
+            prominence = abs(degree - previous_degree)
+            if (
+                interval_ms < SPM_MIN_INTERVAL_MS
+                or interval_ms > SPM_MAX_INTERVAL_MS
+                or prominence < SPM_MIN_PROMINENCE_DEGREES
+            ):
                 return
         self.events_ms.append(timestamp_ms)
         self._last_extreme_ms = timestamp_ms
@@ -1112,14 +1123,14 @@ def _sign(value: float, *, epsilon: float) -> int:
 
 
 def _spm_from_events(events_ms: list[int]) -> float | None:
-    if len(events_ms) < 2:
+    if len(events_ms) < SPM_MIN_INTERVALS + 1:
         return None
     intervals = [
         (later - earlier) / 1000
         for earlier, later in zip(events_ms, events_ms[1:])
-        if 350 <= later - earlier <= 3500
+        if SPM_MIN_INTERVAL_MS <= later - earlier <= SPM_MAX_INTERVAL_MS
     ]
-    if not intervals:
+    if len(intervals) < SPM_MIN_INTERVALS:
         return None
     return 60 / _median(intervals)
 

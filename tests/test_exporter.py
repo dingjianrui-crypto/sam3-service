@@ -101,6 +101,8 @@ class ExporterTest(unittest.TestCase):
             (2000, 40),
             (3000, 60),
             (4000, 40),
+            (5000, 60),
+            (6000, 40),
         ]:
             estimate = estimator.update(
                 timestamp_ms,
@@ -118,6 +120,33 @@ class ExporterTest(unittest.TestCase):
         assert estimate is not None
         self.assertEqual(round(estimate.instantaneous or 0), 60)
         self.assertEqual(round(estimate.average or 0), 60)
+
+    def test_spm_estimator_suppresses_startup_wiggles(self) -> None:
+        estimator = SpmEstimator(window_ms=5000)
+        estimate = None
+        for timestamp_ms, degree in [
+            (0, 40),
+            (250, 55),
+            (500, 40),
+            (750, 55),
+            (1000, 40),
+        ]:
+            estimate = estimator.update(
+                timestamp_ms,
+                [
+                    DegreeLabel(
+                        instance_id="paddle:1",
+                        degree=degree,
+                        line=(0, 0, 1, 1),
+                        color=(53, 194, 255, 255),
+                    )
+                ],
+            )
+
+        self.assertIsNotNone(estimate)
+        assert estimate is not None
+        self.assertIsNone(estimate.instantaneous)
+        self.assertIsNone(estimate.average)
 
     def test_spm_label_uses_opposite_side_from_angle_label(self) -> None:
         self.assertGreater(
