@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { exportJobVideo, FrameMask, getChunk, ResultManifest, StableTrack } from "./api";
+import { exportJobVideo, FrameMask, getChunk, ResultManifest } from "./api";
 
 type Props = {
   manifest: ResultManifest;
@@ -21,6 +21,8 @@ type AngleConfig = {
 
 type ExportLabelPosition = "top" | "bottom";
 
+type ExportRect = { x: number; y: number; width: number; height: number };
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
     callback: (now: number, metadata: { mediaTime: number }) => void
@@ -40,6 +42,7 @@ export function Player({ manifest }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -54,12 +57,9 @@ export function Player({ manifest }: Props) {
   const [angleEnabled, setAngleEnabled] = useState(false);
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
-  const [exportReferenceTrackIds, setExportReferenceTrackIds] = useState(
-    () => trackIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
-  );
-  const [exportTargetTrackIds, setExportTargetTrackIds] = useState(
-    () => trackIdsForPrompts(manifest, defaultTargetPromptIds)
-  );
+  const [rectangleToolActive, setRectangleToolActive] = useState(false);
+  const [exportSelection, setExportSelection] = useState<ExportRect | null>(null);
+  const [draftSelection, setDraftSelection] = useState<ExportRect | null>(null);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
   const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
     defaultMetricCenterOffsetPercent(manifest)
@@ -81,19 +81,6 @@ export function Player({ manifest }: Props) {
     () => new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.color])),
     [manifest]
   );
-  const availableTracks = useMemo(() => tracksForManifest(manifest), [manifest]);
-  const exportReferenceTracks = useMemo(
-    () => availableTracks.filter((track) => track.prompt_id === angleReferencePromptId),
-    [angleReferencePromptId, availableTracks]
-  );
-  const exportTargetTracks = useMemo(
-    () => availableTracks.filter((track) => angleTargetPromptIds.has(track.prompt_id)),
-    [angleTargetPromptIds, availableTracks]
-  );
-  const exportSelectionValid =
-    (exportReferenceTracks.length === 0 || exportReferenceTrackIds.size > 0) &&
-    (exportTargetTracks.length === 0 || exportTargetTrackIds.size > 0);
-
   const ensureChunk = useCallback(
     async (timeMs: number) => {
       const descriptor = manifest.chunks.find(
@@ -165,10 +152,9 @@ export function Player({ manifest }: Props) {
     setAngleEnabled(false);
     setAngleReferencePromptId(defaultReferencePromptId);
     setAngleTargetPromptIds(defaultTargetPromptIds);
-    setExportReferenceTrackIds(
-      trackIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
-    );
-    setExportTargetTrackIds(trackIdsForPrompts(manifest, defaultTargetPromptIds));
+    setRectangleToolActive(false);
+    setExportSelection(null);
+    setDraftSelection(null);
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
 
   useEffect(() => {
@@ -200,34 +186,37 @@ export function Player({ manifest }: Props) {
   function toggleAngleTargetPrompt(id: string) {
     setAngleTargetPromptIds((current) => {
       const next = new Set(current);
-      const trackIds = availableTracks
-        .filter((track) => track.prompt_id === id)
-        .map((track) => track.id);
-      if (next.has(id)) {
-        next.delete(id);
-        setExportTargetTrackIds((selected) => {
-          const updated = new Set(selected);
-          trackIds.forEach((trackId) => updated.delete(trackId));
-          return updated;
-        });
-      } else {
-        next.add(id);
-        setExportTargetTrackIds((selected) => new Set([...selected, ...trackIds]));
-      }
-      return next;
-    });
-  }
-
-  function toggleExportTrack(
-    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
-    id: string
-  ) {
-    setter((current) => {
-      const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
+  }
+
+  function beginRectangle(event: React.PointerEvent<HTMLDivElement>) {
+    if (!rectangleToolActive) return;
+    const point = normalizedPointer(event);
+    selectionStartRef.current = point;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDraftSelection({ x: point.x, y: point.y, width: 0, height: 0 });
+  }
+
+  function updateRectangle(event: React.PointerEvent<HTMLDivElement>) {
+    if (!rectangleToolActive || !selectionStartRef.current) return;
+    setDraftSelection(rectangleFromPoints(selectionStartRef.current, normalizedPointer(event)));
+  }
+
+  function finishRectangle(event: React.PointerEvent<HTMLDivElement>) {
+    if (!selectionStartRef.current) return;
+    const rectangle = rectangleFromPoints(
+      selectionStartRef.current,
+      normalizedPointer(event)
+    );
+    selectionStartRef.current = null;
+    setDraftSelection(null);
+    if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
+      setExportSelection(rectangle);
+      setRectangleToolActive(false);
+    }
   }
 
   const exportCenterlineVideo = useCallback(async () => {
@@ -241,8 +230,7 @@ export function Player({ manifest }: Props) {
         metric_center_offset_percent: exportMetricCenterOffsetPercent,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds],
-        reference_track_ids: [...exportReferenceTrackIds],
-        target_track_ids: [...exportTargetTrackIds]
+        selection_rect: exportSelection ?? undefined
       });
       downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
       setExportStatus("Export complete.");
@@ -257,18 +245,61 @@ export function Player({ manifest }: Props) {
     exportFontSize,
     exportLabelPosition,
     exportMetricCenterOffsetPercent,
+    exportSelection,
     exportSpmEnabled,
-    exportReferenceTrackIds,
-    exportTargetTrackIds,
     manifest.job_id
   ]);
 
   return (
     <section className="viewer">
       <div className="video-shell">
+        <div className="video-toolbar" role="toolbar" aria-label="Video selection tools">
+          <button
+            className={rectangleToolActive ? "tool-button active" : "tool-button"}
+            title="Draw export rectangle"
+            aria-pressed={rectangleToolActive}
+            onClick={() => {
+              setRectangleToolActive((current) => !current);
+              videoRef.current?.pause();
+            }}
+          >
+            <span className="rectangle-tool-icon" aria-hidden="true" />
+            Rectangle
+          </button>
+          <button
+            className="tool-button"
+            title="Remove export rectangle"
+            disabled={!exportSelection && !draftSelection}
+            onClick={() => {
+              selectionStartRef.current = null;
+              setExportSelection(null);
+              setDraftSelection(null);
+              setRectangleToolActive(false);
+            }}
+          >
+            Undo
+          </button>
+        </div>
         <div className="video-frame">
           <video ref={videoRef} src={manifest.video.url} controls playsInline />
           <canvas ref={canvasRef} />
+          <div
+            className={rectangleToolActive ? "selection-surface active" : "selection-surface"}
+            onPointerDown={beginRectangle}
+            onPointerMove={updateRectangle}
+            onPointerUp={finishRectangle}
+            onPointerCancel={() => {
+              selectionStartRef.current = null;
+              setDraftSelection(null);
+            }}
+          >
+            {(draftSelection ?? exportSelection) && (
+              <div
+                className="export-selection-rectangle"
+                style={selectionStyle(draftSelection ?? exportSelection!)}
+              />
+            )}
+          </div>
         </div>
         {status && <div className="video-status">{status}</div>}
       </div>
@@ -343,10 +374,6 @@ export function Player({ manifest }: Props) {
                   }
                   setAngleReferencePromptId(nextReference);
                   setAngleTargetPromptIds(nextTargets);
-                  setExportReferenceTrackIds(
-                    trackIdsForPrompts(manifest, new Set([nextReference]))
-                  );
-                  setExportTargetTrackIds(trackIdsForPrompts(manifest, nextTargets));
                 }}
               >
                 {manifest.prompts.map((prompt) => (
@@ -373,20 +400,6 @@ export function Player({ manifest }: Props) {
           </div>
         )}
         <div className="export-controls">
-          <TrackMultiSelect
-            label="Boats to export"
-            tracks={exportReferenceTracks}
-            selected={exportReferenceTrackIds}
-            manifest={manifest}
-            onToggle={(id) => toggleExportTrack(setExportReferenceTrackIds, id)}
-          />
-          <TrackMultiSelect
-            label="Paddles to export"
-            tracks={exportTargetTracks}
-            selected={exportTargetTrackIds}
-            manifest={manifest}
-            onToggle={(id) => toggleExportTrack(setExportTargetTrackIds, id)}
-          />
           <label>
             Degree position
             <select
@@ -437,7 +450,7 @@ export function Player({ manifest }: Props) {
           </label>
           <button
             className="secondary export-button"
-            disabled={exporting || !exportSelectionValid}
+            disabled={exporting}
             onClick={exportCenterlineVideo}
           >
             {exporting ? "Exporting…" : "Export"}
@@ -449,74 +462,33 @@ export function Player({ manifest }: Props) {
   );
 }
 
-function trackIdsForPrompts(manifest: ResultManifest, promptIds: Set<string>) {
-  return new Set(
-    tracksForManifest(manifest)
-      .filter((track) => promptIds.has(track.prompt_id))
-      .map((track) => track.id)
-  );
+function normalizedPointer(event: React.PointerEvent<HTMLDivElement>) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  return {
+    x: clamp((event.clientX - bounds.left) / Math.max(bounds.width, 1), 0, 1),
+    y: clamp((event.clientY - bounds.top) / Math.max(bounds.height, 1), 0, 1)
+  };
 }
 
-function tracksForManifest(manifest: ResultManifest): StableTrack[] {
-  if (manifest.tracks) return manifest.tracks;
-  return manifest.instances.map((instance) => ({
-    ...instance,
-    start_ms: 0,
-    end_ms: manifest.video.duration_ms,
-    instance_ids: [instance.id]
-  }));
+function rectangleFromPoints(
+  first: { x: number; y: number },
+  second: { x: number; y: number }
+): ExportRect {
+  return {
+    x: Math.min(first.x, second.x),
+    y: Math.min(first.y, second.y),
+    width: Math.abs(second.x - first.x),
+    height: Math.abs(second.y - first.y)
+  };
 }
 
-function TrackMultiSelect({
-  label,
-  tracks,
-  selected,
-  manifest,
-  onToggle
-}: {
-  label: string;
-  tracks: StableTrack[];
-  selected: Set<string>;
-  manifest: ResultManifest;
-  onToggle: (id: string) => void;
-}) {
-  const promptText = new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.text]));
-  const selectedCount = tracks.filter((track) => selected.has(track.id)).length;
-  return (
-    <details className="instance-multi-select">
-      <summary>{label} ({selectedCount}/{tracks.length})</summary>
-      <div className="instance-options">
-        {tracks.length === 0 ? (
-          <span>No detected tracks</span>
-        ) : (
-          tracks.map((track, index) => (
-            <label className="checkbox" key={track.id}>
-              <input
-                type="checkbox"
-                checked={selected.has(track.id)}
-                onChange={() => onToggle(track.id)}
-              />
-              <span title={`${track.id} · ${track.instance_ids.join(", ")}`}>
-                {promptText.get(track.prompt_id) ?? "Object"} {trackIdSuffix(track.id, index)} · {formatTrackTime(track.start_ms)}–{formatTrackTime(track.end_ms)}
-              </span>
-            </label>
-          ))
-        )}
-      </div>
-    </details>
-  );
-}
-
-function trackIdSuffix(trackId: string, fallbackIndex: number) {
-  const separator = trackId.lastIndexOf(":");
-  return separator >= 0 && separator < trackId.length - 1
-    ? trackId.slice(separator + 1)
-    : String(fallbackIndex + 1);
-}
-
-function formatTrackTime(timestampMs: number) {
-  const seconds = Math.max(0, Math.floor(timestampMs / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+function selectionStyle(rectangle: ExportRect): React.CSSProperties {
+  return {
+    left: `${rectangle.x * 100}%`,
+    top: `${rectangle.y * 100}%`,
+    width: `${rectangle.width * 100}%`,
+    height: `${rectangle.height * 100}%`
+  };
 }
 
 function recordsForTime(
@@ -622,8 +594,7 @@ function drawOverlay(
 }
 
 function recordTrackLabel(record: FrameMask) {
-  if (!record.track_id) return record.instance_id;
-  return `T${trackIdSuffix(record.track_id, 0)}`;
+  return record.instance_id;
 }
 
 function downloadBlob(blob: Blob, filename: string) {

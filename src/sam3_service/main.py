@@ -423,6 +423,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         target_track_ids: str | None = Query(default=None),
         reference_instance_ids: str | None = Query(default=None, deprecated=True),
         target_instance_ids: str | None = Query(default=None, deprecated=True),
+        selection_x: float | None = Query(default=None, ge=0, le=1),
+        selection_y: float | None = Query(default=None, ge=0, le=1),
+        selection_width: float | None = Query(default=None, gt=0, le=1),
+        selection_height: float | None = Query(default=None, gt=0, le=1),
     ) -> FileResponse:
         database: Database = request.app.state.database
         storage: LocalStorage = request.app.state.storage
@@ -431,6 +435,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ServiceError("NOT_FOUND", "Job was not found.", status_code=404)
         if job["state"] != "completed":
             raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
+        selection_values = (selection_x, selection_y, selection_width, selection_height)
+        if any(value is not None for value in selection_values) and not all(
+            value is not None for value in selection_values
+        ):
+            raise ServiceError(
+                "INVALID_SELECTION",
+                "All four selection rectangle values are required.",
+                status_code=400,
+            )
+        if all(value is not None for value in selection_values) and (
+            selection_x + selection_width > 1 or selection_y + selection_height > 1
+        ):
+            raise ServiceError(
+                "INVALID_SELECTION",
+                "The selection rectangle must stay inside the video frame.",
+                status_code=400,
+            )
         video = _video_or_404(database, job["video_id"])
         video_path = Path(video["source_path"] or video["normalized_path"])
         manifest = _result_manifest_with_tracks(database, storage, job_id)
@@ -463,6 +484,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     item.strip()
                     for item in (target_track_ids or target_instance_ids or "").split(",")
                     if item.strip()
+                ),
+                selection_rect=(
+                    (selection_x, selection_y, selection_width, selection_height)
+                    if all(value is not None for value in selection_values)
+                    else None
                 ),
             ),
         )

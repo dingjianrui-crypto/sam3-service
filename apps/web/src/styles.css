@@ -554,6 +554,70 @@ h2 {
   pointer-events: none;
 }
 
+.video-toolbar {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid #294052;
+  border-radius: 7px;
+  background: rgb(3 12 19 / 88%);
+}
+
+.tool-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 7px;
+  padding: 6px 9px;
+  color: #a9bdcb;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-button:hover,
+.tool-button.active {
+  color: #e7f4ff;
+  border-color: #35c2ff;
+  background: #0b2636;
+}
+
+.tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.rectangle-tool-icon {
+  width: 14px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+}
+
+.selection-surface {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+}
+
+.selection-surface.active {
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.export-selection-rectangle {
+  position: absolute;
+  border: 2px solid #f8d84e;
+  background: rgb(248 216 78 / 12%);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 65%);
+}
+
 .video-status {
   position: absolute;
   top: 16px;
@@ -649,43 +713,6 @@ h2 {
 
 .export-controls input[type="number"] {
   width: 74px;
-}
-
-.instance-multi-select {
-  position: relative;
-}
-
-.instance-multi-select summary {
-  min-width: 150px;
-  padding: 9px 30px 9px 10px;
-  border: 1px solid #294052;
-  border-radius: 7px;
-  background: #07111a;
-  cursor: pointer;
-  list-style-position: inside;
-  white-space: nowrap;
-}
-
-.instance-options {
-  position: absolute;
-  z-index: 5;
-  top: calc(100% + 5px);
-  left: 0;
-  display: grid;
-  min-width: 190px;
-  max-height: 240px;
-  gap: 8px;
-  padding: 10px;
-  overflow-y: auto;
-  border: 1px solid #294052;
-  border-radius: 7px;
-  background: #07111a;
-  box-shadow: 0 12px 30px rgb(0 0 0 / 35%);
-}
-
-.instance-options > span {
-  color: #8299ab;
-  white-space: nowrap;
 }
 
 .export-button:disabled {

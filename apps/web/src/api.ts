@@ -46,15 +46,6 @@ export type FrameMask = {
     | null;
 };
 
-export type StableTrack = {
-  id: string;
-  prompt_id: string;
-  color: string;
-  start_ms: number;
-  end_ms: number;
-  instance_ids: string[];
-};
-
 export type ResultManifest = {
   schema_version: number;
   job_id: string;
@@ -68,7 +59,6 @@ export type ResultManifest = {
   };
   prompts: Prompt[];
   instances: { id: string; prompt_id: string; color: string }[];
-  tracks?: StableTrack[];
   chunks: {
     sequence: number;
     start_ms: number;
@@ -85,8 +75,7 @@ export type ExportVideoOptions = {
   metric_center_offset_percent: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
-  reference_track_ids?: string[];
-  target_track_ids?: string[];
+  selection_rect?: { x: number; y: number; width: number; height: number };
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -219,11 +208,11 @@ export async function exportJobVideo(
   if (options.target_prompt_ids?.length) {
     params.set("target_prompt_ids", options.target_prompt_ids.join(","));
   }
-  if (options.reference_track_ids?.length) {
-    params.set("reference_track_ids", options.reference_track_ids.join(","));
-  }
-  if (options.target_track_ids?.length) {
-    params.set("target_track_ids", options.target_track_ids.join(","));
+  if (options.selection_rect) {
+    params.set("selection_x", String(options.selection_rect.x));
+    params.set("selection_y", String(options.selection_rect.y));
+    params.set("selection_width", String(options.selection_rect.width));
+    params.set("selection_height", String(options.selection_rect.height));
   }
   const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"

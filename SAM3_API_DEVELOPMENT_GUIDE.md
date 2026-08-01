@@ -363,7 +363,7 @@ SAM object IDs are retained as `instance_id`, but repeated text grounding can as
 
 For each timestamp, active tracks and detections are compared using predicted center movement, box overlap, relative size change, and undirected centerline-angle change. A one-to-one minimum-cost assignment prevents a newly entering object from taking an existing object's identity simply because model detection order changed. Raw-ID agreement is only a small preference. Implausible movement, size change, or angle change rejects a match. Tracks survive detection gaps up to 1.5 seconds; a later reappearance starts a new track when continuity cannot be established confidently.
 
-Manifest `tracks` entries include their visible time range and all raw `instance_ids` associated with them. Clients should use `track_id` for selection, temporal analytics, SPM history, and user-facing identity. Existing schema-v1 completed results are upgraded to schema v2 when their manifest is next requested.
+Manifest `tracks` entries include their visible time range and all raw `instance_ids` associated with them. Track IDs remain available for temporal analytics and compatibility with older API clients, but the web export UI uses its video rectangle instead of exposing track identity. Existing schema-v1 completed results are upgraded to schema v2 when their manifest is next requested.
 
 Mask formats:
 
@@ -709,14 +709,20 @@ Query parameters:
 | `metric_center_offset_percent` | number, `0` to `45` | `5.5` landscape, `16` portrait | Distance from the nearest video edge toward the centerline for both metric rows |
 | `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
 | `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
-| `reference_track_ids` | comma-separated string | all reference tracks | Stable boat/reference tracks to draw and use for paddle pairing |
-| `target_track_ids` | comma-separated string | all target tracks | Stable paddle/target tracks to draw, label, and include in SPM estimation |
+| `selection_x` | number, `0` to `1` | none | Normalized left edge of the export rectangle |
+| `selection_y` | number, `0` to `1` | none | Normalized top edge of the export rectangle |
+| `selection_width` | number, greater than `0` to `1` | none | Normalized export rectangle width |
+| `selection_height` | number, greater than `0` to `1` | none | Normalized export rectangle height |
+| `reference_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
+| `target_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
 
 For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
-The degree row has one stable slot for every selected paddle track. If a selected paddle has no valid angle in a frame, its slot displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn until that track is detected again.
+When a rectangle is present, the degree row reserves the maximum number of paddle positions observed inside it over the complete video. Paddles are ordered left to right in each frame. An unavailable position displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them.
 
-The export UI lists stable boat and paddle tracks in separate multi-select dropdowns, including the time range where each track is visible. All tracks are selected by default. Passing `reference_track_ids` or `target_track_ids` limits the burned-in centerlines, paddle angle labels, nearest-boat candidates, and SPM input to those selected tracks. Omitting either parameter preserves the default behavior of exporting every track in that prompt group. The older `reference_instance_ids` and `target_instance_ids` names remain accepted as deprecated aliases.
+The video toolbar provides Rectangle and Undo tools. Rectangle pauses playback and lets the user drag an export area directly over the video viewport. The client sends normalized coordinates, so responsive display scaling does not change the selected source area. During export, a boat or paddle is included in each frame only when the center of its centerline is inside the rectangle. The rectangle is a filter and is not burned into the exported video. Undo removes it and returns export filtering to the full frame.
+
+The export UI does not expose track IDs. `reference_track_ids`, `target_track_ids`, `reference_instance_ids`, and `target_instance_ids` remain API compatibility parameters for older clients only.
 
 When `include_spm=true`, the export estimates cadence from the degree time series and draws `瞬时桨频` and `平均桨频` under the Chinese title `桨频` as text only, without a background panel. SPM is always placed on the side opposite `angle_label_position`: angle labels at the top put SPM near the bottom, and angle labels at the bottom put SPM near the top. The export renderer uses the configured CJK-capable font path when available, then falls back to installed Ubuntu CJK fonts such as Noto Sans CJK.
 

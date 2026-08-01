@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import zlib
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,8 @@ class ExportOptions:
     target_prompt_ids: tuple[str, ...] = ()
     reference_track_ids: tuple[str, ...] = ()
     target_track_ids: tuple[str, ...] = ()
+    selection_rect: tuple[float, float, float, float] | None = None
+    target_slot_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,18 @@ def export_centerline_video(
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
+    if export_options.selection_rect is not None:
+        export_options = replace(
+            export_options,
+            target_slot_count=_maximum_target_count_in_selection(
+                frames,
+                export_options,
+                width,
+                height,
+                scale_x,
+                scale_y,
+            ),
+        )
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
     for frame_index in range(frame_count):
@@ -203,10 +217,11 @@ def export_centerline_video(
         records = _records_for_timestamp(
             frames, frame_timestamps, timestamp_ms, result_tolerance_ms
         )
+        scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
         scaled_records = [
-            _scale_record(record, scale_x, scale_y)
-            for record in records
-            if _record_selected_for_export(record, export_options)
+            record
+            for record in scaled_records
+            if _record_selected_for_export(record, export_options, width, height)
         ]
         _draw_frame_overlay(
             image,
@@ -313,7 +328,7 @@ def _normalize_export_options(
     target_track_ids = _resolve_requested_track_ids(
         requested.target_track_ids, target_tracks
     )
-    if not requested.target_track_ids:
+    if not requested.target_track_ids and requested.selection_rect is None:
         target_track_ids = tuple(
             str(track["id"]) for track in target_tracks if track.get("id")
         )
@@ -336,6 +351,8 @@ def _normalize_export_options(
         target_prompt_ids=target_prompt_ids,
         reference_track_ids=reference_track_ids,
         target_track_ids=target_track_ids,
+        selection_rect=requested.selection_rect,
+        target_slot_count=max(0, requested.target_slot_count),
     )
 
 
@@ -354,7 +371,23 @@ def _resolve_requested_track_ids(
     return tuple(resolved)
 
 
-def _record_selected_for_export(record: dict[str, Any], options: ExportOptions) -> bool:
+def _record_selected_for_export(
+    record: dict[str, Any],
+    options: ExportOptions,
+    width: int | None = None,
+    height: int | None = None,
+) -> bool:
+    if options.selection_rect is not None and width and height:
+        line = _record_line(record, width, height)
+        if line is None:
+            return False
+        center_x, center_y = _line_center(line)
+        left, top, rect_width, rect_height = options.selection_rect
+        if not (
+            left <= center_x / width <= left + rect_width
+            and top <= center_y / height <= top + rect_height
+        ):
+            return False
     prompt_id = record.get("prompt_id")
     track_id = _record_track_id(record)
     if prompt_id == options.reference_prompt_id and options.reference_track_ids:
@@ -362,6 +395,29 @@ def _record_selected_for_export(record: dict[str, Any], options: ExportOptions) 
     if prompt_id in options.target_prompt_ids and options.target_track_ids:
         return track_id in options.target_track_ids
     return True
+
+
+def _maximum_target_count_in_selection(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+) -> int:
+    target_prompt_ids = set(options.target_prompt_ids)
+    maximum = 0
+    for records in frames.values():
+        count = sum(
+            1
+            for raw_record in records
+            if raw_record.get("prompt_id") in target_prompt_ids
+            and _record_selected_for_export(
+                _scale_record(raw_record, scale_x, scale_y), options, width, height
+            )
+        )
+        maximum = max(maximum, count)
+    return maximum
 
 
 def _record_track_id(record: dict[str, Any]) -> str:
@@ -454,7 +510,8 @@ def _draw_frame_overlay(
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
-        estimate = spm_estimator.update(timestamp_ms, labels)
+        spm_labels = displayed_labels if export_options.selection_rect is not None else labels
+        estimate = spm_estimator.update(timestamp_ms, spm_labels)
         _draw_spm_label(image, width, height, estimate, export_options)
 
 
@@ -549,6 +606,21 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
 
 
 def _degree_slots(labels: list[DegreeLabel], options: ExportOptions) -> list[DegreeLabel]:
+    if options.target_slot_count > 0 and not options.target_track_ids:
+        slots = [
+            replace(label, instance_id=f"slot:{index + 1}")
+            for index, label in enumerate(labels[: options.target_slot_count])
+        ]
+        slots.extend(
+            DegreeLabel(
+                instance_id=f"slot:{index + 1}",
+                degree=None,
+                line=None,
+                color=(53, 194, 255, 255),
+            )
+            for index in range(len(slots), options.target_slot_count)
+        )
+        return slots
     if not options.target_track_ids:
         return labels
     labels_by_track = {label.instance_id: label for label in labels}

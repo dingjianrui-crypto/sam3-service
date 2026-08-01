@@ -11,6 +11,7 @@ from sam3_service.exporter import (
     _degree_labels,
     _degree_slots,
     _metric_label_top,
+    _maximum_target_count_in_selection,
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
@@ -131,6 +132,41 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([label.instance_id for label in labels], ["paddle:2"])
         self.assertEqual([label.degree for label in labels], [90])
 
+    def test_export_rectangle_filters_by_centerline_center(self) -> None:
+        options = ExportOptions(selection_rect=(0.1, 0.1, 0.3, 0.3))
+
+        self.assertTrue(
+            _record_selected_for_export(
+                {"centerline_line_xyxy": [10, 20, 30, 20]}, options, 100, 100
+            )
+        )
+        self.assertFalse(
+            _record_selected_for_export(
+                {"centerline_line_xyxy": [70, 20, 90, 20]}, options, 100, 100
+            )
+        )
+
+    def test_selection_uses_maximum_paddle_count_for_fixed_slots(self) -> None:
+        options = ExportOptions(
+            target_prompt_ids=("paddle",),
+            selection_rect=(0, 0, 0.5, 1),
+        )
+        frames = {
+            0: [
+                {"prompt_id": "paddle", "centerline_line_xyxy": [10, 10, 20, 20]},
+                {"prompt_id": "paddle", "centerline_line_xyxy": [30, 10, 40, 20]},
+            ],
+            100: [
+                {"prompt_id": "paddle", "centerline_line_xyxy": [10, 10, 20, 20]},
+            ],
+        }
+
+        count = _maximum_target_count_in_selection(
+            frames, options, 100, 100, 1, 1
+        )
+
+        self.assertEqual(count, 2)
+
     def test_raw_instance_selection_resolves_to_stable_track(self) -> None:
         resolved = _resolve_requested_track_ids(
             ("boat:7",),
@@ -204,6 +240,21 @@ class ExporterTest(unittest.TestCase):
         entries = _degree_label_entries(labels)
 
         self.assertTrue(all(entry.text_color != (255, 82, 96, 255) for entry in entries))
+
+    def test_rectangle_degree_slots_use_stable_positions(self) -> None:
+        labels = [
+            DegreeLabel(
+                instance_id="raw:7",
+                degree=42,
+                line=(0, 0, 1, 1),
+                color=(53, 194, 255, 255),
+            )
+        ]
+
+        slots = _degree_slots(labels, ExportOptions(target_slot_count=3))
+
+        self.assertEqual([slot.instance_id for slot in slots], ["slot:1", "slot:2", "slot:3"])
+        self.assertEqual([slot.degree for slot in slots], [42, None, None])
 
     def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
         line = _record_line(
