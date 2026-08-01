@@ -410,19 +410,25 @@ export function Player({ manifest }: Props) {
               onInput={(event) => seekTo(Number(event.currentTarget.value))}
               onChange={(event) => seekTo(Number(event.target.value))}
             />
-            {selectionKeyframes.map((keyframe) => (
+            {selectionKeyframes.map((keyframe, index) => (
               <button
-                className="selection-keyframe"
+                className={
+                  keyframe.time_ms <= playbackTimeMs
+                    ? "selection-keyframe passed"
+                    : "selection-keyframe"
+                }
                 key={keyframe.time_ms}
                 style={{ left: `${(keyframe.time_ms / Math.max(videoDurationMs, 1)) * 100}%` }}
                 title={`Rectangle keyframe at ${formatTime(keyframe.time_ms)}`}
                 aria-label={`Rectangle keyframe at ${formatTime(keyframe.time_ms)}`}
                 onClick={() => seekTo(keyframe.time_ms)}
-              />
+              >
+                <span>{index + 1}</span>
+              </button>
             ))}
           </div>
           <output>
-            {formatTime(playbackTimeMs)} / {formatTime(videoDurationMs)} · {selectionKeyframes.length}
+            {formatTime(playbackTimeMs)} / {formatTime(videoDurationMs)} · {selectionKeyframes.length} keyframes
           </output>
         </div>
         {status && <div className="video-status">{status}</div>}

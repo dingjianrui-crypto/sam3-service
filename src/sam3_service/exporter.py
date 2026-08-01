@@ -64,6 +64,7 @@ class DegreeLabel:
 @dataclass(frozen=True)
 class DegreeLabelEntry:
     text: str
+    layout_text: str
     label: DegreeLabel
     text_color: Color
 
@@ -767,7 +768,7 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
     show_index = len(labels) > 1
     for index, label in enumerate(labels, start=1):
         if label.degree is None:
-            text = "Missing"
+            text = ""
             text_color = (148, 163, 184, 255)
         else:
             text = f"{label.degree}°"
@@ -778,7 +779,8 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
             )
         entries.append(
             DegreeLabelEntry(
-                text=f"{index}: {text}" if show_index else text,
+                text=f"{index}: {text}" if show_index and text else text,
+                layout_text=f"{index}: 000°" if show_index else "000°",
                 label=label,
                 text_color=text_color,
             )
@@ -833,9 +835,13 @@ def _draw_degree_label_block_with_pillow(
         draw.textbbox((0, 0), entry.text, font=font, stroke_width=stroke_width)
         for entry in entries
     ]
+    layout_boxes = [
+        draw.textbbox((0, 0), entry.layout_text, font=font, stroke_width=stroke_width)
+        for entry in entries
+    ]
     item_gap = max(12, round(font_size * 0.75))
-    item_widths = [box[2] - box[0] for box in text_boxes]
-    item_heights = [box[3] - box[1] for box in text_boxes]
+    item_widths = [box[2] - box[0] for box in layout_boxes]
+    item_heights = [box[3] - box[1] for box in layout_boxes]
     value_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
     value_height = max(item_heights)
     title_bbox = draw.textbbox(
@@ -872,9 +878,13 @@ def _draw_degree_label_block_with_pillow(
     for entry, bbox, item_width, item_height in zip(
         entries, text_boxes, item_widths, item_heights
     ):
+        if not entry.text:
+            x += item_width + item_gap
+            continue
+        actual_width = bbox[2] - bbox[0]
         y = value_top + (value_height - item_height) / 2
         draw.text(
-            (x - bbox[0], y - bbox[1]),
+            (x + (item_width - actual_width) / 2 - bbox[0], y - bbox[1]),
             entry.text,
             font=font,
             fill=entry.text_color,
@@ -899,9 +909,12 @@ def _draw_degree_label_block_bitmap(
     gap = max(1, round(scale * 0.75))
     item_gap = max(3 * scale, round(font_size * 0.75))
     glyph_items = [[_glyph(character) for character in entry.text] for entry in entries]
+    layout_glyph_items = [
+        [_glyph(character) for character in entry.layout_text] for entry in entries
+    ]
     item_widths = [
         sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(0, len(glyphs) - 1)
-        for glyphs in glyph_items
+        for glyphs in layout_glyph_items
     ]
     text_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
     text_height = 7 * scale
@@ -916,20 +929,24 @@ def _draw_degree_label_block_bitmap(
     )
     x = left
     for entry, glyphs, item_width in zip(entries, glyph_items, item_widths):
+        glyph_width = sum(len(glyph[0]) * scale for glyph in glyphs) + gap * max(
+            0, len(glyphs) - 1
+        )
+        glyph_x = x + round((item_width - glyph_width) / 2)
         for glyph in glyphs:
             _draw_bitmap(
                 image,
                 width,
                 height,
-                x + scale,
+                glyph_x + scale,
                 top + scale,
                 glyph,
                 scale,
                 (2, 5, 9, 255),
             )
-            _draw_bitmap(image, width, height, x, top, glyph, scale, entry.text_color)
-            x += len(glyph[0]) * scale + gap
-        x += item_gap - gap
+            _draw_bitmap(image, width, height, glyph_x, top, glyph, scale, entry.text_color)
+            glyph_x += len(glyph[0]) * scale + gap
+        x += item_width + item_gap
 
 
 def _draw_spm_label(

@@ -644,7 +644,7 @@ h2 {
 
 .selection-timeline-track {
   position: relative;
-  height: 22px;
+  height: 34px;
   display: flex;
   align-items: center;
 }
@@ -657,20 +657,58 @@ h2 {
 
 .selection-keyframe {
   position: absolute;
-  top: 1px;
-  width: 8px;
-  height: 8px;
+  z-index: 2;
+  top: 0;
+  width: 20px;
+  height: 34px;
   padding: 0;
-  border: 1px solid #171006;
-  border-radius: 50%;
-  background: #f8d84e;
-  box-shadow: 0 0 0 1px rgb(248 216 78 / 45%);
+  border: 0;
+  background: transparent;
   transform: translateX(-50%);
   cursor: pointer;
 }
 
+.selection-keyframe::after {
+  position: absolute;
+  top: 17px;
+  bottom: 0;
+  left: 9px;
+  width: 2px;
+  content: "";
+  background: #f8d84e;
+  box-shadow: 0 0 0 1px rgb(3 12 19 / 70%);
+}
+
+.selection-keyframe span {
+  position: absolute;
+  top: 0;
+  left: 1px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #171006;
+  border-radius: 50%;
+  color: #171006;
+  background: #f8d84e;
+  box-shadow: 0 0 0 2px rgb(248 216 78 / 28%);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.selection-keyframe.passed::after {
+  background: #55d7f2;
+}
+
+.selection-keyframe.passed span {
+  color: #04131b;
+  background: #55d7f2;
+  box-shadow: 0 0 0 2px rgb(85 215 242 / 30%);
+}
+
 .selection-timeline output {
-  min-width: 78px;
+  min-width: 132px;
   color: #91a8ba;
   font-variant-numeric: tabular-nums;
   font-size: 11px;

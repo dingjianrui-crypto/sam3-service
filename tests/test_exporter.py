@@ -253,7 +253,11 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([slot.degree for slot in slots], [42, None, 51, None])
         self.assertEqual(
             [entry.text for entry in entries],
-            ["1: 42°", "2: Missing", "3: 51°", "4: Missing"],
+            ["1: 42°", "", "3: 51°", ""],
+        )
+        self.assertEqual(
+            [entry.layout_text for entry in entries],
+            ["1: 000°", "2: 000°", "3: 000°", "4: 000°"],
         )
         self.assertEqual(entries[1].text_color, (148, 163, 184, 255))
 
