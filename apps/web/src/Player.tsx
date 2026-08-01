@@ -44,6 +44,7 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const timelineRef = useRef<HTMLInputElement>(null);
   const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
@@ -288,7 +289,12 @@ export function Player({ manifest }: Props) {
     selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      const timeMs = playbackTimeRef.current;
+      const sliderTimeMs = Number(timelineRef.current?.value);
+      const timeMs = Number.isFinite(sliderTimeMs)
+        ? sliderTimeMs
+        : playbackTimeRef.current;
+      playbackTimeRef.current = timeMs;
+      setPlaybackTimeMs(timeMs);
       setSelectionKeyframes((current) => upsertSelectionKeyframe(current, timeMs, rectangle));
       lastEditedKeyframeRef.current = timeMs;
       setRectangleToolActive(false);
@@ -407,6 +413,7 @@ export function Player({ manifest }: Props) {
         <div className="selection-timeline">
           <div className="selection-timeline-track">
             <input
+              ref={timelineRef}
               type="range"
               min="0"
               max={Math.max(videoDurationMs, 1)}
@@ -415,6 +422,8 @@ export function Player({ manifest }: Props) {
               aria-label="Video timeline"
               onInput={(event) => seekTo(Number(event.currentTarget.value))}
               onChange={(event) => seekTo(Number(event.target.value))}
+              onPointerUp={(event) => seekTo(Number(event.currentTarget.value))}
+              onKeyUp={(event) => seekTo(Number(event.currentTarget.value))}
             />
             {selectionKeyframes.map((keyframe, index) => (
               <button
