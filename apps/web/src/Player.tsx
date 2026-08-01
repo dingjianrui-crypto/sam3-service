@@ -44,6 +44,7 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const timelineRef = useRef<HTMLInputElement>(null);
   const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
@@ -289,7 +290,10 @@ export function Player({ manifest }: Props) {
     selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      const timeMs = playbackTimeRef.current;
+      const displayedTimelineTimeMs = Number(timelineRef.current?.value);
+      const timeMs = Number.isFinite(displayedTimelineTimeMs)
+        ? Math.round(displayedTimelineTimeMs)
+        : playbackTimeMs;
       setSelectionKeyframes((current) => {
         const previousRectangle = lastRecordedRectangle(current, timeMs);
         if (previousRectangle && rectanglesEqual(previousRectangle, rectangle)) {
@@ -446,6 +450,7 @@ export function Player({ manifest }: Props) {
         <div className="selection-timeline">
           <div className="selection-timeline-track">
             <input
+              ref={timelineRef}
               type="range"
               min="0"
               max={Math.max(videoDurationMs, 1)}
