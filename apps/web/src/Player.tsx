@@ -178,6 +178,7 @@ export function Player({ manifest }: Props) {
     if (video.requestVideoFrameCallback) {
       const callback = (_now: number, metadata: { mediaTime: number }) => {
         draw(metadata.mediaTime);
+        setPlaybackTimeMs(Math.round(metadata.mediaTime * 1000));
         handle = video.requestVideoFrameCallback!(callback);
       };
       handle = video.requestVideoFrameCallback(callback);
