@@ -24,8 +24,13 @@ type ExportLabelPosition = "top" | "bottom";
 type ExportRect = { x: number; y: number; width: number; height: number };
 type ExportSelectionKeyframe = ExportRect & { time_ms: number };
 type SelectionInteraction =
-  | { mode: "draw"; start: { x: number; y: number } }
-  | { mode: "move"; start: { x: number; y: number }; rectangle: ExportRect };
+  | { mode: "draw"; start: { x: number; y: number }; timeMs: number }
+  | {
+      mode: "move";
+      start: { x: number; y: number };
+      rectangle: ExportRect;
+      timeMs: number;
+    };
 
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
@@ -44,7 +49,6 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const timelineRef = useRef<HTMLInputElement>(null);
   const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
@@ -53,6 +57,8 @@ export function Player({ manifest }: Props) {
   const selectionKeyframesRef = useRef<ExportSelectionKeyframe[]>([]);
   const playbackTimeRef = useRef(0);
   const pendingSeekTimeRef = useRef<number | null>(null);
+  const manualTimelineTimeRef = useRef(0);
+  const manualTimelineActiveRef = useRef(false);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -180,6 +186,8 @@ export function Player({ manifest }: Props) {
     setPlaybackTimeMs(0);
     playbackTimeRef.current = 0;
     pendingSeekTimeRef.current = null;
+    manualTimelineTimeRef.current = 0;
+    manualTimelineActiveRef.current = false;
     setVideoDurationMs(manifest.video.duration_ms);
     lastEditedKeyframeRef.current = null;
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
@@ -215,17 +223,23 @@ export function Player({ manifest }: Props) {
       const timeMs = Math.round(video.currentTime * 1000);
       acceptVideoTime(timeMs);
     };
+    const clearManualTimelineTime = () => {
+      manualTimelineActiveRef.current = false;
+      video.closest<HTMLElement>(".video-shell")?.removeAttribute("data-timeline-time-ms");
+    };
     const syncDuration = () => {
       if (Number.isFinite(video.duration)) setVideoDurationMs(Math.round(video.duration * 1000));
     };
     video.addEventListener("timeupdate", syncPlayback);
     video.addEventListener("seeked", syncPlayback);
+    video.addEventListener("play", clearManualTimelineTime);
     video.addEventListener("loadedmetadata", syncDuration);
     video.addEventListener("durationchange", syncDuration);
     syncDuration();
     return () => {
       video.removeEventListener("timeupdate", syncPlayback);
       video.removeEventListener("seeked", syncPlayback);
+      video.removeEventListener("play", clearManualTimelineTime);
       video.removeEventListener("loadedmetadata", syncDuration);
       video.removeEventListener("durationchange", syncDuration);
     };
@@ -251,14 +265,22 @@ export function Player({ manifest }: Props) {
 
   function beginRectangle(event: React.PointerEvent<HTMLDivElement>) {
     const point = normalizedPointer(event);
+    const interactionTimeMs = manualTimelineActiveRef.current
+      ? manualTimelineTimeRef.current
+      : playbackTimeMs;
     if (rectangleToolActive) {
-      selectionInteractionRef.current = { mode: "draw", start: point };
+      selectionInteractionRef.current = {
+        mode: "draw",
+        start: point,
+        timeMs: interactionTimeMs
+      };
       setDraftSelection({ x: point.x, y: point.y, width: 0, height: 0 });
     } else if (exportSelection && pointInRectangle(point, exportSelection)) {
       selectionInteractionRef.current = {
         mode: "move",
         start: point,
-        rectangle: exportSelection
+        rectangle: exportSelection,
+        timeMs: interactionTimeMs
       };
       setDraftSelection(exportSelection);
     } else {
@@ -290,10 +312,14 @@ export function Player({ manifest }: Props) {
     selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      const displayedTimelineTimeMs = Number(timelineRef.current?.value);
-      const timeMs = Number.isFinite(displayedTimelineTimeMs)
-        ? Math.round(displayedTimelineTimeMs)
-        : playbackTimeMs;
+      const videoShell = event.currentTarget.ownerDocument.querySelector<HTMLElement>(
+        ".video-shell[data-timeline-time-ms]"
+      );
+      const storedTime = videoShell?.dataset.timelineTimeMs;
+      const storedTimeMs = storedTime == null ? Number.NaN : Number(storedTime);
+      const timeMs = Number.isFinite(storedTimeMs)
+        ? storedTimeMs
+        : interaction.timeMs;
       setSelectionKeyframes((current) => {
         const previousRectangle = lastRecordedRectangle(current, timeMs);
         if (previousRectangle && rectanglesEqual(previousRectangle, rectangle)) {
@@ -328,6 +354,8 @@ export function Player({ manifest }: Props) {
     const clampedTimeMs = clamp(timeMs, 0, Math.max(videoDurationMs, 0));
     pendingSeekTimeRef.current = clampedTimeMs;
     playbackTimeRef.current = clampedTimeMs;
+    manualTimelineTimeRef.current = clampedTimeMs;
+    manualTimelineActiveRef.current = true;
     const video = videoRef.current;
     if (video) video.currentTime = clampedTimeMs / 1000;
     setPlaybackTimeMs(clampedTimeMs);
@@ -345,7 +373,7 @@ export function Player({ manifest }: Props) {
     return true;
   }
 
-  function seekTimelinePointer(event: React.PointerEvent<HTMLInputElement>) {
+  function seekTimelinePointer(event: React.PointerEvent<HTMLDivElement>) {
     if (event.type === "pointermove" && event.buttons !== 1) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = clamp(
@@ -358,6 +386,26 @@ export function Player({ manifest }: Props) {
     if (event.type === "pointerdown") {
       event.currentTarget.setPointerCapture(event.pointerId);
     }
+    event.currentTarget.closest<HTMLElement>(".video-shell")!.dataset.timelineTimeMs = String(
+      timeMs
+    );
+    seekTo(timeMs);
+  }
+
+  function seekTimelineKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    const frameStepMs = Math.max(1, Math.round(1000 / Math.max(manifest.video.fps, 1)));
+    const keyTimes: Record<string, number> = {
+      ArrowLeft: playbackTimeMs - frameStepMs,
+      ArrowRight: playbackTimeMs + frameStepMs,
+      Home: 0,
+      End: videoDurationMs
+    };
+    const timeMs = keyTimes[event.key];
+    if (timeMs == null) return;
+    event.preventDefault();
+    event.currentTarget.closest<HTMLElement>(".video-shell")!.dataset.timelineTimeMs = String(
+      timeMs
+    );
     seekTo(timeMs);
   }
 
@@ -448,21 +496,27 @@ export function Player({ manifest }: Props) {
           </div>
         </div>
         <div className="selection-timeline">
-          <div className="selection-timeline-track">
-            <input
-              ref={timelineRef}
-              type="range"
-              min="0"
-              max={Math.max(videoDurationMs, 1)}
-              step={Math.max(1, Math.round(1000 / Math.max(manifest.video.fps, 1)))}
-              value={Math.min(playbackTimeMs, Math.max(videoDurationMs, 1))}
-              aria-label="Video timeline"
-              onInput={(event) => seekTo(Number(event.currentTarget.value))}
-              onChange={(event) => seekTo(Number(event.target.value))}
-              onPointerDown={seekTimelinePointer}
-              onPointerMove={seekTimelinePointer}
-              onPointerUp={seekTimelinePointer}
-              onKeyUp={(event) => seekTo(Number(event.currentTarget.value))}
+          <div
+            className="selection-timeline-track"
+            role="slider"
+            tabIndex={0}
+            aria-label="Video timeline"
+            aria-valuemin={0}
+            aria-valuemax={Math.max(videoDurationMs, 1)}
+            aria-valuenow={Math.min(playbackTimeMs, Math.max(videoDurationMs, 1))}
+            onPointerDown={seekTimelinePointer}
+            onPointerMove={seekTimelinePointer}
+            onPointerUp={seekTimelinePointer}
+            onKeyDown={seekTimelineKey}
+          >
+            <div className="selection-timeline-rail" />
+            <div
+              className="selection-timeline-progress"
+              style={{ width: `${(playbackTimeMs / Math.max(videoDurationMs, 1)) * 100}%` }}
+            />
+            <div
+              className="selection-timeline-playhead"
+              style={{ left: `${(playbackTimeMs / Math.max(videoDurationMs, 1)) * 100}%` }}
             />
             {selectionKeyframes.map((keyframe, index) => (
               <button
@@ -710,7 +764,7 @@ function upsertSelectionKeyframe(
   const next = keyframes.filter(
     (keyframe) => Math.abs(keyframe.time_ms - timeMs) > frameToleranceMs
   );
-  next.push({ time_ms: timeMs, ...rectangle });
+  next.push({ ...rectangle, time_ms: timeMs });
   return next.sort((first, second) => first.time_ms - second.time_ms);
 }
 
@@ -742,9 +796,9 @@ function selectionAtTime(
   timeMs: number
 ): ExportRect | null {
   if (!keyframes.length) return null;
-  if (timeMs <= keyframes[0].time_ms) return keyframes[0];
+  if (timeMs <= keyframes[0].time_ms) return rectangleFromKeyframe(keyframes[0]);
   const last = keyframes[keyframes.length - 1];
-  if (timeMs >= last.time_ms) return last;
+  if (timeMs >= last.time_ms) return rectangleFromKeyframe(last);
   const rightIndex = keyframes.findIndex((keyframe) => keyframe.time_ms >= timeMs);
   const left = keyframes[rightIndex - 1];
   const right = keyframes[rightIndex];
@@ -754,6 +808,15 @@ function selectionAtTime(
     y: left.y + (right.y - left.y) * progress,
     width: left.width + (right.width - left.width) * progress,
     height: left.height + (right.height - left.height) * progress
+  };
+}
+
+function rectangleFromKeyframe(keyframe: ExportSelectionKeyframe): ExportRect {
+  return {
+    x: keyframe.x,
+    y: keyframe.y,
+    width: keyframe.width,
+    height: keyframe.height
   };
 }
 
