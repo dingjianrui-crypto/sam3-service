@@ -44,10 +44,12 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
   const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
   const lastEditedKeyframeRef = useRef<number | null>(null);
+  const selectionKeyframesRef = useRef<ExportSelectionKeyframe[]>([]);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -93,6 +95,10 @@ export function Player({ manifest }: Props) {
     () => selectionAtTime(selectionKeyframes, playbackTimeMs),
     [playbackTimeMs, selectionKeyframes]
   );
+
+  useEffect(() => {
+    selectionKeyframesRef.current = selectionKeyframes;
+  }, [selectionKeyframes]);
   const ensureChunk = useCallback(
     async (timeMs: number) => {
       const descriptor = manifest.chunks.find(
@@ -166,6 +172,7 @@ export function Player({ manifest }: Props) {
     setAngleTargetPromptIds(defaultTargetPromptIds);
     setRectangleToolActive(false);
     setSelectionKeyframes([]);
+    selectionKeyframesRef.current = [];
     setDraftSelection(null);
     setPlaybackTimeMs(0);
     setVideoDurationMs(manifest.video.duration_ms);
@@ -179,7 +186,12 @@ export function Player({ manifest }: Props) {
     if (video.requestVideoFrameCallback) {
       const callback = (_now: number, metadata: { mediaTime: number }) => {
         draw(metadata.mediaTime);
-        setPlaybackTimeMs(Math.round(metadata.mediaTime * 1000));
+        const timeMs = Math.round(metadata.mediaTime * 1000);
+        setPlaybackTimeMs(timeMs);
+        const rectangle = selectionAtTime(selectionKeyframesRef.current, timeMs);
+        if (selectionRectangleRef.current && rectangle && !selectionInteractionRef.current) {
+          applySelectionStyle(selectionRectangleRef.current, rectangle);
+        }
         handle = video.requestVideoFrameCallback!(callback);
       };
       handle = video.requestVideoFrameCallback(callback);
@@ -379,6 +391,7 @@ export function Player({ manifest }: Props) {
           >
             {(draftSelection ?? exportSelection) && (
               <div
+                ref={selectionRectangleRef}
                 className="export-selection-rectangle"
                 style={selectionStyle(draftSelection ?? exportSelection!)}
               />
@@ -394,6 +407,7 @@ export function Player({ manifest }: Props) {
               step={Math.max(1, Math.round(1000 / Math.max(manifest.video.fps, 1)))}
               value={Math.min(playbackTimeMs, Math.max(videoDurationMs, 1))}
               aria-label="Video timeline"
+              onInput={(event) => seekTo(Number(event.currentTarget.value))}
               onChange={(event) => seekTo(Number(event.target.value))}
             />
             {selectionKeyframes.map((keyframe) => (
@@ -407,7 +421,9 @@ export function Player({ manifest }: Props) {
               />
             ))}
           </div>
-          <output>{formatTime(playbackTimeMs)} / {formatTime(videoDurationMs)}</output>
+          <output>
+            {formatTime(playbackTimeMs)} / {formatTime(videoDurationMs)} · {selectionKeyframes.length}
+          </output>
         </div>
         {status && <div className="video-status">{status}</div>}
       </div>
@@ -672,6 +688,13 @@ function selectionStyle(rectangle: ExportRect): React.CSSProperties {
     width: `${rectangle.width * 100}%`,
     height: `${rectangle.height * 100}%`
   };
+}
+
+function applySelectionStyle(element: HTMLDivElement, rectangle: ExportRect) {
+  element.style.left = `${rectangle.x * 100}%`;
+  element.style.top = `${rectangle.y * 100}%`;
+  element.style.width = `${rectangle.width * 100}%`;
+  element.style.height = `${rectangle.height * 100}%`;
 }
 
 function recordsForTime(
