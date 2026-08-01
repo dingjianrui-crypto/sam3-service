@@ -74,6 +74,8 @@ export type ExportVideoOptions = {
   metric_center_offset_percent: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
+  reference_instance_ids?: string[];
+  target_instance_ids?: string[];
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -205,6 +207,12 @@ export async function exportJobVideo(
   }
   if (options.target_prompt_ids?.length) {
     params.set("target_prompt_ids", options.target_prompt_ids.join(","));
+  }
+  if (options.reference_instance_ids?.length) {
+    params.set("reference_instance_ids", options.reference_instance_ids.join(","));
+  }
+  if (options.target_instance_ids?.length) {
+    params.set("target_instance_ids", options.target_instance_ids.join(","));
   }
   const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"

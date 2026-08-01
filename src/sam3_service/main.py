@@ -415,6 +415,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
+        reference_instance_ids: str | None = Query(default=None),
+        target_instance_ids: str | None = Query(default=None),
     ) -> FileResponse:
         database: Database = request.app.state.database
         storage: LocalStorage = request.app.state.storage
@@ -447,6 +449,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reference_prompt_id=reference_prompt_id,
                 target_prompt_ids=tuple(
                     item.strip() for item in (target_prompt_ids or "").split(",") if item.strip()
+                ),
+                reference_instance_ids=tuple(
+                    item.strip()
+                    for item in (reference_instance_ids or "").split(",")
+                    if item.strip()
+                ),
+                target_instance_ids=tuple(
+                    item.strip()
+                    for item in (target_instance_ids or "").split(",")
+                    if item.strip()
                 ),
             ),
         )

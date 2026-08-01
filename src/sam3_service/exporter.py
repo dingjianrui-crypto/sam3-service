@@ -37,6 +37,8 @@ class ExportOptions:
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
+    reference_instance_ids: tuple[str, ...] = ()
+    target_instance_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -198,7 +200,11 @@ def export_centerline_video(
         records = _records_for_timestamp(
             frames, frame_timestamps, timestamp_ms, result_tolerance_ms
         )
-        scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
+        scaled_records = [
+            _scale_record(record, scale_x, scale_y)
+            for record in records
+            if _record_selected_for_export(record, export_options)
+        ]
         carried_labels = _draw_frame_overlay(
             image,
             width,
@@ -292,6 +298,27 @@ def _normalize_export_options(
     )
     if not target_prompt_ids:
         target_prompt_ids = _default_target_prompt_ids(prompts, reference_prompt_id)
+    instances = manifest.get("instances", [])
+    valid_reference_instance_ids = {
+        str(instance["id"])
+        for instance in instances
+        if instance.get("id") and instance.get("prompt_id") == reference_prompt_id
+    }
+    valid_target_instance_ids = {
+        str(instance["id"])
+        for instance in instances
+        if instance.get("id") and instance.get("prompt_id") in target_prompt_ids
+    }
+    reference_instance_ids = tuple(
+        instance_id
+        for instance_id in requested.reference_instance_ids
+        if instance_id in valid_reference_instance_ids
+    )
+    target_instance_ids = tuple(
+        instance_id
+        for instance_id in requested.target_instance_ids
+        if instance_id in valid_target_instance_ids
+    )
     position = (
         requested.angle_label_position
         if requested.angle_label_position in {"top", "bottom"}
@@ -309,7 +336,19 @@ def _normalize_export_options(
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         target_prompt_ids=target_prompt_ids,
+        reference_instance_ids=reference_instance_ids,
+        target_instance_ids=target_instance_ids,
     )
+
+
+def _record_selected_for_export(record: dict[str, Any], options: ExportOptions) -> bool:
+    prompt_id = record.get("prompt_id")
+    instance_id = str(record.get("instance_id", ""))
+    if prompt_id == options.reference_prompt_id and options.reference_instance_ids:
+        return instance_id in options.reference_instance_ids
+    if prompt_id in options.target_prompt_ids and options.target_instance_ids:
+        return instance_id in options.target_instance_ids
+    return True
 
 
 def _default_reference_prompt_id(prompts: list[dict[str, Any]]) -> str | None:
@@ -457,6 +496,10 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
         centerline
         for centerline in centerlines
         if centerline.record.get("prompt_id") == options.reference_prompt_id
+        and (
+            not options.reference_instance_ids
+            or centerline.record.get("instance_id") in options.reference_instance_ids
+        )
     ]
     if not references:
         return []
@@ -465,6 +508,10 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
         centerline
         for centerline in centerlines
         if centerline.record.get("prompt_id") in target_prompt_ids
+        and (
+            not options.target_instance_ids
+            or centerline.record.get("instance_id") in options.target_instance_ids
+        )
     ]
     labels: list[DegreeLabel] = []
     for target in sorted(

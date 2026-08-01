@@ -651,6 +651,43 @@ h2 {
   width: 74px;
 }
 
+.instance-multi-select {
+  position: relative;
+}
+
+.instance-multi-select summary {
+  min-width: 150px;
+  padding: 9px 30px 9px 10px;
+  border: 1px solid #294052;
+  border-radius: 7px;
+  background: #07111a;
+  cursor: pointer;
+  list-style-position: inside;
+  white-space: nowrap;
+}
+
+.instance-options {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 5px);
+  left: 0;
+  display: grid;
+  min-width: 190px;
+  max-height: 240px;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid #294052;
+  border-radius: 7px;
+  background: #07111a;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 35%);
+}
+
+.instance-options > span {
+  color: #8299ab;
+  white-space: nowrap;
+}
+
 .export-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;

@@ -11,6 +11,7 @@ from sam3_service.exporter import (
     _degree_labels,
     _metric_label_top,
     _record_line,
+    _record_selected_for_export,
     _spm_label_top,
 )
 
@@ -61,6 +62,72 @@ class ExporterTest(unittest.TestCase):
         )
         self.assertEqual(entries[3].text_color, (255, 82, 96, 255))
         self.assertTrue(all(entry.text_color != (255, 82, 96, 255) for entry in entries[:3]))
+
+    def test_export_instance_selection_filters_paddles_and_boats(self) -> None:
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+            reference_instance_ids=("boat:2",),
+            target_instance_ids=("paddle:1",),
+        )
+
+        self.assertFalse(
+            _record_selected_for_export(
+                {"prompt_id": "boat", "instance_id": "boat:1"}, options
+            )
+        )
+        self.assertTrue(
+            _record_selected_for_export(
+                {"prompt_id": "boat", "instance_id": "boat:2"}, options
+            )
+        )
+        self.assertTrue(
+            _record_selected_for_export(
+                {"prompt_id": "paddle", "instance_id": "paddle:1"}, options
+            )
+        )
+        self.assertFalse(
+            _record_selected_for_export(
+                {"prompt_id": "paddle", "instance_id": "paddle:2"}, options
+            )
+        )
+
+    def test_degree_labels_use_only_selected_instances(self) -> None:
+        centerlines = [
+            Centerline(
+                record={"prompt_id": "boat", "instance_id": "boat:1"},
+                line=(0, 0, 100, 0),
+                color=(255, 255, 255, 255),
+            ),
+            Centerline(
+                record={"prompt_id": "boat", "instance_id": "boat:2"},
+                line=(0, 0, 0, 100),
+                color=(255, 255, 255, 255),
+            ),
+            Centerline(
+                record={"prompt_id": "paddle", "instance_id": "paddle:1"},
+                line=(10, 0, 10, 50),
+                color=(53, 194, 255, 255),
+            ),
+            Centerline(
+                record={"prompt_id": "paddle", "instance_id": "paddle:2"},
+                line=(90, 0, 90, 50),
+                color=(53, 194, 255, 255),
+            ),
+        ]
+
+        labels = _degree_labels(
+            centerlines,
+            ExportOptions(
+                reference_prompt_id="boat",
+                target_prompt_ids=("paddle",),
+                reference_instance_ids=("boat:1",),
+                target_instance_ids=("paddle:2",),
+            ),
+        )
+
+        self.assertEqual([label.instance_id for label in labels], ["paddle:2"])
+        self.assertEqual([label.degree for label in labels], [90])
 
     def test_single_degree_label_omits_index(self) -> None:
         entries = _degree_label_entries(
