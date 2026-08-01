@@ -16,6 +16,7 @@ from .errors import JobCancelled, ServiceError
 from .media import normalize_video, probe_video
 from .segmenter import FrameResult, VideoSegmenter, create_segmenter
 from .storage import LocalStorage
+from .tracking import assign_stable_tracks_to_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,10 @@ class Worker:
                     {"id": prompt["id"], "text": prompt["text"], "color": prompt["color"]}
                 )
             self._state(job_id, "postprocessing")
-            manifest = self._build_manifest(job_id, video["id"], metadata, prompt_entries, instances)
+            tracks = self._assign_stable_tracks(job_id)
+            manifest = self._build_manifest(
+                job_id, video["id"], metadata, prompt_entries, instances, tracks
+            )
             self._atomic_json(self.storage.manifest_path(job_id), manifest)
             self.database.execute(
                 """
@@ -214,6 +218,7 @@ class Worker:
         metadata: dict[str, Any],
         prompts: list[dict[str, Any]],
         instances: dict[str, dict[str, Any]],
+        tracks: list[dict[str, Any]],
     ) -> dict[str, Any]:
         colors = {prompt["id"]: prompt["color"] for prompt in prompts}
         chunks = self.database.fetch_all(
@@ -222,7 +227,7 @@ class Worker:
             (job_id,),
         )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "job_id": job_id,
             "video": {
                 "url": f"/api/v1/videos/{video_id}/content?normalized=true",
@@ -233,6 +238,10 @@ class Worker:
                 {**entry, "color": colors.get(entry["prompt_id"], "#35C2FF")}
                 for entry in instances.values()
             ],
+            "tracks": [
+                {**entry, "color": colors.get(entry["prompt_id"], "#35C2FF")}
+                for entry in tracks
+            ],
             "chunks": [
                 {
                     **chunk,
@@ -241,6 +250,29 @@ class Worker:
                 for chunk in chunks
             ],
         }
+
+    def _assign_stable_tracks(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.database.fetch_all(
+            "SELECT sequence, path FROM result_chunks WHERE job_id = ? ORDER BY sequence",
+            (job_id,),
+        )
+        paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
+        tracks = assign_stable_tracks_to_chunks(paths)
+        for row in rows:
+            path = Path(row["path"])
+            if not path.is_file():
+                continue
+            self.database.execute(
+                "UPDATE result_chunks SET size_bytes = ?, sha256 = ? "
+                "WHERE job_id = ? AND sequence = ?",
+                (
+                    path.stat().st_size,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    job_id,
+                    row["sequence"],
+                ),
+            )
+        return tracks
 
     def _state(self, job_id: str, state: str) -> None:
         self.database.execute(

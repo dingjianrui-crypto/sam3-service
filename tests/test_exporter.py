@@ -9,9 +9,11 @@ from sam3_service.exporter import (
     SpmEstimator,
     _degree_label_entries,
     _degree_labels,
+    _degree_slots,
     _metric_label_top,
     _record_line,
     _record_selected_for_export,
+    _resolve_requested_track_ids,
     _spm_label_top,
 )
 
@@ -67,28 +69,28 @@ class ExporterTest(unittest.TestCase):
         options = ExportOptions(
             reference_prompt_id="boat",
             target_prompt_ids=("paddle",),
-            reference_instance_ids=("boat:2",),
-            target_instance_ids=("paddle:1",),
+            reference_track_ids=("boat:track:2",),
+            target_track_ids=("paddle:track:1",),
         )
 
         self.assertFalse(
             _record_selected_for_export(
-                {"prompt_id": "boat", "instance_id": "boat:1"}, options
+                {"prompt_id": "boat", "instance_id": "boat:1", "track_id": "boat:track:1"}, options
             )
         )
         self.assertTrue(
             _record_selected_for_export(
-                {"prompt_id": "boat", "instance_id": "boat:2"}, options
+                {"prompt_id": "boat", "instance_id": "boat:7", "track_id": "boat:track:2"}, options
             )
         )
         self.assertTrue(
             _record_selected_for_export(
-                {"prompt_id": "paddle", "instance_id": "paddle:1"}, options
+                {"prompt_id": "paddle", "instance_id": "paddle:4", "track_id": "paddle:track:1"}, options
             )
         )
         self.assertFalse(
             _record_selected_for_export(
-                {"prompt_id": "paddle", "instance_id": "paddle:2"}, options
+                {"prompt_id": "paddle", "instance_id": "paddle:2", "track_id": "paddle:track:2"}, options
             )
         )
 
@@ -121,13 +123,27 @@ class ExporterTest(unittest.TestCase):
             ExportOptions(
                 reference_prompt_id="boat",
                 target_prompt_ids=("paddle",),
-                reference_instance_ids=("boat:1",),
-                target_instance_ids=("paddle:2",),
+                reference_track_ids=("boat:1",),
+                target_track_ids=("paddle:2",),
             ),
         )
 
         self.assertEqual([label.instance_id for label in labels], ["paddle:2"])
         self.assertEqual([label.degree for label in labels], [90])
+
+    def test_raw_instance_selection_resolves_to_stable_track(self) -> None:
+        resolved = _resolve_requested_track_ids(
+            ("boat:7",),
+            [
+                {
+                    "id": "boat:track:1",
+                    "prompt_id": "boat",
+                    "instance_ids": ["boat:1", "boat:7"],
+                }
+            ],
+        )
+
+        self.assertEqual(resolved, ("boat:track:1",))
 
     def test_single_degree_label_omits_index(self) -> None:
         entries = _degree_label_entries(
@@ -142,6 +158,52 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual([entry.text for entry in entries], ["42°"])
+
+    def test_degree_slots_keep_missing_tracks_visible(self) -> None:
+        labels = [
+            DegreeLabel(
+                instance_id="paddle:track:1",
+                degree=42,
+                line=(0, 0, 1, 1),
+                color=(53, 194, 255, 255),
+            ),
+            DegreeLabel(
+                instance_id="paddle:track:3",
+                degree=51,
+                line=(0, 0, 1, 1),
+                color=(53, 194, 255, 255),
+            ),
+        ]
+
+        slots = _degree_slots(
+            labels,
+            ExportOptions(
+                target_track_ids=tuple(f"paddle:track:{index}" for index in range(1, 5))
+            ),
+        )
+        entries = _degree_label_entries(slots)
+
+        self.assertEqual([slot.degree for slot in slots], [42, None, 51, None])
+        self.assertEqual(
+            [entry.text for entry in entries],
+            ["1: 42°", "2: Missing", "3: 51°", "4: Missing"],
+        )
+        self.assertEqual(entries[1].text_color, (148, 163, 184, 255))
+
+    def test_missing_degrees_are_excluded_from_outlier_highlight(self) -> None:
+        labels = [
+            DegreeLabel(
+                instance_id=f"paddle:track:{index}",
+                degree=degree,
+                line=None if degree is None else (0, 0, 1, 1),
+                color=(53, 194, 255, 255),
+            )
+            for index, degree in enumerate([40, 42, 41, None], start=1)
+        ]
+
+        entries = _degree_label_entries(labels)
+
+        self.assertTrue(all(entry.text_color != (255, 82, 96, 255) for entry in entries))
 
     def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
         line = _record_line(

@@ -23,6 +23,7 @@ from .exporter import ExportOptions, export_centerline_video
 from .media import probe_video
 from .schemas import JobCreate, VideoCreate
 from .storage import LocalStorage, sha256_file
+from .tracking import assign_stable_tracks_to_chunks
 
 COLORS = ["#35C2FF", "#FFB547", "#A78BFA", "#4ADE80", "#FB7185"]
 
@@ -390,10 +391,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ServiceError("NOT_FOUND", "Job was not found.", status_code=404)
         if job["state"] != "completed":
             raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
-        path = request.app.state.storage.manifest_path(job_id)
-        if not path.is_file():
-            raise ServiceError("NOT_FOUND", "Result manifest is unavailable.", status_code=404)
-        return JSONResponse(json.loads(path.read_text()))
+        return JSONResponse(
+            _result_manifest_with_tracks(
+                request.app.state.database,
+                request.app.state.storage,
+                job_id,
+            )
+        )
 
     @app.get("/api/v1/jobs/{job_id}/results/chunks/{sequence}")
     def get_result_chunk(job_id: str, sequence: int, request: Request) -> FileResponse:
@@ -415,8 +419,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
-        reference_instance_ids: str | None = Query(default=None),
-        target_instance_ids: str | None = Query(default=None),
+        reference_track_ids: str | None = Query(default=None),
+        target_track_ids: str | None = Query(default=None),
+        reference_instance_ids: str | None = Query(default=None, deprecated=True),
+        target_instance_ids: str | None = Query(default=None, deprecated=True),
     ) -> FileResponse:
         database: Database = request.app.state.database
         storage: LocalStorage = request.app.state.storage
@@ -427,9 +433,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
         video = _video_or_404(database, job["video_id"])
         video_path = Path(video["source_path"] or video["normalized_path"])
-        manifest_path = storage.manifest_path(job_id)
-        if not manifest_path.is_file():
-            raise ServiceError("NOT_FOUND", "Result manifest is unavailable.", status_code=404)
+        manifest = _result_manifest_with_tracks(database, storage, job_id)
         rows = database.fetch_all(
             "SELECT path FROM result_chunks WHERE job_id = ? ORDER BY sequence", (job_id,)
         )
@@ -439,7 +443,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             video_path=video_path,
             output_path=output_path,
             temporary_dir=storage.export_tmp_dir(job_id),
-            manifest=json.loads(manifest_path.read_text()),
+            manifest=manifest,
             chunk_paths=chunk_paths,
             options=ExportOptions(
                 angle_label_position=angle_label_position,
@@ -450,14 +454,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 target_prompt_ids=tuple(
                     item.strip() for item in (target_prompt_ids or "").split(",") if item.strip()
                 ),
-                reference_instance_ids=tuple(
+                reference_track_ids=tuple(
                     item.strip()
-                    for item in (reference_instance_ids or "").split(",")
+                    for item in (reference_track_ids or reference_instance_ids or "").split(",")
                     if item.strip()
                 ),
-                target_instance_ids=tuple(
+                target_track_ids=tuple(
                     item.strip()
-                    for item in (target_instance_ids or "").split(",")
+                    for item in (target_track_ids or target_instance_ids or "").split(",")
                     if item.strip()
                 ),
             ),
@@ -561,6 +565,56 @@ def _job_settings_payload(payload: dict[str, Any], settings: Settings) -> dict[s
         "max_detections_per_frame": requested_max,
         "dedupe_iou_threshold": max(0.0, min(1.0, float(dedupe_iou))),
     }
+
+
+def _result_manifest_with_tracks(
+    database: Database,
+    storage: LocalStorage,
+    job_id: str,
+) -> dict[str, Any]:
+    manifest_path = storage.manifest_path(job_id)
+    if not manifest_path.is_file():
+        raise ServiceError("NOT_FOUND", "Result manifest is unavailable.", status_code=404)
+    manifest = json.loads(manifest_path.read_text())
+    if int(manifest.get("schema_version", 1)) >= 2 and "tracks" in manifest:
+        return manifest
+
+    rows = database.fetch_all(
+        "SELECT sequence, path FROM result_chunks WHERE job_id = ? ORDER BY sequence",
+        (job_id,),
+    )
+    paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
+    tracks = assign_stable_tracks_to_chunks(paths)
+    colors = {
+        prompt["id"]: prompt.get("color", "#35C2FF")
+        for prompt in manifest.get("prompts", [])
+    }
+    manifest["schema_version"] = 2
+    manifest["tracks"] = [
+        {**track, "color": colors.get(track["prompt_id"], "#35C2FF")}
+        for track in tracks
+    ]
+    chunks_by_sequence = {
+        int(chunk["sequence"]): chunk for chunk in manifest.get("chunks", [])
+    }
+    for row in rows:
+        path = Path(row["path"])
+        if not path.is_file():
+            continue
+        size_bytes = path.stat().st_size
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        database.execute(
+            "UPDATE result_chunks SET size_bytes = ?, sha256 = ? "
+            "WHERE job_id = ? AND sequence = ?",
+            (size_bytes, digest, job_id, row["sequence"]),
+        )
+        descriptor = chunks_by_sequence.get(int(row["sequence"]))
+        if descriptor is not None:
+            descriptor["size_bytes"] = size_bytes
+    temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(manifest, separators=(",", ":")))
+    temporary.replace(manifest_path)
+    return manifest
 
 
 def _public_job(job: dict[str, Any] | None) -> dict[str, Any]:

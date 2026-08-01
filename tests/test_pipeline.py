@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sam3_service.config import Settings
 from sam3_service.db import Database, expires_at, utc_now
+from sam3_service.main import _result_manifest_with_tracks
 from sam3_service.segmenter import MockSegmenter
 from sam3_service.storage import LocalStorage
 from sam3_service.worker import Worker
@@ -119,15 +120,35 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(manifest["job_id"], job_id)
         self.assertEqual(manifest["video"]["frame_count"], 10)
         self.assertEqual(len(manifest["chunks"]), 1)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(len(manifest["tracks"]), 1)
         chunk = json.loads(self.storage.chunk_path(job_id, 0).read_text())
         self.assertEqual(len(chunk["frames"]), 10)
         self.assertEqual(chunk["frames"][0]["segmentation"]["type"], "polygon")
         self.assertEqual(chunk["frames"][0]["centerline_segmentation"]["type"], "polygon")
         self.assertIsNotNone(chunk["frames"][0]["centerline_box_xywh"])
         self.assertEqual(len(chunk["frames"][0]["centerline_line_xyxy"]), 4)
+        self.assertEqual(chunk["frames"][0]["track_id"], manifest["tracks"][0]["id"])
         self.assertNotIn("shaft_segmentation", chunk["frames"][0])
         self.assertNotIn("shaft_box_xywh", chunk["frames"][0])
         self.assertNotIn("shaft_line_xyxy", chunk["frames"][0])
+
+        manifest["schema_version"] = 1
+        manifest.pop("tracks")
+        self.storage.manifest_path(job_id).write_text(json.dumps(manifest))
+        for frame in chunk["frames"]:
+            frame.pop("track_id")
+        self.storage.chunk_path(job_id, 0).write_text(json.dumps(chunk))
+
+        migrated = _result_manifest_with_tracks(
+            self.database,
+            self.storage,
+            job_id,
+        )
+        migrated_chunk = json.loads(self.storage.chunk_path(job_id, 0).read_text())
+        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(len(migrated["tracks"]), 1)
+        self.assertTrue(all(frame.get("track_id") for frame in migrated_chunk["frames"]))
 
     def test_only_one_worker_claims_a_job(self) -> None:
         now = utc_now()

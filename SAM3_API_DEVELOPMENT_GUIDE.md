@@ -264,7 +264,7 @@ Only available when the job state is `completed`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "job_id": "7a2b...",
   "video": {
     "url": "/api/v1/videos/8d1f.../content?normalized=true",
@@ -281,6 +281,16 @@ Only available when the job state is `completed`.
   ],
   "instances": [
     { "id": "prompt-id-1:1", "prompt_id": "prompt-id-1", "color": "#35C2FF" }
+  ],
+  "tracks": [
+    {
+      "id": "prompt-id-1:track:1",
+      "prompt_id": "prompt-id-1",
+      "start_ms": 0,
+      "end_ms": 44800,
+      "instance_ids": ["prompt-id-1:1", "prompt-id-1:7"],
+      "color": "#35C2FF"
+    }
   ],
   "chunks": [
     {
@@ -311,6 +321,7 @@ Use `video.url` for playback. The masks and geometry in chunks use the manifest 
       "timestamp_ms": 400,
       "prompt_id": "prompt-id-1",
       "instance_id": "prompt-id-1:1",
+      "track_id": "prompt-id-1:track:1",
       "box_xywh": [512.2, 301.4, 180.5, 44.1],
       "score": 0.93,
       "segmentation": {
@@ -337,13 +348,22 @@ Frame fields:
 | `frame_index` | integer | Zero-based source frame index |
 | `timestamp_ms` | integer | Presentation timestamp in milliseconds |
 | `prompt_id` | string | ID from `manifest.prompts` |
-| `instance_id` | string | Stable tracked object ID within this job |
+| `instance_id` | string | Raw object ID emitted by the model; it may change after re-detection |
+| `track_id` | string | Stable post-processed identity that can span multiple raw instance IDs |
 | `box_xywh` | number[4] | Object box: `[x, y, width, height]` |
 | `score` | number or null | Model confidence |
 | `segmentation` | object | Full object mask |
 | `centerline_segmentation` | object or null | Thin mask around the fitted centerline |
 | `centerline_box_xywh` | number[4] or null | Box around the centerline mask |
 | `centerline_line_xyxy` | number[4] or null | Centerline segment `[x1, y1, x2, y2]` |
+
+### Stable Track Identity
+
+SAM object IDs are retained as `instance_id`, but repeated text grounding can assign a new raw ID to the same physical object. During post-processing, the service associates detections independently within each prompt and writes a stable `track_id`.
+
+For each timestamp, active tracks and detections are compared using predicted center movement, box overlap, relative size change, and undirected centerline-angle change. A one-to-one minimum-cost assignment prevents a newly entering object from taking an existing object's identity simply because model detection order changed. Raw-ID agreement is only a small preference. Implausible movement, size change, or angle change rejects a match. Tracks survive detection gaps up to 1.5 seconds; a later reappearance starts a new track when continuity cannot be established confidently.
+
+Manifest `tracks` entries include their visible time range and all raw `instance_ids` associated with them. Clients should use `track_id` for selection, temporal analytics, SPM history, and user-facing identity. Existing schema-v1 completed results are upgraded to schema v2 when their manifest is next requested.
 
 Mask formats:
 
@@ -689,12 +709,14 @@ Query parameters:
 | `metric_center_offset_percent` | number, `0` to `45` | `5.5` landscape, `16` portrait | Distance from the nearest video edge toward the centerline for both metric rows |
 | `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
 | `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
-| `reference_instance_ids` | comma-separated string | all reference instances | Boat/reference instances to draw and use for paddle pairing |
-| `target_instance_ids` | comma-separated string | all target instances | Paddle/target instances to draw, label, and include in SPM estimation |
+| `reference_track_ids` | comma-separated string | all reference tracks | Stable boat/reference tracks to draw and use for paddle pairing |
+| `target_track_ids` | comma-separated string | all target tracks | Stable paddle/target tracks to draw, label, and include in SPM estimation |
 
 For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
-The export UI lists detected boat and paddle instances in separate multi-select dropdowns. All instances are selected by default. Passing `reference_instance_ids` or `target_instance_ids` limits the burned-in centerlines, paddle angle labels, nearest-boat candidates, and SPM input to those selected instances. Omitting either parameter preserves the default behavior of exporting every instance in that prompt group.
+The degree row has one stable slot for every selected paddle track. If a selected paddle has no valid angle in a frame, its slot displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn until that track is detected again.
+
+The export UI lists stable boat and paddle tracks in separate multi-select dropdowns, including the time range where each track is visible. All tracks are selected by default. Passing `reference_track_ids` or `target_track_ids` limits the burned-in centerlines, paddle angle labels, nearest-boat candidates, and SPM input to those selected tracks. Omitting either parameter preserves the default behavior of exporting every track in that prompt group. The older `reference_instance_ids` and `target_instance_ids` names remain accepted as deprecated aliases.
 
 When `include_spm=true`, the export estimates cadence from the degree time series and draws `瞬时桨频` and `平均桨频` under the Chinese title `桨频` as text only, without a background panel. SPM is always placed on the side opposite `angle_label_position`: angle labels at the top put SPM near the bottom, and angle labels at the bottom put SPM near the top. The export renderer uses the configured CJK-capable font path when available, then falls back to installed Ubuntu CJK fonts such as Noto Sans CJK.
 

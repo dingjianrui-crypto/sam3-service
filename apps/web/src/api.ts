@@ -32,6 +32,7 @@ export type FrameMask = {
   timestamp_ms: number;
   prompt_id: string;
   instance_id: string;
+  track_id?: string;
   box_xywh: number[];
   centerline_box_xywh?: number[] | null;
   centerline_line_xyxy?: number[] | null;
@@ -43,6 +44,15 @@ export type FrameMask = {
     | { type: "polygon"; points: number[][] }
     | { type: "rle"; size: number[]; counts: number[] }
     | null;
+};
+
+export type StableTrack = {
+  id: string;
+  prompt_id: string;
+  color: string;
+  start_ms: number;
+  end_ms: number;
+  instance_ids: string[];
 };
 
 export type ResultManifest = {
@@ -58,6 +68,7 @@ export type ResultManifest = {
   };
   prompts: Prompt[];
   instances: { id: string; prompt_id: string; color: string }[];
+  tracks?: StableTrack[];
   chunks: {
     sequence: number;
     start_ms: number;
@@ -74,8 +85,8 @@ export type ExportVideoOptions = {
   metric_center_offset_percent: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
-  reference_instance_ids?: string[];
-  target_instance_ids?: string[];
+  reference_track_ids?: string[];
+  target_track_ids?: string[];
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -208,11 +219,11 @@ export async function exportJobVideo(
   if (options.target_prompt_ids?.length) {
     params.set("target_prompt_ids", options.target_prompt_ids.join(","));
   }
-  if (options.reference_instance_ids?.length) {
-    params.set("reference_instance_ids", options.reference_instance_ids.join(","));
+  if (options.reference_track_ids?.length) {
+    params.set("reference_track_ids", options.reference_track_ids.join(","));
   }
-  if (options.target_instance_ids?.length) {
-    params.set("target_instance_ids", options.target_instance_ids.join(","));
+  if (options.target_track_ids?.length) {
+    params.set("target_track_ids", options.target_track_ids.join(","));
   }
   const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"

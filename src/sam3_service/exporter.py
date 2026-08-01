@@ -37,8 +37,8 @@ class ExportOptions:
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
-    reference_instance_ids: tuple[str, ...] = ()
-    target_instance_ids: tuple[str, ...] = ()
+    reference_track_ids: tuple[str, ...] = ()
+    target_track_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,8 @@ class Centerline:
 @dataclass(frozen=True)
 class DegreeLabel:
     instance_id: str
-    degree: int
-    line: Line
+    degree: int | None
+    line: Line | None
     color: Color
 
 
@@ -72,11 +72,15 @@ class SpmEstimate:
 class SpmEstimator:
     def __init__(self, *, window_ms: int = 8000) -> None:
         self.window_ms = window_ms
-        self._tracks: dict[int, _SpmTrack] = {}
+        self._tracks: dict[str, _SpmTrack] = {}
 
     def update(self, timestamp_ms: int, labels: list[DegreeLabel]) -> SpmEstimate:
-        for index, label in enumerate(labels):
-            self._tracks.setdefault(index, _SpmTrack()).update(timestamp_ms, float(label.degree))
+        for label in labels:
+            if label.degree is None:
+                continue
+            self._tracks.setdefault(label.instance_id, _SpmTrack()).update(
+                timestamp_ms, float(label.degree)
+            )
         recent_values: list[float] = []
         average_values: list[float] = []
         for track in self._tracks.values():
@@ -192,7 +196,6 @@ def export_centerline_video(
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
-    carried_labels: list[DegreeLabel] = []
     spm_estimator = SpmEstimator()
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
@@ -205,14 +208,13 @@ def export_centerline_video(
             for record in records
             if _record_selected_for_export(record, export_options)
         ]
-        carried_labels = _draw_frame_overlay(
+        _draw_frame_overlay(
             image,
             width,
             height,
             scaled_records,
             colors,
             export_options=export_options,
-            fallback_labels=carried_labels,
             timestamp_ms=timestamp_ms,
             spm_estimator=spm_estimator,
         )
@@ -298,27 +300,23 @@ def _normalize_export_options(
     )
     if not target_prompt_ids:
         target_prompt_ids = _default_target_prompt_ids(prompts, reference_prompt_id)
-    instances = manifest.get("instances", [])
-    valid_reference_instance_ids = {
-        str(instance["id"])
-        for instance in instances
-        if instance.get("id") and instance.get("prompt_id") == reference_prompt_id
-    }
-    valid_target_instance_ids = {
-        str(instance["id"])
-        for instance in instances
-        if instance.get("id") and instance.get("prompt_id") in target_prompt_ids
-    }
-    reference_instance_ids = tuple(
-        instance_id
-        for instance_id in requested.reference_instance_ids
-        if instance_id in valid_reference_instance_ids
+    tracks = manifest.get("tracks", [])
+    reference_tracks = [
+        track for track in tracks if track.get("prompt_id") == reference_prompt_id
+    ]
+    target_tracks = [
+        track for track in tracks if track.get("prompt_id") in target_prompt_ids
+    ]
+    reference_track_ids = _resolve_requested_track_ids(
+        requested.reference_track_ids, reference_tracks
     )
-    target_instance_ids = tuple(
-        instance_id
-        for instance_id in requested.target_instance_ids
-        if instance_id in valid_target_instance_ids
+    target_track_ids = _resolve_requested_track_ids(
+        requested.target_track_ids, target_tracks
     )
+    if not requested.target_track_ids:
+        target_track_ids = tuple(
+            str(track["id"]) for track in target_tracks if track.get("id")
+        )
     position = (
         requested.angle_label_position
         if requested.angle_label_position in {"top", "bottom"}
@@ -336,19 +334,38 @@ def _normalize_export_options(
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         target_prompt_ids=target_prompt_ids,
-        reference_instance_ids=reference_instance_ids,
-        target_instance_ids=target_instance_ids,
+        reference_track_ids=reference_track_ids,
+        target_track_ids=target_track_ids,
     )
+
+
+def _resolve_requested_track_ids(
+    requested_ids: tuple[str, ...], tracks: list[dict[str, Any]]
+) -> tuple[str, ...]:
+    resolved: list[str] = []
+    for requested_id in requested_ids:
+        for track in tracks:
+            track_id = str(track.get("id", ""))
+            source_ids = {str(value) for value in track.get("instance_ids", [])}
+            if requested_id == track_id or requested_id in source_ids:
+                if track_id and track_id not in resolved:
+                    resolved.append(track_id)
+                break
+    return tuple(resolved)
 
 
 def _record_selected_for_export(record: dict[str, Any], options: ExportOptions) -> bool:
     prompt_id = record.get("prompt_id")
-    instance_id = str(record.get("instance_id", ""))
-    if prompt_id == options.reference_prompt_id and options.reference_instance_ids:
-        return instance_id in options.reference_instance_ids
-    if prompt_id in options.target_prompt_ids and options.target_instance_ids:
-        return instance_id in options.target_instance_ids
+    track_id = _record_track_id(record)
+    if prompt_id == options.reference_prompt_id and options.reference_track_ids:
+        return track_id in options.reference_track_ids
+    if prompt_id in options.target_prompt_ids and options.target_track_ids:
+        return track_id in options.target_track_ids
     return True
+
+
+def _record_track_id(record: dict[str, Any]) -> str:
+    return str(record.get("track_id") or record.get("instance_id", ""))
 
 
 def _default_reference_prompt_id(prompts: list[dict[str, Any]]) -> str | None:
@@ -417,10 +434,9 @@ def _draw_frame_overlay(
     colors: dict[str, Color],
     *,
     export_options: ExportOptions,
-    fallback_labels: list[DegreeLabel],
     timestamp_ms: int,
     spm_estimator: SpmEstimator,
-) -> list[DegreeLabel]:
+) -> None:
     centerlines: list[Centerline] = []
     for record in records:
         line = _record_line(record, width, height)
@@ -431,16 +447,15 @@ def _draw_frame_overlay(
         _draw_line(image, width, height, line, color, max(3, round(min(width, height) * 0.006)))
 
     labels = _degree_labels(centerlines, export_options)
-    displayed_labels = labels or fallback_labels
-    active_entries = _degree_label_entries(labels)
-    for entry in active_entries:
-        _draw_target_degree_marker(image, width, height, entry)
+    displayed_labels = _degree_slots(labels, export_options)
+    for entry in _degree_label_entries(displayed_labels):
+        if entry.label.degree is not None and entry.label.line is not None:
+            _draw_target_degree_marker(image, width, height, entry)
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
         estimate = spm_estimator.update(timestamp_ms, labels)
         _draw_spm_label(image, width, height, estimate, export_options)
-    return labels or fallback_labels
 
 
 def _record_line(record: dict[str, Any], width: int, height: int) -> Line | None:
@@ -497,8 +512,8 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
         for centerline in centerlines
         if centerline.record.get("prompt_id") == options.reference_prompt_id
         and (
-            not options.reference_instance_ids
-            or centerline.record.get("instance_id") in options.reference_instance_ids
+            not options.reference_track_ids
+            or _record_track_id(centerline.record) in options.reference_track_ids
         )
     ]
     if not references:
@@ -509,8 +524,8 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
         for centerline in centerlines
         if centerline.record.get("prompt_id") in target_prompt_ids
         and (
-            not options.target_instance_ids
-            or centerline.record.get("instance_id") in options.target_instance_ids
+            not options.target_track_ids
+            or _record_track_id(centerline.record) in options.target_track_ids
         )
     ]
     labels: list[DegreeLabel] = []
@@ -524,13 +539,31 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
             continue
         labels.append(
             DegreeLabel(
-                instance_id=str(target.record.get("instance_id", "")),
+                instance_id=_record_track_id(target.record),
                 degree=round(degrees),
                 line=target.line,
                 color=target.color,
             )
         )
     return labels
+
+
+def _degree_slots(labels: list[DegreeLabel], options: ExportOptions) -> list[DegreeLabel]:
+    if not options.target_track_ids:
+        return labels
+    labels_by_track = {label.instance_id: label for label in labels}
+    return [
+        labels_by_track.get(
+            track_id,
+            DegreeLabel(
+                instance_id=track_id,
+                degree=None,
+                line=None,
+                color=(53, 194, 255, 255),
+            ),
+        )
+        for track_id in options.target_track_ids
+    ]
 
 
 def _nearest_centerline(target: Centerline, references: list[Centerline]) -> Centerline:
@@ -569,6 +602,8 @@ def _draw_target_degree_marker(
     entry: DegreeLabelEntry,
 ) -> None:
     label = entry.label
+    if label.line is None:
+        return
     center_x, center_y = _line_center(label.line)
     dx = label.line[2] - label.line[0]
     dy = label.line[3] - label.line[1]
@@ -612,14 +647,19 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
     entries: list[DegreeLabelEntry] = []
     show_index = len(labels) > 1
     for index, label in enumerate(labels, start=1):
-        text_color = (
-            (255, 82, 96, 255)
-            if highlight_index is not None and index - 1 == highlight_index
-            else (255, 242, 168, 255)
-        )
+        if label.degree is None:
+            text = "Missing"
+            text_color = (148, 163, 184, 255)
+        else:
+            text = f"{label.degree}°"
+            text_color = (
+                (255, 82, 96, 255)
+                if highlight_index is not None and index - 1 == highlight_index
+                else (255, 242, 168, 255)
+            )
         entries.append(
             DegreeLabelEntry(
-                text=f"{index}: {label.degree}°" if show_index else f"{label.degree}°",
+                text=f"{index}: {text}" if show_index else text,
                 label=label,
                 text_color=text_color,
             )
@@ -628,13 +668,18 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
 
 
 def _highlighted_degree_index(labels: list[DegreeLabel]) -> int | None:
-    if len(labels) <= 3:
+    measured = [
+        (index, label.degree)
+        for index, label in enumerate(labels)
+        if label.degree is not None
+    ]
+    if len(measured) <= 3:
         return None
-    average = sum(label.degree for label in labels) / len(labels)
+    average = sum(degree for _, degree in measured) / len(measured)
     return max(
-        range(len(labels)),
-        key=lambda index: abs(labels[index].degree - average),
-    )
+        measured,
+        key=lambda item: abs(item[1] - average),
+    )[0]
 
 
 def _draw_degree_label_block_with_pillow(

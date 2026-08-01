@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { exportJobVideo, FrameMask, getChunk, ResultManifest } from "./api";
+import { exportJobVideo, FrameMask, getChunk, ResultManifest, StableTrack } from "./api";
 
 type Props = {
   manifest: ResultManifest;
@@ -54,11 +54,11 @@ export function Player({ manifest }: Props) {
   const [angleEnabled, setAngleEnabled] = useState(false);
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
-  const [exportReferenceInstanceIds, setExportReferenceInstanceIds] = useState(
-    () => instanceIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
+  const [exportReferenceTrackIds, setExportReferenceTrackIds] = useState(
+    () => trackIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
   );
-  const [exportTargetInstanceIds, setExportTargetInstanceIds] = useState(
-    () => instanceIdsForPrompts(manifest, defaultTargetPromptIds)
+  const [exportTargetTrackIds, setExportTargetTrackIds] = useState(
+    () => trackIdsForPrompts(manifest, defaultTargetPromptIds)
   );
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
   const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
@@ -81,17 +81,18 @@ export function Player({ manifest }: Props) {
     () => new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.color])),
     [manifest]
   );
-  const exportReferenceInstances = useMemo(
-    () => manifest.instances.filter((instance) => instance.prompt_id === angleReferencePromptId),
-    [angleReferencePromptId, manifest.instances]
+  const availableTracks = useMemo(() => tracksForManifest(manifest), [manifest]);
+  const exportReferenceTracks = useMemo(
+    () => availableTracks.filter((track) => track.prompt_id === angleReferencePromptId),
+    [angleReferencePromptId, availableTracks]
   );
-  const exportTargetInstances = useMemo(
-    () => manifest.instances.filter((instance) => angleTargetPromptIds.has(instance.prompt_id)),
-    [angleTargetPromptIds, manifest.instances]
+  const exportTargetTracks = useMemo(
+    () => availableTracks.filter((track) => angleTargetPromptIds.has(track.prompt_id)),
+    [angleTargetPromptIds, availableTracks]
   );
   const exportSelectionValid =
-    (exportReferenceInstances.length === 0 || exportReferenceInstanceIds.size > 0) &&
-    (exportTargetInstances.length === 0 || exportTargetInstanceIds.size > 0);
+    (exportReferenceTracks.length === 0 || exportReferenceTrackIds.size > 0) &&
+    (exportTargetTracks.length === 0 || exportTargetTrackIds.size > 0);
 
   const ensureChunk = useCallback(
     async (timeMs: number) => {
@@ -164,10 +165,10 @@ export function Player({ manifest }: Props) {
     setAngleEnabled(false);
     setAngleReferencePromptId(defaultReferencePromptId);
     setAngleTargetPromptIds(defaultTargetPromptIds);
-    setExportReferenceInstanceIds(
-      instanceIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
+    setExportReferenceTrackIds(
+      trackIdsForPrompts(manifest, new Set([defaultReferencePromptId]))
     );
-    setExportTargetInstanceIds(instanceIdsForPrompts(manifest, defaultTargetPromptIds));
+    setExportTargetTrackIds(trackIdsForPrompts(manifest, defaultTargetPromptIds));
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
 
   useEffect(() => {
@@ -199,25 +200,25 @@ export function Player({ manifest }: Props) {
   function toggleAngleTargetPrompt(id: string) {
     setAngleTargetPromptIds((current) => {
       const next = new Set(current);
-      const instanceIds = manifest.instances
-        .filter((instance) => instance.prompt_id === id)
-        .map((instance) => instance.id);
+      const trackIds = availableTracks
+        .filter((track) => track.prompt_id === id)
+        .map((track) => track.id);
       if (next.has(id)) {
         next.delete(id);
-        setExportTargetInstanceIds((selected) => {
+        setExportTargetTrackIds((selected) => {
           const updated = new Set(selected);
-          instanceIds.forEach((instanceId) => updated.delete(instanceId));
+          trackIds.forEach((trackId) => updated.delete(trackId));
           return updated;
         });
       } else {
         next.add(id);
-        setExportTargetInstanceIds((selected) => new Set([...selected, ...instanceIds]));
+        setExportTargetTrackIds((selected) => new Set([...selected, ...trackIds]));
       }
       return next;
     });
   }
 
-  function toggleExportInstance(
+  function toggleExportTrack(
     setter: React.Dispatch<React.SetStateAction<Set<string>>>,
     id: string
   ) {
@@ -240,8 +241,8 @@ export function Player({ manifest }: Props) {
         metric_center_offset_percent: exportMetricCenterOffsetPercent,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds],
-        reference_instance_ids: [...exportReferenceInstanceIds],
-        target_instance_ids: [...exportTargetInstanceIds]
+        reference_track_ids: [...exportReferenceTrackIds],
+        target_track_ids: [...exportTargetTrackIds]
       });
       downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
       setExportStatus("Export complete.");
@@ -257,8 +258,8 @@ export function Player({ manifest }: Props) {
     exportLabelPosition,
     exportMetricCenterOffsetPercent,
     exportSpmEnabled,
-    exportReferenceInstanceIds,
-    exportTargetInstanceIds,
+    exportReferenceTrackIds,
+    exportTargetTrackIds,
     manifest.job_id
   ]);
 
@@ -342,10 +343,10 @@ export function Player({ manifest }: Props) {
                   }
                   setAngleReferencePromptId(nextReference);
                   setAngleTargetPromptIds(nextTargets);
-                  setExportReferenceInstanceIds(
-                    instanceIdsForPrompts(manifest, new Set([nextReference]))
+                  setExportReferenceTrackIds(
+                    trackIdsForPrompts(manifest, new Set([nextReference]))
                   );
-                  setExportTargetInstanceIds(instanceIdsForPrompts(manifest, nextTargets));
+                  setExportTargetTrackIds(trackIdsForPrompts(manifest, nextTargets));
                 }}
               >
                 {manifest.prompts.map((prompt) => (
@@ -372,19 +373,19 @@ export function Player({ manifest }: Props) {
           </div>
         )}
         <div className="export-controls">
-          <InstanceMultiSelect
+          <TrackMultiSelect
             label="Boats to export"
-            instances={exportReferenceInstances}
-            selected={exportReferenceInstanceIds}
+            tracks={exportReferenceTracks}
+            selected={exportReferenceTrackIds}
             manifest={manifest}
-            onToggle={(id) => toggleExportInstance(setExportReferenceInstanceIds, id)}
+            onToggle={(id) => toggleExportTrack(setExportReferenceTrackIds, id)}
           />
-          <InstanceMultiSelect
+          <TrackMultiSelect
             label="Paddles to export"
-            instances={exportTargetInstances}
-            selected={exportTargetInstanceIds}
+            tracks={exportTargetTracks}
+            selected={exportTargetTrackIds}
             manifest={manifest}
-            onToggle={(id) => toggleExportInstance(setExportTargetInstanceIds, id)}
+            onToggle={(id) => toggleExportTrack(setExportTargetTrackIds, id)}
           />
           <label>
             Degree position
@@ -448,45 +449,55 @@ export function Player({ manifest }: Props) {
   );
 }
 
-function instanceIdsForPrompts(manifest: ResultManifest, promptIds: Set<string>) {
+function trackIdsForPrompts(manifest: ResultManifest, promptIds: Set<string>) {
   return new Set(
-    manifest.instances
-      .filter((instance) => promptIds.has(instance.prompt_id))
-      .map((instance) => instance.id)
+    tracksForManifest(manifest)
+      .filter((track) => promptIds.has(track.prompt_id))
+      .map((track) => track.id)
   );
 }
 
-function InstanceMultiSelect({
+function tracksForManifest(manifest: ResultManifest): StableTrack[] {
+  if (manifest.tracks) return manifest.tracks;
+  return manifest.instances.map((instance) => ({
+    ...instance,
+    start_ms: 0,
+    end_ms: manifest.video.duration_ms,
+    instance_ids: [instance.id]
+  }));
+}
+
+function TrackMultiSelect({
   label,
-  instances,
+  tracks,
   selected,
   manifest,
   onToggle
 }: {
   label: string;
-  instances: ResultManifest["instances"];
+  tracks: StableTrack[];
   selected: Set<string>;
   manifest: ResultManifest;
   onToggle: (id: string) => void;
 }) {
   const promptText = new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.text]));
-  const selectedCount = instances.filter((instance) => selected.has(instance.id)).length;
+  const selectedCount = tracks.filter((track) => selected.has(track.id)).length;
   return (
     <details className="instance-multi-select">
-      <summary>{label} ({selectedCount}/{instances.length})</summary>
+      <summary>{label} ({selectedCount}/{tracks.length})</summary>
       <div className="instance-options">
-        {instances.length === 0 ? (
-          <span>No detected instances</span>
+        {tracks.length === 0 ? (
+          <span>No detected tracks</span>
         ) : (
-          instances.map((instance, index) => (
-            <label className="checkbox" key={instance.id}>
+          tracks.map((track, index) => (
+            <label className="checkbox" key={track.id}>
               <input
                 type="checkbox"
-                checked={selected.has(instance.id)}
-                onChange={() => onToggle(instance.id)}
+                checked={selected.has(track.id)}
+                onChange={() => onToggle(track.id)}
               />
-              <span title={instance.id}>
-                {promptText.get(instance.prompt_id) ?? "Object"} {instanceIdSuffix(instance.id, index)}
+              <span title={`${track.id} · ${track.instance_ids.join(", ")}`}>
+                {promptText.get(track.prompt_id) ?? "Object"} {trackIdSuffix(track.id, index)} · {formatTrackTime(track.start_ms)}–{formatTrackTime(track.end_ms)}
               </span>
             </label>
           ))
@@ -496,11 +507,16 @@ function InstanceMultiSelect({
   );
 }
 
-function instanceIdSuffix(instanceId: string, fallbackIndex: number) {
-  const separator = instanceId.lastIndexOf(":");
-  return separator >= 0 && separator < instanceId.length - 1
-    ? instanceId.slice(separator + 1)
+function trackIdSuffix(trackId: string, fallbackIndex: number) {
+  const separator = trackId.lastIndexOf(":");
+  return separator >= 0 && separator < trackId.length - 1
+    ? trackId.slice(separator + 1)
     : String(fallbackIndex + 1);
+}
+
+function formatTrackTime(timestampMs: number) {
+  const seconds = Math.max(0, Math.floor(timestampMs / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function recordsForTime(
@@ -594,7 +610,7 @@ function drawOverlay(
       context.fillStyle = color;
       context.font = `${Math.max(13, context.canvas.width / 60)}px ${OVERLAY_FONT_FAMILY}`;
       context.fillText(
-        `${record.instance_id}${record.score == null ? "" : ` · ${record.score.toFixed(2)}`}`,
+        `${recordTrackLabel(record)}${record.score == null ? "" : ` · ${record.score.toFixed(2)}`}`,
         x,
         Math.max(18, y - 6)
       );
@@ -603,6 +619,11 @@ function drawOverlay(
   if (options.angleConfig.enabled) {
     drawAngleAnnotations(context, centerlines, options.angleConfig);
   }
+}
+
+function recordTrackLabel(record: FrameMask) {
+  if (!record.track_id) return record.instance_id;
+  return `T${trackIdSuffix(record.track_id, 0)}`;
 }
 
 function downloadBlob(blob: Blob, filename: string) {
