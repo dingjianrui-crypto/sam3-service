@@ -142,7 +142,7 @@ class ExporterTest(unittest.TestCase):
             )
         )
 
-    def test_selection_rectangle_interpolates_between_keyframes(self) -> None:
+    def test_selection_rectangle_holds_until_next_keyframe(self) -> None:
         options = ExportOptions(
             selection_keyframes=(
                 (0, 0.0, 0.1, 0.2, 0.3),
@@ -151,10 +151,8 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual(_selection_rect_at(options, -10), (0.0, 0.1, 0.2, 0.3))
-        for actual, expected in zip(
-            _selection_rect_at(options, 500), (0.2, 0.2, 0.3, 0.4), strict=True
-        ):
-            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(_selection_rect_at(options, 500), (0.0, 0.1, 0.2, 0.3))
+        self.assertEqual(_selection_rect_at(options, 1000), (0.4, 0.3, 0.4, 0.5))
         self.assertEqual(_selection_rect_at(options, 2000), (0.4, 0.3, 0.4, 0.5))
 
     def test_keyframed_rectangle_filters_at_frame_time(self) -> None:

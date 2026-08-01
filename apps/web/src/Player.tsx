@@ -796,19 +796,12 @@ function selectionAtTime(
   timeMs: number
 ): ExportRect | null {
   if (!keyframes.length) return null;
-  if (timeMs <= keyframes[0].time_ms) return rectangleFromKeyframe(keyframes[0]);
-  const last = keyframes[keyframes.length - 1];
-  if (timeMs >= last.time_ms) return rectangleFromKeyframe(last);
-  const rightIndex = keyframes.findIndex((keyframe) => keyframe.time_ms >= timeMs);
-  const left = keyframes[rightIndex - 1];
-  const right = keyframes[rightIndex];
-  const progress = (timeMs - left.time_ms) / Math.max(right.time_ms - left.time_ms, 1);
-  return {
-    x: left.x + (right.x - left.x) * progress,
-    y: left.y + (right.y - left.y) * progress,
-    width: left.width + (right.width - left.width) * progress,
-    height: left.height + (right.height - left.height) * progress
-  };
+  let active = keyframes[0];
+  for (const keyframe of keyframes) {
+    if (keyframe.time_ms > timeMs) break;
+    active = keyframe;
+  }
+  return rectangleFromKeyframe(active);
 }
 
 function rectangleFromKeyframe(keyframe: ExportSelectionKeyframe): ExportRect {

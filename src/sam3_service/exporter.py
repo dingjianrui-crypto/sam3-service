@@ -420,20 +420,12 @@ def _selection_rect_at(options: ExportOptions, timestamp_ms: int) -> SelectionRe
     keyframes = options.selection_keyframes
     if not keyframes:
         return options.selection_rect
-    if timestamp_ms <= keyframes[0][0]:
-        return keyframes[0][1:]
-    if timestamp_ms >= keyframes[-1][0]:
-        return keyframes[-1][1:]
-    times = [keyframe[0] for keyframe in keyframes]
-    right_index = bisect_left(times, timestamp_ms)
-    left = keyframes[right_index - 1]
-    right = keyframes[right_index]
-    span = right[0] - left[0]
-    progress = 0.0 if span <= 0 else (timestamp_ms - left[0]) / span
-    return tuple(
-        left[index] + (right[index] - left[index]) * progress
-        for index in range(1, 5)
-    )  # type: ignore[return-value]
+    active = keyframes[0]
+    for keyframe in keyframes:
+        if keyframe[0] > timestamp_ms:
+            break
+        active = keyframe
+    return active[1:]
 
 
 def _maximum_target_count_in_selection(
