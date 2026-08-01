@@ -50,6 +50,7 @@ export function Player({ manifest }: Props) {
   const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
   const lastEditedKeyframeRef = useRef<number | null>(null);
   const selectionKeyframesRef = useRef<ExportSelectionKeyframe[]>([]);
+  const playbackTimeRef = useRef(0);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -175,6 +176,7 @@ export function Player({ manifest }: Props) {
     selectionKeyframesRef.current = [];
     setDraftSelection(null);
     setPlaybackTimeMs(0);
+    playbackTimeRef.current = 0;
     setVideoDurationMs(manifest.video.duration_ms);
     lastEditedKeyframeRef.current = null;
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
@@ -187,6 +189,7 @@ export function Player({ manifest }: Props) {
       const callback = (_now: number, metadata: { mediaTime: number }) => {
         draw(metadata.mediaTime);
         const timeMs = Math.round(metadata.mediaTime * 1000);
+        playbackTimeRef.current = timeMs;
         setPlaybackTimeMs(timeMs);
         const rectangle = selectionAtTime(selectionKeyframesRef.current, timeMs);
         if (selectionRectangleRef.current && rectangle && !selectionInteractionRef.current) {
@@ -205,7 +208,11 @@ export function Player({ manifest }: Props) {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const syncPlayback = () => setPlaybackTimeMs(Math.round(video.currentTime * 1000));
+    const syncPlayback = () => {
+      const timeMs = Math.round(video.currentTime * 1000);
+      playbackTimeRef.current = timeMs;
+      setPlaybackTimeMs(timeMs);
+    };
     const syncDuration = () => {
       if (Number.isFinite(video.duration)) setVideoDurationMs(Math.round(video.duration * 1000));
     };
@@ -281,9 +288,7 @@ export function Player({ manifest }: Props) {
     selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      const timeMs = Math.round(videoRef.current?.currentTime
-        ? videoRef.current.currentTime * 1000
-        : playbackTimeMs);
+      const timeMs = playbackTimeRef.current;
       setSelectionKeyframes((current) => upsertSelectionKeyframe(current, timeMs, rectangle));
       lastEditedKeyframeRef.current = timeMs;
       setRectangleToolActive(false);
@@ -307,6 +312,7 @@ export function Player({ manifest }: Props) {
   }
 
   function seekTo(timeMs: number) {
+    playbackTimeRef.current = timeMs;
     const video = videoRef.current;
     if (video) video.currentTime = timeMs / 1000;
     setPlaybackTimeMs(timeMs);
