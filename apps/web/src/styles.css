@@ -611,11 +611,70 @@ h2 {
   touch-action: none;
 }
 
+.selection-surface.movable {
+  cursor: default;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.selection-surface.movable .export-selection-rectangle {
+  cursor: move;
+  pointer-events: auto;
+}
+
 .export-selection-rectangle {
   position: absolute;
   border: 2px solid #f8d84e;
   background: rgb(248 216 78 / 12%);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 65%);
+}
+
+.selection-timeline {
+  z-index: 3;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 11px 14px 13px;
+  border-top: 1px solid #1b3549;
+  background: #06111a;
+  line-height: 1;
+}
+
+.selection-timeline-track {
+  position: relative;
+  height: 22px;
+  display: flex;
+  align-items: center;
+}
+
+.selection-timeline input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #55d7f2;
+}
+
+.selection-keyframe {
+  position: absolute;
+  top: 1px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: 1px solid #171006;
+  border-radius: 50%;
+  background: #f8d84e;
+  box-shadow: 0 0 0 1px rgb(248 216 78 / 45%);
+  transform: translateX(-50%);
+  cursor: pointer;
+}
+
+.selection-timeline output {
+  min-width: 78px;
+  color: #91a8ba;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  text-align: right;
 }
 
 .video-status {

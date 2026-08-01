@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import shutil
@@ -427,6 +428,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         selection_y: float | None = Query(default=None, ge=0, le=1),
         selection_width: float | None = Query(default=None, gt=0, le=1),
         selection_height: float | None = Query(default=None, gt=0, le=1),
+        selection_keyframes: str | None = Query(default=None),
     ) -> FileResponse:
         database: Database = request.app.state.database
         storage: LocalStorage = request.app.state.storage
@@ -452,6 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "The selection rectangle must stay inside the video frame.",
                 status_code=400,
             )
+        parsed_selection_keyframes = _parse_selection_keyframes(selection_keyframes)
         video = _video_or_404(database, job["video_id"])
         video_path = Path(video["source_path"] or video["normalized_path"])
         manifest = _result_manifest_with_tracks(database, storage, job_id)
@@ -490,6 +493,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if all(value is not None for value in selection_values)
                     else None
                 ),
+                selection_keyframes=parsed_selection_keyframes,
             ),
         )
         return FileResponse(
@@ -677,6 +681,61 @@ def _public_job(job: dict[str, Any] | None) -> dict[str, Any]:
         "started_at": job.get("started_at"),
         "completed_at": job.get("completed_at"),
     }
+
+
+def _parse_selection_keyframes(
+    raw_value: str | None,
+) -> tuple[tuple[int, float, float, float, float], ...]:
+    if not raw_value:
+        return ()
+    try:
+        payload = json.loads(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            "INVALID_SELECTION",
+            "Selection keyframes must be valid JSON.",
+            status_code=400,
+        ) from exc
+    if not isinstance(payload, list) or len(payload) > 200:
+        raise ServiceError(
+            "INVALID_SELECTION",
+            "Selection keyframes must be a list with at most 200 entries.",
+            status_code=400,
+        )
+    by_time: dict[int, tuple[int, float, float, float, float]] = {}
+    for value in payload:
+        if not isinstance(value, list) or len(value) != 5:
+            raise ServiceError(
+                "INVALID_SELECTION",
+                "Each selection keyframe must contain time, x, y, width, and height.",
+                status_code=400,
+            )
+        try:
+            time_ms = int(value[0])
+            x, y, width, height = (float(item) for item in value[1:])
+        except (TypeError, ValueError) as exc:
+            raise ServiceError(
+                "INVALID_SELECTION",
+                "Selection keyframe values must be numeric.",
+                status_code=400,
+            ) from exc
+        if (
+            time_ms < 0
+            or not all(math.isfinite(item) for item in (x, y, width, height))
+            or width <= 0
+            or height <= 0
+            or x < 0
+            or y < 0
+            or x + width > 1
+            or y + height > 1
+        ):
+            raise ServiceError(
+                "INVALID_SELECTION",
+                "Selection keyframes must stay inside the normalized video frame.",
+                status_code=400,
+            )
+        by_time[time_ms] = (time_ms, x, y, width, height)
+    return tuple(by_time[time_ms] for time_ms in sorted(by_time))
 
 
 app = create_app()

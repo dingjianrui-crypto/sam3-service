@@ -15,6 +15,7 @@ from sam3_service.exporter import (
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
+    _selection_rect_at,
     _spm_label_top,
 )
 
@@ -140,6 +141,36 @@ class ExporterTest(unittest.TestCase):
                 {"centerline_line_xyxy": [10, 20, 30, 20]}, options, 100, 100
             )
         )
+
+    def test_selection_rectangle_interpolates_between_keyframes(self) -> None:
+        options = ExportOptions(
+            selection_keyframes=(
+                (0, 0.0, 0.1, 0.2, 0.3),
+                (1000, 0.4, 0.3, 0.4, 0.5),
+            )
+        )
+
+        self.assertEqual(_selection_rect_at(options, -10), (0.0, 0.1, 0.2, 0.3))
+        for actual, expected in zip(
+            _selection_rect_at(options, 500), (0.2, 0.2, 0.3, 0.4), strict=True
+        ):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(_selection_rect_at(options, 2000), (0.4, 0.3, 0.4, 0.5))
+
+    def test_keyframed_rectangle_filters_at_frame_time(self) -> None:
+        options = ExportOptions(
+            selection_keyframes=(
+                (0, 0.0, 0.0, 0.3, 1.0),
+                (1000, 0.7, 0.0, 0.3, 1.0),
+            )
+        )
+        left_record = {"centerline_line_xyxy": [5, 20, 15, 20]}
+        right_record = {"centerline_line_xyxy": [85, 20, 95, 20]}
+
+        self.assertTrue(_record_selected_for_export(left_record, options, 100, 100, 0))
+        self.assertFalse(_record_selected_for_export(right_record, options, 100, 100, 0))
+        self.assertFalse(_record_selected_for_export(left_record, options, 100, 100, 1000))
+        self.assertTrue(_record_selected_for_export(right_record, options, 100, 100, 1000))
         self.assertFalse(
             _record_selected_for_export(
                 {"centerline_line_xyxy": [70, 20, 90, 20]}, options, 100, 100

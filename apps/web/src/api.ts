@@ -76,6 +76,13 @@ export type ExportVideoOptions = {
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
   selection_rect?: { x: number; y: number; width: number; height: number };
+  selection_keyframes?: Array<{
+    time_ms: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -213,6 +220,20 @@ export async function exportJobVideo(
     params.set("selection_y", String(options.selection_rect.y));
     params.set("selection_width", String(options.selection_rect.width));
     params.set("selection_height", String(options.selection_rect.height));
+  }
+  if (options.selection_keyframes?.length) {
+    params.set(
+      "selection_keyframes",
+      JSON.stringify(
+        options.selection_keyframes.map(({ time_ms, x, y, width, height }) => [
+          time_ms,
+          x,
+          y,
+          width,
+          height
+        ])
+      )
+    );
   }
   const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"

@@ -713,6 +713,7 @@ Query parameters:
 | `selection_y` | number, `0` to `1` | none | Normalized top edge of the export rectangle |
 | `selection_width` | number, greater than `0` to `1` | none | Normalized export rectangle width |
 | `selection_height` | number, greater than `0` to `1` | none | Normalized export rectangle height |
+| `selection_keyframes` | JSON string | none | Moving rectangle keyframes encoded as `[[time_ms,x,y,width,height],...]`; overrides the static rectangle |
 | `reference_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
 | `target_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
 
@@ -720,7 +721,9 @@ For each exported frame, the server finds every target centerline, matches it to
 
 When a rectangle is present, the degree row reserves the maximum number of paddle positions observed inside it over the complete video. Paddles are ordered left to right in each frame. An unavailable position displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them.
 
-The video toolbar provides Rectangle and Undo tools. Rectangle pauses playback and lets the user drag an export area directly over the video viewport. The client sends normalized coordinates, so responsive display scaling does not change the selected source area. During export, a boat or paddle is included in each frame only when the center of its centerline is inside the rectangle. The rectangle is a filter and is not burned into the exported video. Undo removes it and returns export filtering to the full frame.
+The video toolbar provides Rectangle and Undo tools. Rectangle pauses playback and lets the user drag an export area directly over the video viewport. A dedicated timeline below the viewport shows rectangle keyframes. Seeking to a new time and moving or redrawing the rectangle adds a keyframe; the client and export renderer linearly interpolate its position and size between keyframes, then hold the first and last rectangles outside the keyed interval. Undo removes the most recently edited keyframe and returns export filtering to the full frame after the last keyframe is removed.
+
+The client sends normalized coordinates, so responsive display scaling does not change the selected source area. During export, a boat or paddle is included in each frame only when the center of its centerline is inside the rectangle at that time. The rectangle is a filter and is not burned into the exported video. `selection_keyframes` takes precedence over the legacy static `selection_x`, `selection_y`, `selection_width`, and `selection_height` parameters.
 
 The export UI does not expose track IDs. `reference_track_ids`, `target_track_ids`, `reference_instance_ids`, and `target_instance_ids` remain API compatibility parameters for older clients only.
 

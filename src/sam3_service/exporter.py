@@ -16,6 +16,8 @@ from .media import probe_video
 
 Color = tuple[int, int, int, int]
 Line = tuple[float, float, float, float]
+SelectionRect = tuple[float, float, float, float]
+SelectionKeyframe = tuple[int, float, float, float, float]
 LabelPosition = str
 DEGREE_LABEL_TITLE = "桨叶角度"
 SPM_LABEL_TITLE = "桨频"
@@ -39,7 +41,8 @@ class ExportOptions:
     target_prompt_ids: tuple[str, ...] = ()
     reference_track_ids: tuple[str, ...] = ()
     target_track_ids: tuple[str, ...] = ()
-    selection_rect: tuple[float, float, float, float] | None = None
+    selection_rect: SelectionRect | None = None
+    selection_keyframes: tuple[SelectionKeyframe, ...] = ()
     target_slot_count: int = 0
 
 
@@ -197,7 +200,7 @@ def export_centerline_video(
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
-    if export_options.selection_rect is not None:
+    if export_options.selection_rect is not None or export_options.selection_keyframes:
         export_options = replace(
             export_options,
             target_slot_count=_maximum_target_count_in_selection(
@@ -221,7 +224,9 @@ def export_centerline_video(
         scaled_records = [
             record
             for record in scaled_records
-            if _record_selected_for_export(record, export_options, width, height)
+            if _record_selected_for_export(
+                record, export_options, width, height, timestamp_ms
+            )
         ]
         _draw_frame_overlay(
             image,
@@ -328,7 +333,11 @@ def _normalize_export_options(
     target_track_ids = _resolve_requested_track_ids(
         requested.target_track_ids, target_tracks
     )
-    if not requested.target_track_ids and requested.selection_rect is None:
+    if (
+        not requested.target_track_ids
+        and requested.selection_rect is None
+        and not requested.selection_keyframes
+    ):
         target_track_ids = tuple(
             str(track["id"]) for track in target_tracks if track.get("id")
         )
@@ -352,6 +361,9 @@ def _normalize_export_options(
         reference_track_ids=reference_track_ids,
         target_track_ids=target_track_ids,
         selection_rect=requested.selection_rect,
+        selection_keyframes=tuple(
+            sorted(requested.selection_keyframes, key=lambda keyframe: keyframe[0])
+        ),
         target_slot_count=max(0, requested.target_slot_count),
     )
 
@@ -376,13 +388,15 @@ def _record_selected_for_export(
     options: ExportOptions,
     width: int | None = None,
     height: int | None = None,
+    timestamp_ms: int = 0,
 ) -> bool:
-    if options.selection_rect is not None and width and height:
+    selection_rect = _selection_rect_at(options, timestamp_ms)
+    if selection_rect is not None and width and height:
         line = _record_line(record, width, height)
         if line is None:
             return False
         center_x, center_y = _line_center(line)
-        left, top, rect_width, rect_height = options.selection_rect
+        left, top, rect_width, rect_height = selection_rect
         if not (
             left <= center_x / width <= left + rect_width
             and top <= center_y / height <= top + rect_height
@@ -397,6 +411,26 @@ def _record_selected_for_export(
     return True
 
 
+def _selection_rect_at(options: ExportOptions, timestamp_ms: int) -> SelectionRect | None:
+    keyframes = options.selection_keyframes
+    if not keyframes:
+        return options.selection_rect
+    if timestamp_ms <= keyframes[0][0]:
+        return keyframes[0][1:]
+    if timestamp_ms >= keyframes[-1][0]:
+        return keyframes[-1][1:]
+    times = [keyframe[0] for keyframe in keyframes]
+    right_index = bisect_left(times, timestamp_ms)
+    left = keyframes[right_index - 1]
+    right = keyframes[right_index]
+    span = right[0] - left[0]
+    progress = 0.0 if span <= 0 else (timestamp_ms - left[0]) / span
+    return tuple(
+        left[index] + (right[index] - left[index]) * progress
+        for index in range(1, 5)
+    )  # type: ignore[return-value]
+
+
 def _maximum_target_count_in_selection(
     frames: dict[int, list[dict[str, Any]]],
     options: ExportOptions,
@@ -407,13 +441,17 @@ def _maximum_target_count_in_selection(
 ) -> int:
     target_prompt_ids = set(options.target_prompt_ids)
     maximum = 0
-    for records in frames.values():
+    for timestamp_ms, records in frames.items():
         count = sum(
             1
             for raw_record in records
             if raw_record.get("prompt_id") in target_prompt_ids
             and _record_selected_for_export(
-                _scale_record(raw_record, scale_x, scale_y), options, width, height
+                _scale_record(raw_record, scale_x, scale_y),
+                options,
+                width,
+                height,
+                timestamp_ms,
             )
         )
         maximum = max(maximum, count)
@@ -510,7 +548,11 @@ def _draw_frame_overlay(
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
-        spm_labels = displayed_labels if export_options.selection_rect is not None else labels
+        has_selection = (
+            export_options.selection_rect is not None
+            or bool(export_options.selection_keyframes)
+        )
+        spm_labels = displayed_labels if has_selection else labels
         estimate = spm_estimator.update(timestamp_ms, spm_labels)
         _draw_spm_label(image, width, height, estimate, export_options)
 

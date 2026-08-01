@@ -22,6 +22,10 @@ type AngleConfig = {
 type ExportLabelPosition = "top" | "bottom";
 
 type ExportRect = { x: number; y: number; width: number; height: number };
+type ExportSelectionKeyframe = ExportRect & { time_ms: number };
+type SelectionInteraction =
+  | { mode: "draw"; start: { x: number; y: number } }
+  | { mode: "move"; start: { x: number; y: number }; rectangle: ExportRect };
 
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
@@ -42,7 +46,8 @@ export function Player({ manifest }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
-  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
+  const lastEditedKeyframeRef = useRef<number | null>(null);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -58,8 +63,10 @@ export function Player({ manifest }: Props) {
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
   const [rectangleToolActive, setRectangleToolActive] = useState(false);
-  const [exportSelection, setExportSelection] = useState<ExportRect | null>(null);
+  const [selectionKeyframes, setSelectionKeyframes] = useState<ExportSelectionKeyframe[]>([]);
   const [draftSelection, setDraftSelection] = useState<ExportRect | null>(null);
+  const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
+  const [videoDurationMs, setVideoDurationMs] = useState(manifest.video.duration_ms);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
   const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
     defaultMetricCenterOffsetPercent(manifest)
@@ -80,6 +87,10 @@ export function Player({ manifest }: Props) {
   const colorByPrompt = useMemo(
     () => new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.color])),
     [manifest]
+  );
+  const exportSelection = useMemo(
+    () => selectionAtTime(selectionKeyframes, playbackTimeMs),
+    [playbackTimeMs, selectionKeyframes]
   );
   const ensureChunk = useCallback(
     async (timeMs: number) => {
@@ -153,8 +164,11 @@ export function Player({ manifest }: Props) {
     setAngleReferencePromptId(defaultReferencePromptId);
     setAngleTargetPromptIds(defaultTargetPromptIds);
     setRectangleToolActive(false);
-    setExportSelection(null);
+    setSelectionKeyframes([]);
     setDraftSelection(null);
+    setPlaybackTimeMs(0);
+    setVideoDurationMs(manifest.video.duration_ms);
+    lastEditedKeyframeRef.current = null;
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
 
   useEffect(() => {
@@ -173,6 +187,26 @@ export function Player({ manifest }: Props) {
     video.addEventListener("timeupdate", fallback);
     return () => video.removeEventListener("timeupdate", fallback);
   }, [draw]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const syncPlayback = () => setPlaybackTimeMs(Math.round(video.currentTime * 1000));
+    const syncDuration = () => {
+      if (Number.isFinite(video.duration)) setVideoDurationMs(Math.round(video.duration * 1000));
+    };
+    video.addEventListener("timeupdate", syncPlayback);
+    video.addEventListener("seeked", syncPlayback);
+    video.addEventListener("loadedmetadata", syncDuration);
+    video.addEventListener("durationchange", syncDuration);
+    syncDuration();
+    return () => {
+      video.removeEventListener("timeupdate", syncPlayback);
+      video.removeEventListener("seeked", syncPlayback);
+      video.removeEventListener("loadedmetadata", syncDuration);
+      video.removeEventListener("durationchange", syncDuration);
+    };
+  }, [manifest.job_id]);
 
   function togglePrompt(id: string) {
     setEnabledPrompts((current) => {
@@ -193,30 +227,75 @@ export function Player({ manifest }: Props) {
   }
 
   function beginRectangle(event: React.PointerEvent<HTMLDivElement>) {
-    if (!rectangleToolActive) return;
     const point = normalizedPointer(event);
-    selectionStartRef.current = point;
+    if (rectangleToolActive) {
+      selectionInteractionRef.current = { mode: "draw", start: point };
+      setDraftSelection({ x: point.x, y: point.y, width: 0, height: 0 });
+    } else if (exportSelection && pointInRectangle(point, exportSelection)) {
+      selectionInteractionRef.current = {
+        mode: "move",
+        start: point,
+        rectangle: exportSelection
+      };
+      setDraftSelection(exportSelection);
+    } else {
+      return;
+    }
+    videoRef.current?.pause();
     event.currentTarget.setPointerCapture(event.pointerId);
-    setDraftSelection({ x: point.x, y: point.y, width: 0, height: 0 });
   }
 
   function updateRectangle(event: React.PointerEvent<HTMLDivElement>) {
-    if (!rectangleToolActive || !selectionStartRef.current) return;
-    setDraftSelection(rectangleFromPoints(selectionStartRef.current, normalizedPointer(event)));
+    const interaction = selectionInteractionRef.current;
+    if (!interaction) return;
+    const point = normalizedPointer(event);
+    setDraftSelection(
+      interaction.mode === "draw"
+        ? rectangleFromPoints(interaction.start, point)
+        : moveRectangle(interaction.rectangle, interaction.start, point)
+    );
   }
 
   function finishRectangle(event: React.PointerEvent<HTMLDivElement>) {
-    if (!selectionStartRef.current) return;
-    const rectangle = rectangleFromPoints(
-      selectionStartRef.current,
-      normalizedPointer(event)
-    );
-    selectionStartRef.current = null;
+    const interaction = selectionInteractionRef.current;
+    if (!interaction) return;
+    const point = normalizedPointer(event);
+    const rectangle =
+      interaction.mode === "draw"
+        ? rectangleFromPoints(interaction.start, point)
+        : moveRectangle(interaction.rectangle, interaction.start, point);
+    selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      setExportSelection(rectangle);
+      const timeMs = Math.round(videoRef.current?.currentTime
+        ? videoRef.current.currentTime * 1000
+        : playbackTimeMs);
+      setSelectionKeyframes((current) => upsertSelectionKeyframe(current, timeMs, rectangle));
+      lastEditedKeyframeRef.current = timeMs;
       setRectangleToolActive(false);
     }
+  }
+
+  function undoSelectionKeyframe() {
+    setSelectionKeyframes((current) => {
+      if (!current.length) return current;
+      const editedTime = lastEditedKeyframeRef.current;
+      const index = editedTime == null
+        ? current.length - 1
+        : current.findIndex((keyframe) => keyframe.time_ms === editedTime);
+      const removeIndex = index >= 0 ? index : current.length - 1;
+      const next = current.filter((_, keyframeIndex) => keyframeIndex !== removeIndex);
+      lastEditedKeyframeRef.current = next.at(-1)?.time_ms ?? null;
+      return next;
+    });
+    setDraftSelection(null);
+    setRectangleToolActive(false);
+  }
+
+  function seekTo(timeMs: number) {
+    const video = videoRef.current;
+    if (video) video.currentTime = timeMs / 1000;
+    setPlaybackTimeMs(timeMs);
   }
 
   const exportCenterlineVideo = useCallback(async () => {
@@ -230,7 +309,7 @@ export function Player({ manifest }: Props) {
         metric_center_offset_percent: exportMetricCenterOffsetPercent,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds],
-        selection_rect: exportSelection ?? undefined
+        selection_keyframes: selectionKeyframes.length ? selectionKeyframes : undefined
       });
       downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
       setExportStatus("Export complete.");
@@ -245,9 +324,9 @@ export function Player({ manifest }: Props) {
     exportFontSize,
     exportLabelPosition,
     exportMetricCenterOffsetPercent,
-    exportSelection,
     exportSpmEnabled,
-    manifest.job_id
+    manifest.job_id,
+    selectionKeyframes
   ]);
 
   return (
@@ -269,13 +348,8 @@ export function Player({ manifest }: Props) {
           <button
             className="tool-button"
             title="Remove export rectangle"
-            disabled={!exportSelection && !draftSelection}
-            onClick={() => {
-              selectionStartRef.current = null;
-              setExportSelection(null);
-              setDraftSelection(null);
-              setRectangleToolActive(false);
-            }}
+            disabled={!selectionKeyframes.length && !draftSelection}
+            onClick={undoSelectionKeyframe}
           >
             Undo
           </button>
@@ -284,12 +358,18 @@ export function Player({ manifest }: Props) {
           <video ref={videoRef} src={manifest.video.url} controls playsInline />
           <canvas ref={canvasRef} />
           <div
-            className={rectangleToolActive ? "selection-surface active" : "selection-surface"}
+            className={
+              rectangleToolActive
+                ? "selection-surface active"
+                : exportSelection
+                  ? "selection-surface movable"
+                  : "selection-surface"
+            }
             onPointerDown={beginRectangle}
             onPointerMove={updateRectangle}
             onPointerUp={finishRectangle}
             onPointerCancel={() => {
-              selectionStartRef.current = null;
+              selectionInteractionRef.current = null;
               setDraftSelection(null);
             }}
           >
@@ -300,6 +380,30 @@ export function Player({ manifest }: Props) {
               />
             )}
           </div>
+        </div>
+        <div className="selection-timeline">
+          <div className="selection-timeline-track">
+            <input
+              type="range"
+              min="0"
+              max={Math.max(videoDurationMs, 1)}
+              step={Math.max(1, Math.round(1000 / Math.max(manifest.video.fps, 1)))}
+              value={Math.min(playbackTimeMs, Math.max(videoDurationMs, 1))}
+              aria-label="Video timeline"
+              onChange={(event) => seekTo(Number(event.target.value))}
+            />
+            {selectionKeyframes.map((keyframe) => (
+              <button
+                className="selection-keyframe"
+                key={keyframe.time_ms}
+                style={{ left: `${(keyframe.time_ms / Math.max(videoDurationMs, 1)) * 100}%` }}
+                title={`Rectangle keyframe at ${formatTime(keyframe.time_ms)}`}
+                aria-label={`Rectangle keyframe at ${formatTime(keyframe.time_ms)}`}
+                onClick={() => seekTo(keyframe.time_ms)}
+              />
+            ))}
+          </div>
+          <output>{formatTime(playbackTimeMs)} / {formatTime(videoDurationMs)}</output>
         </div>
         {status && <div className="video-status">{status}</div>}
       </div>
@@ -480,6 +584,67 @@ function rectangleFromPoints(
     width: Math.abs(second.x - first.x),
     height: Math.abs(second.y - first.y)
   };
+}
+
+function moveRectangle(
+  rectangle: ExportRect,
+  start: { x: number; y: number },
+  current: { x: number; y: number }
+): ExportRect {
+  return {
+    ...rectangle,
+    x: clamp(rectangle.x + current.x - start.x, 0, 1 - rectangle.width),
+    y: clamp(rectangle.y + current.y - start.y, 0, 1 - rectangle.height)
+  };
+}
+
+function pointInRectangle(point: { x: number; y: number }, rectangle: ExportRect) {
+  return (
+    point.x >= rectangle.x &&
+    point.x <= rectangle.x + rectangle.width &&
+    point.y >= rectangle.y &&
+    point.y <= rectangle.y + rectangle.height
+  );
+}
+
+function upsertSelectionKeyframe(
+  keyframes: ExportSelectionKeyframe[],
+  timeMs: number,
+  rectangle: ExportRect
+) {
+  const frameToleranceMs = 20;
+  const next = keyframes.filter(
+    (keyframe) => Math.abs(keyframe.time_ms - timeMs) > frameToleranceMs
+  );
+  next.push({ time_ms: timeMs, ...rectangle });
+  return next.sort((first, second) => first.time_ms - second.time_ms);
+}
+
+function selectionAtTime(
+  keyframes: ExportSelectionKeyframe[],
+  timeMs: number
+): ExportRect | null {
+  if (!keyframes.length) return null;
+  if (timeMs <= keyframes[0].time_ms) return keyframes[0];
+  const last = keyframes[keyframes.length - 1];
+  if (timeMs >= last.time_ms) return last;
+  const rightIndex = keyframes.findIndex((keyframe) => keyframe.time_ms >= timeMs);
+  const left = keyframes[rightIndex - 1];
+  const right = keyframes[rightIndex];
+  const progress = (timeMs - left.time_ms) / Math.max(right.time_ms - left.time_ms, 1);
+  return {
+    x: left.x + (right.x - left.x) * progress,
+    y: left.y + (right.y - left.y) * progress,
+    width: left.width + (right.width - left.width) * progress,
+    height: left.height + (right.height - left.height) * progress
+  };
+}
+
+function formatTime(timeMs: number) {
+  const totalSeconds = Math.max(0, Math.round(timeMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function selectionStyle(rectangle: ExportRect): React.CSSProperties {
