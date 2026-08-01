@@ -522,10 +522,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         static = configured.static_dir
         requested = (static / path).resolve()
         if static.is_dir() and requested.is_relative_to(static) and requested.is_file():
-            return FileResponse(requested)
+            headers = {"Cache-Control": "no-store"} if requested.name == "index.html" else None
+            return FileResponse(requested, headers=headers)
         index = static / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(index, headers={"Cache-Control": "no-store"})
         raise ServiceError(
             "NOT_FOUND",
             "Web client is not built. Run the API under /docs or build apps/web.",
