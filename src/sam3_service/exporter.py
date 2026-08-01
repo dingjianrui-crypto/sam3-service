@@ -200,7 +200,10 @@ def export_centerline_video(
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
-    if export_options.selection_rect is not None or export_options.selection_keyframes:
+    if (
+        export_options.target_slot_count == 0
+        and (export_options.selection_rect is not None or export_options.selection_keyframes)
+    ):
         export_options = replace(
             export_options,
             target_slot_count=_maximum_target_count_in_selection(
@@ -335,6 +338,7 @@ def _normalize_export_options(
     )
     if (
         not requested.target_track_ids
+        and requested.target_slot_count == 0
         and requested.selection_rect is None
         and not requested.selection_keyframes
     ):
@@ -548,11 +552,12 @@ def _draw_frame_overlay(
     if displayed_labels:
         _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
+        has_fixed_metric_slots = export_options.target_slot_count > 0
         has_selection = (
             export_options.selection_rect is not None
             or bool(export_options.selection_keyframes)
         )
-        spm_labels = displayed_labels if has_selection else labels
+        spm_labels = displayed_labels if has_selection or has_fixed_metric_slots else labels
         estimate = spm_estimator.update(timestamp_ms, spm_labels)
         _draw_spm_label(image, width, height, estimate, export_options)
 
@@ -648,7 +653,7 @@ def _degree_labels(centerlines: list[Centerline], options: ExportOptions) -> lis
 
 
 def _degree_slots(labels: list[DegreeLabel], options: ExportOptions) -> list[DegreeLabel]:
-    if options.target_slot_count > 0 and not options.target_track_ids:
+    if options.target_slot_count > 0:
         slots = [
             replace(label, instance_id=f"slot:{index + 1}")
             for index, label in enumerate(labels[: options.target_slot_count])

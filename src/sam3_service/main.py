@@ -417,6 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         angle_label_position: str = Query(default="top", pattern="^(top|bottom)$"),
         angle_label_font_size: int = Query(default=32, ge=12, le=96),
         include_spm: bool = Query(default=False),
+        metric_count: int | None = Query(default=None, ge=1, le=4),
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
@@ -473,6 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 angle_label_position=angle_label_position,
                 angle_label_font_size=angle_label_font_size,
                 include_spm=include_spm,
+                target_slot_count=metric_count or 0,
                 metric_center_offset_percent=metric_center_offset_percent,
                 reference_prompt_id=reference_prompt_id,
                 target_prompt_ids=tuple(

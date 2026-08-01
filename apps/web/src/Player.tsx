@@ -72,6 +72,7 @@ export function Player({ manifest }: Props) {
     defaultMetricCenterOffsetPercent(manifest)
   );
   const [exportFontSize, setExportFontSize] = useState(32);
+  const [exportMetricCount, setExportMetricCount] = useState(1);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
@@ -307,6 +308,7 @@ export function Player({ manifest }: Props) {
         angle_label_position: exportLabelPosition,
         angle_label_font_size: exportFontSize,
         include_spm: exportSpmEnabled,
+        metric_count: exportMetricCount,
         metric_center_offset_percent: exportMetricCenterOffsetPercent,
         reference_prompt_id: angleReferencePromptId,
         target_prompt_ids: [...angleTargetPromptIds],
@@ -324,6 +326,7 @@ export function Player({ manifest }: Props) {
     angleTargetPromptIds,
     exportFontSize,
     exportLabelPosition,
+    exportMetricCount,
     exportMetricCenterOffsetPercent,
     exportSpmEnabled,
     manifest.job_id,
@@ -526,6 +529,20 @@ export function Player({ manifest }: Props) {
               onChange={(event) => {
                 const value = Number(event.target.value);
                 setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
+              }}
+            />
+          </label>
+          <label>
+            Metric count
+            <input
+              type="number"
+              min="1"
+              max="4"
+              step="1"
+              value={exportMetricCount}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setExportMetricCount(Number.isFinite(value) ? clamp(Math.round(value), 1, 4) : 1);
               }}
             />
           </label>

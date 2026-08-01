@@ -706,6 +706,7 @@ Query parameters:
 | `angle_label_position` | `top` or `bottom` | `top` | Vertical placement for the stacked degree label block |
 | `angle_label_font_size` | integer, `12` to `96` | `32` | Font size in video pixels for the burned-in degree labels |
 | `include_spm` | boolean | `false` | Draw instantaneous and average SPM |
+| `metric_count` | integer, `1` to `4` | none | Fix the number of paddle metric positions; extra detections are ignored and unavailable positions show `Missing` |
 | `metric_center_offset_percent` | number, `0` to `45` | `5.5` landscape, `16` portrait | Distance from the nearest video edge toward the centerline for both metric rows |
 | `reference_prompt_id` | string | inferred boat prompt | Prompt used as the reference centerline, usually `boat` |
 | `target_prompt_ids` | comma-separated string | inferred paddle prompts | Prompts whose instances receive degree labels |
@@ -719,7 +720,9 @@ Query parameters:
 
 For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
-When a rectangle is present, the degree row reserves the maximum number of paddle positions observed inside it over the complete video. Paddles are ordered left to right in each frame. An unavailable position displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them.
+When `metric_count` is supplied, the degree row always reserves exactly that many positions, independently of the number of paddle detection records. Paddles are ordered left to right in each frame, extra detections are ignored, and an unavailable position displays `Missing` in muted gray instead of disappearing or carrying forward a stale value. Missing slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them. The web UI always sends this value and defaults it to `1`.
+
+For backward compatibility, rectangle exports that omit `metric_count` reserve the maximum number of paddle positions observed inside the rectangle over the complete video.
 
 The video toolbar provides Rectangle and Undo tools. Rectangle pauses playback and lets the user drag an export area directly over the video viewport. A dedicated timeline below the viewport shows rectangle keyframes. Seeking to a new time and moving or redrawing the rectangle adds a keyframe; the client and export renderer linearly interpolate its position and size between keyframes, then hold the first and last rectangles outside the keyed interval. Undo removes the most recently edited keyframe and returns export filtering to the full frame after the last keyframe is removed.
 

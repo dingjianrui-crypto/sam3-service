@@ -287,6 +287,43 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([slot.instance_id for slot in slots], ["slot:1", "slot:2", "slot:3"])
         self.assertEqual([slot.degree for slot in slots], [42, None, None])
 
+    def test_configured_metric_count_truncates_extra_detections(self) -> None:
+        labels = [
+            DegreeLabel(
+                instance_id=f"paddle:{index}",
+                degree=40 + index,
+                line=(index, 0, index, 10),
+                color=(53, 194, 255, 255),
+            )
+            for index in range(3)
+        ]
+
+        slots = _degree_slots(labels, ExportOptions(target_slot_count=1))
+
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(slots[0].degree, 40)
+        self.assertEqual(slots[0].instance_id, "slot:1")
+
+    def test_configured_metric_count_overrides_track_slot_count(self) -> None:
+        labels = [
+            DegreeLabel(
+                instance_id="paddle:track:2",
+                degree=42,
+                line=(0, 0, 1, 1),
+                color=(53, 194, 255, 255),
+            )
+        ]
+
+        slots = _degree_slots(
+            labels,
+            ExportOptions(
+                target_slot_count=1,
+                target_track_ids=("paddle:track:1", "paddle:track:2"),
+            ),
+        )
+
+        self.assertEqual([slot.degree for slot in slots], [42])
+
     def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
         line = _record_line(
             {
