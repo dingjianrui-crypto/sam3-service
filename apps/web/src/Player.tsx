@@ -44,7 +44,6 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const timelineRef = useRef<HTMLInputElement>(null);
   const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
@@ -52,6 +51,7 @@ export function Player({ manifest }: Props) {
   const lastEditedKeyframeRef = useRef<number | null>(null);
   const selectionKeyframesRef = useRef<ExportSelectionKeyframe[]>([]);
   const playbackTimeRef = useRef(0);
+  const pendingSeekTimeRef = useRef<number | null>(null);
   const defaultReferencePromptId = useMemo(
     () => defaultAngleReferencePromptId(manifest),
     [manifest]
@@ -178,6 +178,7 @@ export function Player({ manifest }: Props) {
     setDraftSelection(null);
     setPlaybackTimeMs(0);
     playbackTimeRef.current = 0;
+    pendingSeekTimeRef.current = null;
     setVideoDurationMs(manifest.video.duration_ms);
     lastEditedKeyframeRef.current = null;
   }, [defaultReferencePromptId, defaultTargetPromptIds, manifest.job_id]);
@@ -190,9 +191,9 @@ export function Player({ manifest }: Props) {
       const callback = (_now: number, metadata: { mediaTime: number }) => {
         draw(metadata.mediaTime);
         const timeMs = Math.round(metadata.mediaTime * 1000);
-        playbackTimeRef.current = timeMs;
-        setPlaybackTimeMs(timeMs);
-        const rectangle = selectionAtTime(selectionKeyframesRef.current, timeMs);
+        const accepted = acceptVideoTime(timeMs);
+        const displayTimeMs = accepted ? timeMs : playbackTimeRef.current;
+        const rectangle = selectionAtTime(selectionKeyframesRef.current, displayTimeMs);
         if (selectionRectangleRef.current && rectangle && !selectionInteractionRef.current) {
           applySelectionStyle(selectionRectangleRef.current, rectangle);
         }
@@ -211,8 +212,7 @@ export function Player({ manifest }: Props) {
     if (!video) return;
     const syncPlayback = () => {
       const timeMs = Math.round(video.currentTime * 1000);
-      playbackTimeRef.current = timeMs;
-      setPlaybackTimeMs(timeMs);
+      acceptVideoTime(timeMs);
     };
     const syncDuration = () => {
       if (Number.isFinite(video.duration)) setVideoDurationMs(Math.round(video.duration * 1000));
@@ -289,14 +289,17 @@ export function Player({ manifest }: Props) {
     selectionInteractionRef.current = null;
     setDraftSelection(null);
     if (rectangle.width >= 0.01 && rectangle.height >= 0.01) {
-      const sliderTimeMs = Number(timelineRef.current?.value);
-      const timeMs = Number.isFinite(sliderTimeMs)
-        ? sliderTimeMs
-        : playbackTimeRef.current;
-      playbackTimeRef.current = timeMs;
-      setPlaybackTimeMs(timeMs);
-      setSelectionKeyframes((current) => upsertSelectionKeyframe(current, timeMs, rectangle));
-      lastEditedKeyframeRef.current = timeMs;
+      const timeMs = playbackTimeRef.current;
+      setSelectionKeyframes((current) => {
+        const previousRectangle = lastRecordedRectangle(current, timeMs);
+        if (previousRectangle && rectanglesEqual(previousRectangle, rectangle)) {
+          return current;
+        }
+        const next = upsertSelectionKeyframe(current, timeMs, rectangle);
+        selectionKeyframesRef.current = next;
+        lastEditedKeyframeRef.current = timeMs;
+        return next;
+      });
       setRectangleToolActive(false);
     }
   }
@@ -318,10 +321,40 @@ export function Player({ manifest }: Props) {
   }
 
   function seekTo(timeMs: number) {
-    playbackTimeRef.current = timeMs;
+    const clampedTimeMs = clamp(timeMs, 0, Math.max(videoDurationMs, 0));
+    pendingSeekTimeRef.current = clampedTimeMs;
+    playbackTimeRef.current = clampedTimeMs;
     const video = videoRef.current;
-    if (video) video.currentTime = timeMs / 1000;
+    if (video) video.currentTime = clampedTimeMs / 1000;
+    setPlaybackTimeMs(clampedTimeMs);
+  }
+
+  function acceptVideoTime(timeMs: number) {
+    const pendingTimeMs = pendingSeekTimeRef.current;
+    const toleranceMs = Math.max(100, 2000 / Math.max(manifest.video.fps, 1));
+    if (pendingTimeMs != null && Math.abs(timeMs - pendingTimeMs) > toleranceMs) {
+      return false;
+    }
+    pendingSeekTimeRef.current = null;
+    playbackTimeRef.current = timeMs;
     setPlaybackTimeMs(timeMs);
+    return true;
+  }
+
+  function seekTimelinePointer(event: React.PointerEvent<HTMLInputElement>) {
+    if (event.type === "pointermove" && event.buttons !== 1) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = clamp(
+      (event.clientX - bounds.left) / Math.max(bounds.width, 1),
+      0,
+      1
+    );
+    const frameStepMs = Math.max(1, Math.round(1000 / Math.max(manifest.video.fps, 1)));
+    const timeMs = Math.round((ratio * videoDurationMs) / frameStepMs) * frameStepMs;
+    if (event.type === "pointerdown") {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    seekTo(timeMs);
   }
 
   const exportCenterlineVideo = useCallback(async () => {
@@ -413,7 +446,6 @@ export function Player({ manifest }: Props) {
         <div className="selection-timeline">
           <div className="selection-timeline-track">
             <input
-              ref={timelineRef}
               type="range"
               min="0"
               max={Math.max(videoDurationMs, 1)}
@@ -422,7 +454,9 @@ export function Player({ manifest }: Props) {
               aria-label="Video timeline"
               onInput={(event) => seekTo(Number(event.currentTarget.value))}
               onChange={(event) => seekTo(Number(event.target.value))}
-              onPointerUp={(event) => seekTo(Number(event.currentTarget.value))}
+              onPointerDown={seekTimelinePointer}
+              onPointerMove={seekTimelinePointer}
+              onPointerUp={seekTimelinePointer}
               onKeyUp={(event) => seekTo(Number(event.currentTarget.value))}
             />
             {selectionKeyframes.map((keyframe, index) => (
@@ -673,6 +707,29 @@ function upsertSelectionKeyframe(
   );
   next.push({ time_ms: timeMs, ...rectangle });
   return next.sort((first, second) => first.time_ms - second.time_ms);
+}
+
+function lastRecordedRectangle(
+  keyframes: ExportSelectionKeyframe[],
+  timeMs: number
+): ExportRect | null {
+  if (!keyframes.length) return null;
+  let previous = keyframes[0];
+  for (const keyframe of keyframes) {
+    if (keyframe.time_ms > timeMs) break;
+    previous = keyframe;
+  }
+  return previous;
+}
+
+function rectanglesEqual(first: ExportRect, second: ExportRect) {
+  const epsilon = 0.0005;
+  return (
+    Math.abs(first.x - second.x) <= epsilon &&
+    Math.abs(first.y - second.y) <= epsilon &&
+    Math.abs(first.width - second.width) <= epsilon &&
+    Math.abs(first.height - second.height) <= epsilon
+  );
 }
 
 function selectionAtTime(
