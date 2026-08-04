@@ -708,7 +708,7 @@ export function Player({ manifest }: Props) {
               Exit
             </label>
             <label className="event-hold-control">
-              Event hold
+              Event freeze
               <input
                 type="number"
                 min="0.1"

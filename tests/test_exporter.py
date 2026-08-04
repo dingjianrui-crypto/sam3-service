@@ -10,11 +10,16 @@ from sam3_service.exporter import (
     PaddleEvent,
     SpmEstimator,
     _PaddleEventState,
-    _active_paddle_events,
     _draw_frame_overlay,
     _degree_label_entries,
     _degree_labels,
     _degree_slots,
+    _event_label_text,
+    _freeze_audio_filter,
+    _freeze_moments,
+    _freeze_segments,
+    _freeze_video_filter,
+    _line_intersection,
     _metric_label_top,
     _maximum_target_count_in_selection,
     _paddle_water_depth_ratio,
@@ -58,7 +63,35 @@ class ExporterTest(unittest.TestCase):
         assert exit_event is not None
         self.assertEqual((exit_event.kind, exit_event.timestamp_ms), ("exit", 400))
 
-    def test_event_hold_controls_active_overlay_window(self) -> None:
+    def test_simultaneous_events_share_one_freeze_moment(self) -> None:
+        first = PaddleEvent(
+            kind="catch",
+            timestamp_ms=1000,
+            instance_id="paddle:1",
+            line=(0, 0, 10, 10),
+            confidence=0.9,
+        )
+        second = PaddleEvent(
+            kind="catch",
+            timestamp_ms=1150,
+            instance_id="paddle:2",
+            line=(20, 0, 30, 10),
+            confidence=0.8,
+        )
+        later = PaddleEvent(
+            kind="exit",
+            timestamp_ms=1800,
+            instance_id="paddle:1",
+            line=(0, 0, 10, 10),
+            confidence=0.9,
+        )
+
+        moments = _freeze_moments([later, second, first], 30, 90)
+
+        self.assertEqual([moment.frame_index for moment in moments], [30, 54])
+        self.assertEqual(moments[0].events, (first, second))
+
+    def test_freeze_filters_replace_event_frame_with_held_segment(self) -> None:
         event = PaddleEvent(
             kind="catch",
             timestamp_ms=1000,
@@ -66,11 +99,47 @@ class ExporterTest(unittest.TestCase):
             line=(0, 0, 10, 10),
             confidence=0.9,
         )
-        options = ExportOptions(event_hold_seconds=1.5)
+        moments = _freeze_moments([event], 30, 90)
 
-        self.assertEqual(_active_paddle_events([event], 1000, options), (event,))
-        self.assertEqual(_active_paddle_events([event], 2499, options), (event,))
-        self.assertEqual(_active_paddle_events([event], 2500, options), ())
+        video_filter = _freeze_video_filter(moments, 44, 30, 90)
+        audio_filter = _freeze_audio_filter(moments, 44, 30, 90)
+
+        self.assertEqual(
+            _freeze_segments(moments, 90),
+            (
+                ("normal", 0, 30),
+                ("freeze", 30, 31),
+                ("normal", 31, 90),
+            ),
+        )
+        self.assertIn("trim=start_frame=30:end_frame=31", video_filter)
+        self.assertIn("tpad=stop_mode=clone:stop_duration=1.466666667", video_filter)
+        self.assertIn("trim=duration=1.500000000", video_filter)
+        self.assertIn("atrim=start=1.000000000:end=1.033333333", audio_filter)
+        self.assertIn("volume=0", audio_filter)
+
+    def test_event_angle_uses_first_crossing_geometry(self) -> None:
+        state = _PaddleEventState(immersed=False)
+        paddle = (50.0, 0.0, 50.0, 80.0)
+        waterline = (0.0, 50.0, 100.0, 50.0)
+
+        self.assertIsNone(
+            _update_paddle_event_state(
+                state, "paddle:1", 100, paddle, 0.02, waterline
+            )
+        )
+        event = _update_paddle_event_state(
+            state, "paddle:1", 200, (52.0, 0.0, 52.0, 80.0), 0.03, waterline
+        )
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.timestamp_ms, 100)
+        self.assertEqual(event.line, paddle)
+        self.assertEqual(event.reference_line, waterline)
+        self.assertEqual(event.degree, 90)
+        self.assertEqual(_event_label_text(event), "CATCH 90°")
+        self.assertEqual(_line_intersection(paddle, waterline), (50.0, 50.0))
 
     def test_export_can_hide_angles_without_removing_angle_measurements(self) -> None:
         records = [

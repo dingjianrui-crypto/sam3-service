@@ -92,6 +92,14 @@ class PaddleEvent:
     instance_id: str
     line: Line
     confidence: float
+    reference_line: Line | None = None
+    degree: float | None = None
+
+
+@dataclass(frozen=True)
+class FreezeMoment:
+    frame_index: int
+    events: tuple[PaddleEvent, ...]
 
 
 @dataclass
@@ -101,6 +109,8 @@ class _PaddleEventState:
     candidate_count: int = 0
     candidate_timestamp_ms: int = 0
     candidate_line: Line | None = None
+    candidate_reference_line: Line | None = None
+    candidate_degree: float | None = None
     candidate_confidence: float = 0.0
 
 
@@ -259,12 +269,19 @@ def export_centerline_video(
             scale_y,
             progress,
         )
+    freeze_moments = _freeze_moments(events, fps, frame_count)
+    freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
+    freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
+    freeze_extra_frames = freeze_frame_count - 1
+    output_frame_count = frame_count + freeze_extra_frames * len(freeze_moments)
     _report_progress(progress, "rendering", 15, "Rendering overlay frames")
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
+    output_frame_index = 0
     for frame_index in range(frame_count):
         image = _transparent_image(width, height)
         timestamp_ms = round(frame_index * 1000 / fps)
+        freeze_moment = freeze_by_frame.get(frame_index)
         records = _records_for_timestamp(
             frames, frame_timestamps, timestamp_ms, result_tolerance_ms
         )
@@ -285,9 +302,18 @@ def export_centerline_video(
             export_options=export_options,
             timestamp_ms=timestamp_ms,
             spm_estimator=spm_estimator,
-            paddle_events=_active_paddle_events(events, timestamp_ms, export_options),
+            paddle_events=freeze_moment.events if freeze_moment is not None else (),
         )
-        _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
+        output_frame_path = frames_dir / f"{output_frame_index:06d}.png"
+        _write_png_rgba(output_frame_path, width, height, image)
+        output_frame_index += 1
+        if freeze_moment is not None:
+            for _ in range(freeze_extra_frames):
+                shutil.copyfile(
+                    output_frame_path,
+                    frames_dir / f"{output_frame_index:06d}.png",
+                )
+                output_frame_index += 1
         if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
             percent = 15 + 75 * (frame_index + 1) / frame_count
             _report_progress(
@@ -297,7 +323,16 @@ def export_centerline_video(
                 f"Rendering frame {frame_index + 1} of {frame_count}",
             )
 
-    filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
+    has_audio = bool(freeze_moments) and _has_audio_stream(video_path)
+    filter_parts = [
+        _freeze_video_filter(freeze_moments, freeze_extra_frames, fps, frame_count)
+    ]
+    if has_audio:
+        filter_parts.append(
+            _freeze_audio_filter(freeze_moments, freeze_extra_frames, fps, frame_count)
+        )
+    filter_parts.append("[base][1:v]overlay=0:0:format=auto:shortest=1[ov]")
+    filter_complex = ";".join(filter_parts)
     filter_complex += ";[ov]null[v]"
 
     command = [
@@ -315,10 +350,8 @@ def export_centerline_video(
         filter_complex,
         "-map",
         "[v]",
-        "-map",
-        "0:a?",
         "-frames:v",
-        str(frame_count),
+        str(output_frame_count),
         "-c:v",
         "libx264",
         "-preset",
@@ -327,12 +360,12 @@ def export_centerline_video(
         "16",
         "-pix_fmt",
         "yuv420p",
-        "-c:a",
-        "copy",
-        "-movflags",
-        "+faststart",
-        str(temporary_output),
     ]
+    if has_audio:
+        command.extend(["-map", "[a]", "-c:a", "aac"])
+    else:
+        command.extend(["-map", "0:a?", "-c:a", "copy"])
+    command.extend(["-movflags", "+faststart", str(temporary_output)])
     _report_progress(progress, "encoding", 92, "Encoding MP4")
     try:
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=3600)
@@ -361,6 +394,144 @@ def _report_progress(
 ) -> None:
     if progress is not None:
         progress(stage, max(0.0, min(100.0, percent)), message)
+
+
+def _freeze_moments(
+    events: list[PaddleEvent], fps: float, frame_count: int
+) -> tuple[FreezeMoment, ...]:
+    if not events or frame_count <= 0:
+        return ()
+    groups: list[list[PaddleEvent]] = []
+    for event in sorted(events, key=lambda item: item.timestamp_ms):
+        if (
+            groups
+            and event.timestamp_ms - groups[-1][0].timestamp_ms
+            <= PADDLE_EVENT_DEDUPE_MS
+        ):
+            groups[-1].append(event)
+        else:
+            groups.append([event])
+    events_by_frame: dict[int, list[PaddleEvent]] = {}
+    for group in groups:
+        frame_index = max(
+            0,
+            min(frame_count - 1, round(group[0].timestamp_ms * fps / 1000)),
+        )
+        events_by_frame.setdefault(frame_index, []).extend(group)
+    return tuple(
+        FreezeMoment(frame_index=frame_index, events=tuple(group))
+        for frame_index, group in sorted(events_by_frame.items())
+    )
+
+
+def _freeze_video_filter(
+    moments: tuple[FreezeMoment, ...],
+    extra_frames: int,
+    fps: float,
+    frame_count: int,
+) -> str:
+    if not moments or extra_frames <= 0:
+        return "[0:v]null[base]"
+    segments = _freeze_segments(moments, frame_count)
+    branches = "".join(f"[vpart{index}]" for index in range(len(segments)))
+    graph = [f"[0:v]fps=fps={fps:.6f}:start_time=0[vpart0]"]
+    if len(segments) > 1:
+        graph[0] = (
+            f"[0:v]fps=fps={fps:.6f}:start_time=0,"
+            f"split={len(segments)}{branches}"
+        )
+    hold_frames = extra_frames + 1
+    hold_seconds = hold_frames / fps
+    extra_seconds = extra_frames / fps
+    for index, (kind, start_frame, end_frame) in enumerate(segments):
+        if kind == "freeze":
+            graph.append(
+                f"[vpart{index}]trim=start_frame={start_frame}:end_frame={end_frame},"
+                f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={extra_seconds:.9f},"
+                f"trim=duration={hold_seconds:.9f}[vseg{index}]"
+            )
+        else:
+            graph.append(
+                f"[vpart{index}]trim=start_frame={start_frame}:end_frame={end_frame},"
+                f"setpts=PTS-STARTPTS[vseg{index}]"
+            )
+    if len(segments) == 1:
+        graph.append("[vseg0]null[base]")
+    else:
+        inputs = "".join(f"[vseg{index}]" for index in range(len(segments)))
+        graph.append(f"{inputs}concat=n={len(segments)}:v=1:a=0[base]")
+    return ";".join(graph)
+
+
+def _freeze_audio_filter(
+    moments: tuple[FreezeMoment, ...],
+    extra_frames: int,
+    fps: float,
+    frame_count: int,
+) -> str:
+    segments = _freeze_segments(moments, frame_count)
+    branches = "".join(f"[apart{index}]" for index in range(len(segments)))
+    graph = ["[0:a]anull[apart0]"]
+    if len(segments) > 1:
+        graph[0] = f"[0:a]asplit={len(segments)}{branches}"
+    hold_seconds = (extra_frames + 1) / fps
+    for index, (kind, start_frame, end_frame) in enumerate(segments):
+        start_seconds = start_frame / fps
+        end_seconds = end_frame / fps
+        if kind == "freeze":
+            graph.append(
+                f"[apart{index}]atrim=start={start_seconds:.9f}:end={end_seconds:.9f},"
+                f"volume=0,asetpts=PTS-STARTPTS,apad=pad_dur={hold_seconds:.9f},"
+                f"atrim=duration={hold_seconds:.9f}[aseg{index}]"
+            )
+        else:
+            graph.append(
+                f"[apart{index}]atrim=start={start_seconds:.9f}:end={end_seconds:.9f},"
+                f"asetpts=PTS-STARTPTS[aseg{index}]"
+            )
+    if len(segments) == 1:
+        graph.append("[aseg0]anull[a]")
+    else:
+        inputs = "".join(f"[aseg{index}]" for index in range(len(segments)))
+        graph.append(f"{inputs}concat=n={len(segments)}:v=0:a=1[a]")
+    return ";".join(graph)
+
+
+def _freeze_segments(
+    moments: tuple[FreezeMoment, ...], frame_count: int
+) -> tuple[tuple[str, int, int], ...]:
+    segments: list[tuple[str, int, int]] = []
+    cursor = 0
+    for frame_index in sorted({moment.frame_index for moment in moments}):
+        if cursor < frame_index:
+            segments.append(("normal", cursor, frame_index))
+        segments.append(("freeze", frame_index, frame_index + 1))
+        cursor = frame_index + 1
+    if cursor < frame_count:
+        segments.append(("normal", cursor, frame_count))
+    return tuple(segments)
+
+
+def _has_audio_stream(video_path: Path) -> bool:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            command, check=True, capture_output=True, text=True, timeout=30
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return bool(result.stdout.strip())
 
 
 def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[str, Any]]]:
@@ -843,6 +1014,7 @@ def _detect_paddle_events(
                     timestamp_ms,
                     target.line,
                     depth_ratio,
+                    reference.line,
                 )
                 if event is not None:
                     detected.append(event)
@@ -886,6 +1058,7 @@ def _update_paddle_event_state(
     timestamp_ms: int,
     line: Line,
     depth_ratio: float,
+    reference_line: Line | None = None,
 ) -> PaddleEvent | None:
     if state.immersed is None:
         state.immersed = depth_ratio >= PADDLE_CATCH_DEPTH_RATIO
@@ -902,6 +1075,8 @@ def _update_paddle_event_state(
         state.candidate_kind = None
         state.candidate_count = 0
         state.candidate_line = None
+        state.candidate_reference_line = None
+        state.candidate_degree = None
         return None
     confidence = min(1.0, 0.55 + abs(depth_ratio - threshold) / 0.04)
     if state.candidate_kind != candidate_kind:
@@ -909,6 +1084,10 @@ def _update_paddle_event_state(
         state.candidate_count = 1
         state.candidate_timestamp_ms = timestamp_ms
         state.candidate_line = line
+        state.candidate_reference_line = reference_line
+        state.candidate_degree = (
+            _line_angle_degrees(line, reference_line) if reference_line is not None else None
+        )
         state.candidate_confidence = confidence
         return None
     state.candidate_count += 1
@@ -921,11 +1100,15 @@ def _update_paddle_event_state(
         instance_id=instance_id,
         line=state.candidate_line,
         confidence=round(state.candidate_confidence, 3),
+        reference_line=state.candidate_reference_line,
+        degree=state.candidate_degree,
     )
     state.immersed = candidate_kind == "catch"
     state.candidate_kind = None
     state.candidate_count = 0
     state.candidate_line = None
+    state.candidate_reference_line = None
+    state.candidate_degree = None
     return event
 
 
@@ -955,17 +1138,6 @@ def _dedupe_paddle_events(
         elif event.confidence > kept[duplicate_index].confidence:
             kept[duplicate_index] = event
     return kept
-
-
-def _active_paddle_events(
-    events: list[PaddleEvent], timestamp_ms: int, options: ExportOptions
-) -> tuple[PaddleEvent, ...]:
-    hold_ms = round(options.event_hold_seconds * 1000)
-    return tuple(
-        event
-        for event in events
-        if event.timestamp_ms <= timestamp_ms < event.timestamp_ms + hold_ms
-    )
 
 
 def _nearest_centerline(target: Centerline, references: list[Centerline]) -> Centerline:
@@ -1039,6 +1211,14 @@ def _draw_paddle_event_label(
     event: PaddleEvent,
     options: ExportOptions,
 ) -> None:
+    if event.reference_line is not None and event.degree is not None:
+        vertex = _line_intersection(event.line, event.reference_line)
+        if vertex is not None and (
+            -width * 0.1 <= vertex[0] <= width * 1.1
+            and -height * 0.1 <= vertex[1] <= height * 1.1
+        ):
+            _draw_event_angle_marker(image, width, height, event, vertex, options)
+            return
     center_x, center_y = _line_center(event.line)
     dx = event.line[2] - event.line[0]
     dy = event.line[3] - event.line[1]
@@ -1055,12 +1235,105 @@ def _draw_paddle_event_label(
         color,
         max(2, round(min(width, height) * 0.004)),
     )
-    text = event.kind.upper()
+    text = _event_label_text(event)
     if _draw_paddle_event_label_with_pillow(
         image, width, height, label_x, label_y, text, color, options
     ):
         return
     _draw_small_degree_label(image, width, height, label_x, label_y, text, color)
+
+
+def _draw_event_angle_marker(
+    image: bytearray,
+    width: int,
+    height: int,
+    event: PaddleEvent,
+    vertex: tuple[float, float],
+    options: ExportOptions,
+) -> None:
+    assert event.reference_line is not None
+    reference_vector = _normalize(
+        (
+            event.reference_line[2] - event.reference_line[0],
+            event.reference_line[3] - event.reference_line[1],
+        )
+    )
+    paddle_vector = _normalize(
+        (event.line[2] - event.line[0], event.line[3] - event.line[1])
+    )
+    if reference_vector is None or paddle_vector is None:
+        return
+    if _dot(reference_vector, paddle_vector) < 0:
+        paddle_vector = (-paddle_vector[0], -paddle_vector[1])
+    start_angle = math.atan2(reference_vector[1], reference_vector[0])
+    end_angle = math.atan2(paddle_vector[1], paddle_vector[0])
+    delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
+    radius = max(24.0, min(width, height) * 0.065)
+    color = (74, 222, 128, 255) if event.kind == "catch" else (255, 82, 96, 255)
+    line_width = max(2, round(min(width, height) * 0.004))
+    for vector in (reference_vector, paddle_vector):
+        _draw_line(
+            image,
+            width,
+            height,
+            (
+                vertex[0],
+                vertex[1],
+                vertex[0] + vector[0] * radius * 1.25,
+                vertex[1] + vector[1] * radius * 1.25,
+            ),
+            color,
+            line_width,
+        )
+    previous = (
+        vertex[0] + math.cos(start_angle) * radius,
+        vertex[1] + math.sin(start_angle) * radius,
+    )
+    segment_count = max(6, round(abs(delta) * radius / 8))
+    for index in range(1, segment_count + 1):
+        angle = start_angle + delta * index / segment_count
+        point = (
+            vertex[0] + math.cos(angle) * radius,
+            vertex[1] + math.sin(angle) * radius,
+        )
+        _draw_line(
+            image,
+            width,
+            height,
+            (previous[0], previous[1], point[0], point[1]),
+            color,
+            line_width,
+        )
+        previous = point
+    middle_angle = start_angle + delta / 2
+    label_radius = radius + max(18, (options.angle_label_font_size or 32) * 0.65)
+    label_x = vertex[0] + math.cos(middle_angle) * label_radius
+    label_y = vertex[1] + math.sin(middle_angle) * label_radius
+    text = _event_label_text(event)
+    if not _draw_paddle_event_label_with_pillow(
+        image, width, height, label_x, label_y, text, color, options
+    ):
+        _draw_small_degree_label(image, width, height, label_x, label_y, text, color)
+
+
+def _event_label_text(event: PaddleEvent) -> str:
+    if event.degree is None:
+        return event.kind.upper()
+    return f"{event.kind.upper()} {round(event.degree)}°"
+
+
+def _line_intersection(first: Line, second: Line) -> tuple[float, float] | None:
+    first_dx = first[2] - first[0]
+    first_dy = first[3] - first[1]
+    second_dx = second[2] - second[0]
+    second_dy = second[3] - second[1]
+    denominator = first_dx * second_dy - first_dy * second_dx
+    if abs(denominator) < 1e-6:
+        return None
+    offset_x = second[0] - first[0]
+    offset_y = second[1] - first[1]
+    distance = (offset_x * second_dy - offset_y * second_dx) / denominator
+    return (first[0] + distance * first_dx, first[1] + distance * first_dy)
 
 
 def _draw_paddle_event_label_with_pillow(
