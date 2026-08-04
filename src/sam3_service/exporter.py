@@ -35,9 +35,11 @@ SPM_MIN_PROMINENCE_DEGREES = 10
 class ExportOptions:
     angle_label_position: LabelPosition = "top"
     angle_label_font_size: int | None = None
+    include_angles: bool = True
     include_spm: bool = False
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
+    reference_line_mode: str | None = None
     target_prompt_ids: tuple[str, ...] = ()
     reference_track_ids: tuple[str, ...] = ()
     target_track_ids: tuple[str, ...] = ()
@@ -356,12 +358,24 @@ def _normalize_export_options(
     metric_center_offset_percent = requested.metric_center_offset_percent
     if metric_center_offset_percent is None:
         metric_center_offset_percent = _default_metric_center_offset_percent(width, height)
+    manifest_line_mode = manifest.get("settings", {}).get(
+        "boat_reference_line", "centerline"
+    )
+    reference_line_mode = (
+        requested.reference_line_mode
+        if requested.reference_line_mode in {"centerline", "waterline"}
+        else manifest_line_mode
+    )
+    if reference_line_mode not in {"centerline", "waterline"}:
+        reference_line_mode = "centerline"
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
+        include_angles=bool(requested.include_angles),
         include_spm=bool(requested.include_spm),
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
+        reference_line_mode=reference_line_mode,
         target_prompt_ids=target_prompt_ids,
         reference_track_ids=reference_track_ids,
         target_track_ids=target_track_ids,
@@ -506,14 +520,16 @@ def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dic
     if abs(scale_x - 1) < 1e-6 and abs(scale_y - 1) < 1e-6:
         return record
     scaled = dict(record)
-    values = record.get("centerline_line_xyxy")
-    if values and len(values) == 4 and _centerline_rle_size(record) is None:
-        scaled["centerline_line_xyxy"] = [
-            float(values[0]) * scale_x,
-            float(values[1]) * scale_y,
-            float(values[2]) * scale_x,
-            float(values[3]) * scale_y,
-        ]
+    for geometry in ("centerline", "waterline"):
+        field = f"{geometry}_line_xyxy"
+        values = record.get(field)
+        if values and len(values) == 4 and _line_rle_size(record, geometry) is None:
+            scaled[field] = [
+                float(values[0]) * scale_x,
+                float(values[1]) * scale_y,
+                float(values[2]) * scale_x,
+                float(values[3]) * scale_y,
+            ]
     return scaled
 
 
@@ -530,7 +546,11 @@ def _draw_frame_overlay(
 ) -> None:
     centerlines: list[Centerline] = []
     for record in records:
-        line = _record_line(record, width, height)
+        use_waterline = (
+            export_options.reference_line_mode == "waterline"
+            and record.get("prompt_id") == export_options.reference_prompt_id
+        )
+        line = _record_line(record, width, height, use_waterline=use_waterline)
         if line is None:
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
@@ -539,11 +559,12 @@ def _draw_frame_overlay(
 
     labels = _degree_labels(centerlines, export_options)
     displayed_labels = _degree_slots(labels, export_options)
-    for entry in _degree_label_entries(displayed_labels):
-        if entry.label.degree is not None and entry.label.line is not None:
-            _draw_target_degree_marker(image, width, height, entry)
-    if displayed_labels:
-        _draw_degree_label_block(image, width, height, displayed_labels, export_options)
+    if export_options.include_angles:
+        for entry in _degree_label_entries(displayed_labels):
+            if entry.label.degree is not None and entry.label.line is not None:
+                _draw_target_degree_marker(image, width, height, entry)
+        if displayed_labels:
+            _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
         has_fixed_metric_slots = export_options.target_slot_count > 0
         has_selection = (
@@ -555,12 +576,22 @@ def _draw_frame_overlay(
         _draw_spm_label(image, width, height, estimate, export_options)
 
 
-def _record_line(record: dict[str, Any], width: int, height: int) -> Line | None:
-    values = record.get("centerline_line_xyxy")
+def _record_line(
+    record: dict[str, Any],
+    width: int,
+    height: int,
+    *,
+    use_waterline: bool = False,
+) -> Line | None:
+    geometry = "waterline" if use_waterline else "centerline"
+    values = record.get(f"{geometry}_line_xyxy")
+    if use_waterline and (not values or len(values) != 4):
+        geometry = "centerline"
+        values = record.get("centerline_line_xyxy")
     if not values or len(values) != 4:
         return None
     try:
-        scale_x, scale_y = _centerline_coordinate_scale(record, width, height)
+        scale_x, scale_y = _line_coordinate_scale(record, width, height, geometry)
         line = (
             float(values[0]) * scale_x,
             float(values[1]) * scale_y,
@@ -579,7 +610,16 @@ def _centerline_coordinate_scale(
     width: int,
     height: int,
 ) -> tuple[float, float]:
-    size = _centerline_rle_size(record)
+    return _line_coordinate_scale(record, width, height, "centerline")
+
+
+def _line_coordinate_scale(
+    record: dict[str, Any],
+    width: int,
+    height: int,
+    geometry: str,
+) -> tuple[float, float]:
+    size = _line_rle_size(record, geometry)
     if size is None:
         return (1.0, 1.0)
     mask_height, mask_width = size
@@ -589,7 +629,13 @@ def _centerline_coordinate_scale(
 
 
 def _centerline_rle_size(record: dict[str, Any]) -> tuple[int, int] | None:
-    segmentation = record.get("centerline_segmentation")
+    return _line_rle_size(record, "centerline")
+
+
+def _line_rle_size(
+    record: dict[str, Any], geometry: str
+) -> tuple[int, int] | None:
+    segmentation = record.get(f"{geometry}_segmentation")
     if not isinstance(segmentation, dict) or segmentation.get("type") != "rle":
         return None
     size = segmentation.get("size")

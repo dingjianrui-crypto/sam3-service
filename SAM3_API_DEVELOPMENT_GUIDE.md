@@ -151,7 +151,8 @@ Request:
     "score_threshold": 0.3,
     "redetect_interval_frames": 1,
     "max_detections_per_frame": 13,
-    "dedupe_iou_threshold": 0.6
+    "dedupe_iou_threshold": 0.6,
+    "boat_reference_line": "centerline"
   }
 }
 ```
@@ -166,6 +167,7 @@ Fields:
 | `settings.redetect_interval_frames` | integer | How often to re-run text grounding; `0` keeps frame-0-only tracking, `1` attempts every frame |
 | `settings.max_detections_per_frame` | integer | Maximum kept detections per prompt per frame after de-duplication; defaults to 13 and cannot exceed `SAM3_MAX_DETECTIONS_PER_FRAME` |
 | `settings.dedupe_iou_threshold` | number | Same-frame box IoU above which lower-scored duplicate detections are dropped |
+| `settings.boat_reference_line` | `centerline` or `waterline` | Boat geometry used as the paddle-angle reference; defaults to `centerline`. The web upload card exposes this choice. |
 | `settings.include_boxes` | boolean | Reserved client preference; current chunks include boxes |
 | `settings.working_max_dimension` | integer | Accepted range `320` to `1920`; reserved for processing-size control |
 
@@ -335,7 +337,11 @@ Use `video.url` for playback. The masks and geometry in chunks use the manifest 
         "counts": [6789, 8, 190, 8]
       },
       "centerline_box_xywh": [510, 315, 188, 12],
-      "centerline_line_xyxy": [512.0, 321.0, 696.0, 330.5]
+      "centerline_line_xyxy": [512.0, 321.0, 696.0, 330.5],
+      "waterline_segmentation": null,
+      "waterline_box_xywh": null,
+      "waterline_line_xyxy": null,
+      "waterline_confidence": null
     }
   ]
 }
@@ -356,6 +362,10 @@ Frame fields:
 | `centerline_segmentation` | object or null | Thin mask around the fitted centerline |
 | `centerline_box_xywh` | number[4] or null | Box around the centerline mask |
 | `centerline_line_xyxy` | number[4] or null | Centerline segment `[x1, y1, x2, y2]` |
+| `waterline_segmentation` | object or null | Thin mask around a fitted boat waterline; generated for boat-like prompts when `boat_reference_line` is `waterline` |
+| `waterline_box_xywh` | number[4] or null | Box around the waterline mask |
+| `waterline_line_xyxy` | number[4] or null | Boat waterline segment `[x1, y1, x2, y2]` |
+| `waterline_confidence` | number or null | Waterline fit confidence from `0` to `1` |
 
 ### Stable Track Identity
 
@@ -622,6 +632,8 @@ The service already computes `centerline_line_xyxy`, but another application may
 4. Refit the line from inlier points near the first line.
 5. Project all mask pixels onto the final line.
 6. Use the minimum and maximum projections as the centerline endpoints.
+
+When `settings.boat_reference_line` is `waterline`, boat-like prompts (`boat`, `kayak`, `canoe`, or `shell`) also receive a waterline derived from the same full mask. The service samples the image-bottom-facing mask boundary along the fitted boat axis, removes the outer 15% at both ends to avoid curved bow and stern regions, fits the remaining boundary robustly, and records the resulting line and confidence. Paddle centerlines remain unchanged. Preview and export use the waterline only for the selected boat reference and fall back to its centerline when no valid waterline is available.
 7. Optionally create a fixed-thickness line-band mask for visualization.
 
 Important constants used by the service:
@@ -705,6 +717,7 @@ Query parameters:
 |---|---|---|---|
 | `angle_label_position` | `top` or `bottom` | `top` | Vertical placement for the stacked degree label block |
 | `angle_label_font_size` | integer, `12` to `96` | `32` | Font size in video pixels for the burned-in degree labels |
+| `include_angles` | boolean | `true` | Draw degree labels and near-paddle angle markers; angle measurements remain available internally for SPM when this is `false` |
 | `include_spm` | boolean | `false` | Draw instantaneous and average SPM |
 | `metric_count` | integer, `1` to `4` | none | Fix the number of paddle metric positions; extra detections are ignored and unavailable positions remain blank |
 | `metric_center_offset_percent` | number, `0` to `45` | `5.5` landscape, `16` portrait | Distance from the nearest video edge toward the centerline for both metric rows |
@@ -729,6 +742,8 @@ The video toolbar provides Rectangle and Undo tools. Rectangle pauses playback a
 The client sends normalized coordinates, so responsive display scaling does not change the selected source area. During export, a boat or paddle is included in each frame only when the center of its centerline is inside the rectangle at that time. The rectangle is a filter and is not burned into the exported video. `selection_keyframes` takes precedence over the legacy static `selection_x`, `selection_y`, `selection_width`, and `selection_height` parameters.
 
 The export UI does not expose track IDs. `reference_track_ids`, `target_track_ids`, `reference_instance_ids`, and `target_instance_ids` remain API compatibility parameters for older clients only.
+
+The web viewer separates Playback controls from Export controls. Playback keeps global overlay opacity, boxes and IDs, optional angle preview, and one visibility/overlay-target row per prompt so different object types can independently show their full mask, centerline, or generated waterline. Export owns `include_angles`, reference and target prompts, degree placement, font size, metric count, center offset, SPM, and MP4 generation. The export reference and target selections also drive the optional live angle preview.
 
 When `include_spm=true`, the export estimates cadence from the degree time series and draws `瞬时桨频` and `平均桨频` under the Chinese title `桨频` as text only, without a background panel. SPM is always placed on the side opposite `angle_label_position`: angle labels at the top put SPM near the bottom, and angle labels at the bottom put SPM near the top. The export renderer uses the configured CJK-capable font path when available, then falls back to installed Ubuntu CJK fonts such as Noto Sans CJK.
 

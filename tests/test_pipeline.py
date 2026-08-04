@@ -121,6 +121,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(manifest["video"]["frame_count"], 10)
         self.assertEqual(len(manifest["chunks"]), 1)
         self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["settings"]["boat_reference_line"], "centerline")
         self.assertEqual(len(manifest["tracks"]), 1)
         chunk = json.loads(self.storage.chunk_path(job_id, 0).read_text())
         self.assertEqual(len(chunk["frames"]), 10)

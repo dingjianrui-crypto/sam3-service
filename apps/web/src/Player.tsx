@@ -5,7 +5,7 @@ type Props = {
   manifest: ResultManifest;
 };
 
-type OverlayMode = "mask" | "centerline";
+type OverlayMode = "mask" | "centerline" | "waterline";
 
 type CenterlineRecord = {
   record: FrameMask;
@@ -16,6 +16,7 @@ type CenterlineRecord = {
 type AngleConfig = {
   enabled: boolean;
   referencePromptId: string;
+  referenceLineMode: "centerline" | "waterline";
   targetPromptIds: Set<string>;
 };
 
@@ -46,6 +47,14 @@ function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
   return manifest.video.height > manifest.video.width ? 16 : 5.5;
 }
 
+function defaultOverlayModes(manifest: ResultManifest): Record<string, OverlayMode> {
+  return Object.fromEntries(manifest.prompts.map((prompt) => [prompt.id, "mask"]));
+}
+
+function isBoatPrompt(prompt: string) {
+  return /\b(?:boat|kayak|canoe|shell)\b/i.test(prompt);
+}
+
 export function Player({ manifest }: Props) {
   const videoRef = useRef<VideoWithFrameCallback>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -69,8 +78,10 @@ export function Player({ manifest }: Props) {
   );
   const [opacity, setOpacity] = useState(0.48);
   const [showBoxes, setShowBoxes] = useState(true);
-  const [overlayMode, setOverlayMode] = useState<OverlayMode>("mask");
-  const [angleEnabled, setAngleEnabled] = useState(false);
+  const [overlayModes, setOverlayModes] = useState<Record<string, OverlayMode>>(() =>
+    defaultOverlayModes(manifest)
+  );
+  const [previewAnglesEnabled, setPreviewAnglesEnabled] = useState(false);
   const [angleReferencePromptId, setAngleReferencePromptId] = useState(defaultReferencePromptId);
   const [angleTargetPromptIds, setAngleTargetPromptIds] = useState(defaultTargetPromptIds);
   const [rectangleToolActive, setRectangleToolActive] = useState(false);
@@ -84,6 +95,7 @@ export function Player({ manifest }: Props) {
   );
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportMetricCount, setExportMetricCount] = useState(1);
+  const [exportAnglesEnabled, setExportAnglesEnabled] = useState(true);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
@@ -150,35 +162,39 @@ export function Player({ manifest }: Props) {
       const nearby = recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts);
       drawOverlay(context, nearby, {
         angleConfig: {
-          enabled: angleEnabled,
+          enabled: previewAnglesEnabled,
           referencePromptId: angleReferencePromptId,
+          referenceLineMode: manifest.settings?.boat_reference_line ?? "centerline",
           targetPromptIds: angleTargetPromptIds
         },
         colorByPrompt,
         opacity,
-        overlayMode,
+        overlayModes,
         showBoxes
       });
     },
     [
-      angleEnabled,
+      previewAnglesEnabled,
       angleReferencePromptId,
       angleTargetPromptIds,
       colorByPrompt,
       enabledPrompts,
       ensureChunk,
       manifest.chunks,
+      manifest.settings?.boat_reference_line,
       manifest.video.fps,
       opacity,
-      overlayMode,
+      overlayModes,
       showBoxes
     ]
   );
 
   useEffect(() => {
-    setAngleEnabled(false);
+    setPreviewAnglesEnabled(false);
     setAngleReferencePromptId(defaultReferencePromptId);
     setAngleTargetPromptIds(defaultTargetPromptIds);
+    setOverlayModes(defaultOverlayModes(manifest));
+    setEnabledPrompts(new Set(manifest.prompts.map((prompt) => prompt.id)));
     setRectangleToolActive(false);
     setSelectionKeyframes([]);
     selectionKeyframesRef.current = [];
@@ -261,6 +277,10 @@ export function Player({ manifest }: Props) {
       else next.add(id);
       return next;
     });
+  }
+
+  function setPromptOverlayMode(id: string, mode: OverlayMode) {
+    setOverlayModes((current) => ({ ...current, [id]: mode }));
   }
 
   function beginRectangle(event: React.PointerEvent<HTMLDivElement>) {
@@ -416,6 +436,7 @@ export function Player({ manifest }: Props) {
       const blob = await exportJobVideo(manifest.job_id, {
         angle_label_position: exportLabelPosition,
         angle_label_font_size: exportFontSize,
+        include_angles: exportAnglesEnabled,
         include_spm: exportSpmEnabled,
         metric_count: exportMetricCount,
         metric_center_offset_percent: exportMetricCenterOffsetPercent,
@@ -434,6 +455,7 @@ export function Player({ manifest }: Props) {
     angleReferencePromptId,
     angleTargetPromptIds,
     exportFontSize,
+    exportAnglesEnabled,
     exportLabelPosition,
     exportMetricCount,
     exportMetricCenterOffsetPercent,
@@ -542,63 +564,106 @@ export function Player({ manifest }: Props) {
         {status && <div className="video-status">{status}</div>}
       </div>
       <div className="viewer-controls">
-        <div className="prompt-toggles">
-          {manifest.prompts.map((prompt) => (
-            <button
-              className={enabledPrompts.has(prompt.id) ? "chip active" : "chip"}
-              key={prompt.id}
-              onClick={() => togglePrompt(prompt.id)}
-              style={{ "--chip-color": prompt.color } as React.CSSProperties}
-            >
-              <span />
-              {prompt.text}
-            </button>
-          ))}
-        </div>
-        <label>
-          Overlay
-          <input
-            type="range"
-            min="0.1"
-            max="0.9"
-            step="0.05"
-            value={opacity}
-            onChange={(event) => setOpacity(Number(event.target.value))}
-          />
-        </label>
-        <label>
-          Overlay target
-          <select
-            value={overlayMode}
-            onChange={(event) => setOverlayMode(event.target.value as OverlayMode)}
-          >
-            <option value="mask">Detected mask</option>
-            <option value="centerline">Centerline</option>
-          </select>
-        </label>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={showBoxes}
-            onChange={(event) => setShowBoxes(event.target.checked)}
-          />
-          Boxes and IDs
-        </label>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={angleEnabled}
-            onChange={(event) => {
-              setAngleEnabled(event.target.checked);
-              if (event.target.checked) setOverlayMode("centerline");
-            }}
-          />
-          Angles
-        </label>
-        {angleEnabled && (
+        <section className="viewer-control-group playback-controls">
+          <div className="viewer-control-heading">
+            <h3>Playback</h3>
+          </div>
+          <div className="playback-settings">
+            <label>
+              Overlay opacity
+              <input
+                type="range"
+                min="0.1"
+                max="0.9"
+                step="0.05"
+                value={opacity}
+                onChange={(event) => setOpacity(Number(event.target.value))}
+              />
+              <output>{Math.round(opacity * 100)}%</output>
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={showBoxes}
+                onChange={(event) => setShowBoxes(event.target.checked)}
+              />
+              Boxes and IDs
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={previewAnglesEnabled}
+                onChange={(event) => setPreviewAnglesEnabled(event.target.checked)}
+              />
+              Preview angles
+            </label>
+          </div>
+          <div className="object-overlay-list">
+            {manifest.prompts.map((prompt) => {
+              const waterlineAvailable =
+                manifest.settings?.boat_reference_line === "waterline" &&
+                isBoatPrompt(prompt.text);
+              return (
+                <div className="object-overlay-row" key={prompt.id}>
+                  <label className="object-visibility checkbox">
+                    <input
+                      type="checkbox"
+                      checked={enabledPrompts.has(prompt.id)}
+                      onChange={() => togglePrompt(prompt.id)}
+                    />
+                    <span
+                      className="prompt-swatch"
+                      style={{ backgroundColor: prompt.color }}
+                      aria-hidden="true"
+                    />
+                    <strong>{prompt.text}</strong>
+                  </label>
+                  <label>
+                    Overlay target
+                    <select
+                      value={overlayModes[prompt.id] ?? "mask"}
+                      disabled={!enabledPrompts.has(prompt.id)}
+                      onChange={(event) =>
+                        setPromptOverlayMode(prompt.id, event.target.value as OverlayMode)
+                      }
+                    >
+                      <option value="mask">Detected mask</option>
+                      <option value="centerline">Centerline</option>
+                      {waterlineAvailable && <option value="waterline">Waterline</option>}
+                    </select>
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="viewer-control-group export-control-group">
+          <div className="viewer-control-heading">
+            <h3>Export</h3>
+            {exportStatus && <span className="export-status">{exportStatus}</span>}
+          </div>
+          <div className="export-switches">
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportAnglesEnabled}
+                onChange={(event) => setExportAnglesEnabled(event.target.checked)}
+              />
+              Include angles
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportSpmEnabled}
+                onChange={(event) => setExportSpmEnabled(event.target.checked)}
+              />
+              Include SPM
+            </label>
+          </div>
           <div className="angle-controls">
             <label>
-              Reference
+              Angle reference
               <select
                 value={angleReferencePromptId}
                 onChange={(event) => {
@@ -622,6 +687,7 @@ export function Player({ manifest }: Props) {
               </select>
             </label>
             <div className="angle-targets">
+              <span>Angle targets</span>
               {manifest.prompts
                 .filter((prompt) => prompt.id !== angleReferencePromptId)
                 .map((prompt) => (
@@ -636,79 +702,74 @@ export function Player({ manifest }: Props) {
                 ))}
             </div>
           </div>
-        )}
-        <div className="export-controls">
-          <label>
-            Degree position
-            <select
-              value={exportLabelPosition}
-              onChange={(event) => setExportLabelPosition(event.target.value as ExportLabelPosition)}
+          <div className="export-controls">
+            <label>
+              Degree position
+              <select
+                value={exportLabelPosition}
+                onChange={(event) =>
+                  setExportLabelPosition(event.target.value as ExportLabelPosition)
+                }
+              >
+                <option value="top">Top</option>
+                <option value="bottom">Bottom</option>
+              </select>
+            </label>
+            <label>
+              Font size
+              <input
+                type="number"
+                min="12"
+                max="96"
+                step="2"
+                value={exportFontSize}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
+                }}
+              />
+            </label>
+            <label>
+              Metric count
+              <input
+                type="number"
+                min="1"
+                max="4"
+                step="1"
+                value={exportMetricCount}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportMetricCount(
+                    Number.isFinite(value) ? clamp(Math.round(value), 1, 4) : 1
+                  );
+                }}
+              />
+            </label>
+            <label>
+              Center offset %
+              <input
+                type="number"
+                min="0"
+                max="45"
+                step="0.5"
+                value={exportMetricCenterOffsetPercent}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportMetricCenterOffsetPercent(
+                    Number.isFinite(value) ? clamp(value, 0, 45) : 0
+                  );
+                }}
+              />
+            </label>
+            <button
+              className="secondary export-button"
+              disabled={exporting}
+              onClick={exportCenterlineVideo}
             >
-              <option value="top">Top</option>
-              <option value="bottom">Bottom</option>
-            </select>
-          </label>
-          <label>
-            Font size
-            <input
-              type="number"
-              min="12"
-              max="96"
-              step="2"
-              value={exportFontSize}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
-              }}
-            />
-          </label>
-          <label>
-            Metric count
-            <input
-              type="number"
-              min="1"
-              max="4"
-              step="1"
-              value={exportMetricCount}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setExportMetricCount(Number.isFinite(value) ? clamp(Math.round(value), 1, 4) : 1);
-              }}
-            />
-          </label>
-          <label>
-            Center offset %
-            <input
-              type="number"
-              min="0"
-              max="45"
-              step="0.5"
-              value={exportMetricCenterOffsetPercent}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setExportMetricCenterOffsetPercent(
-                  Number.isFinite(value) ? clamp(value, 0, 45) : 0
-                );
-              }}
-            />
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={exportSpmEnabled}
-              onChange={(event) => setExportSpmEnabled(event.target.checked)}
-            />
-            SPM
-          </label>
-          <button
-            className="secondary export-button"
-            disabled={exporting}
-            onClick={exportCenterlineVideo}
-          >
-            {exporting ? "Exporting…" : "Export"}
-          </button>
-          {exportStatus && <span className="export-status">{exportStatus}</span>}
-        </div>
+              {exporting ? "Exporting…" : "Export"}
+            </button>
+          </div>
+        </section>
       </div>
     </section>
   );
@@ -886,21 +947,32 @@ function drawOverlay(
     angleConfig: AngleConfig;
     colorByPrompt: Map<string, string>;
     opacity: number;
-    overlayMode: OverlayMode;
+    overlayModes: Record<string, OverlayMode>;
     showBoxes: boolean;
   }
 ): void {
   const centerlines: CenterlineRecord[] = [];
   for (const record of records) {
     const color = options.colorByPrompt.get(record.prompt_id) ?? "#35C2FF";
-    const line = getCenterlineLine(record, context.canvas.width, context.canvas.height);
+    const useWaterlineReference =
+      record.prompt_id === options.angleConfig.referencePromptId &&
+      options.angleConfig.referenceLineMode === "waterline";
+    const overlayMode = options.overlayModes[record.prompt_id] ?? "mask";
+    const useWaterlineOverlay = overlayMode === "waterline";
+    const line = getRecordLine(
+      record,
+      context.canvas.width,
+      context.canvas.height,
+      useWaterlineReference
+    );
     if (line) {
       centerlines.push({ record, line, color });
     }
+    const lineSegmentation =
+      (useWaterlineOverlay ? record.waterline_segmentation : null) ??
+      (overlayMode !== "mask" ? record.centerline_segmentation : null);
     const segmentation =
-      options.overlayMode === "centerline" && record.centerline_segmentation
-        ? record.centerline_segmentation
-        : record.segmentation;
+      overlayMode !== "mask" && lineSegmentation ? lineSegmentation : record.segmentation;
     context.save();
     context.globalAlpha = options.opacity;
     context.fillStyle = color;
@@ -918,8 +990,15 @@ function drawOverlay(
     context.restore();
     if (options.showBoxes) {
       const [x, y, width, height] =
-        options.overlayMode === "centerline" && record.centerline_box_xywh
-          ? scaleCenterlineBox(record, context.canvas.width, context.canvas.height)
+        overlayMode !== "mask" &&
+        ((useWaterlineOverlay ? record.waterline_box_xywh : null) ??
+          record.centerline_box_xywh)
+          ? scaleLineBox(
+              record,
+              context.canvas.width,
+              context.canvas.height,
+              useWaterlineOverlay
+            )
           : record.box_xywh;
       context.strokeStyle = color;
       context.lineWidth = Math.max(2, context.canvas.width / 600);
@@ -953,35 +1032,54 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function getCenterlineLine(
+function getRecordLine(
   record: FrameMask,
   canvasWidth: number,
-  canvasHeight: number
+  canvasHeight: number,
+  useWaterline = false
 ): [number, number, number, number] | null {
-  const line = record.centerline_line_xyxy;
+  const line =
+    (useWaterline ? record.waterline_line_xyxy : null) ?? record.centerline_line_xyxy;
   if (!line || line.length !== 4 || line.some((value) => !Number.isFinite(value))) {
     return null;
   }
-  const [scaleX, scaleY] = centerlineCoordinateScale(record, canvasWidth, canvasHeight);
+  const [scaleX, scaleY] = lineCoordinateScale(
+    record,
+    canvasWidth,
+    canvasHeight,
+    useWaterline && Boolean(record.waterline_line_xyxy)
+  );
   return [line[0] * scaleX, line[1] * scaleY, line[2] * scaleX, line[3] * scaleY];
 }
 
-function scaleCenterlineBox(
+function scaleLineBox(
   record: FrameMask,
   canvasWidth: number,
-  canvasHeight: number
+  canvasHeight: number,
+  useWaterline: boolean
 ): [number, number, number, number] {
-  const box = record.centerline_box_xywh ?? record.box_xywh;
-  const [scaleX, scaleY] = centerlineCoordinateScale(record, canvasWidth, canvasHeight);
+  const hasWaterline = useWaterline && Boolean(record.waterline_box_xywh);
+  const box =
+    (hasWaterline ? record.waterline_box_xywh : record.centerline_box_xywh) ??
+    record.box_xywh;
+  const [scaleX, scaleY] = lineCoordinateScale(
+    record,
+    canvasWidth,
+    canvasHeight,
+    hasWaterline
+  );
   return [box[0] * scaleX, box[1] * scaleY, box[2] * scaleX, box[3] * scaleY];
 }
 
-function centerlineCoordinateScale(
+function lineCoordinateScale(
   record: FrameMask,
   canvasWidth: number,
-  canvasHeight: number
+  canvasHeight: number,
+  useWaterline: boolean
 ): [number, number] {
-  const segmentation = record.centerline_segmentation;
+  const segmentation = useWaterline
+    ? record.waterline_segmentation
+    : record.centerline_segmentation;
   if (!segmentation || segmentation.type !== "rle") return [1, 1];
   const [maskHeight, maskWidth] = segmentation.size;
   if (!maskWidth || !maskHeight) return [1, 1];

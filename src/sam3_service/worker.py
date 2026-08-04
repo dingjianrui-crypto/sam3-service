@@ -118,7 +118,7 @@ class Worker:
             self._state(job_id, "postprocessing")
             tracks = self._assign_stable_tracks(job_id)
             manifest = self._build_manifest(
-                job_id, video["id"], metadata, prompt_entries, instances, tracks
+                job_id, video["id"], metadata, prompt_entries, instances, tracks, settings
             )
             self._atomic_json(self.storage.manifest_path(job_id), manifest)
             self.database.execute(
@@ -219,6 +219,7 @@ class Worker:
         prompts: list[dict[str, Any]],
         instances: dict[str, dict[str, Any]],
         tracks: list[dict[str, Any]],
+        settings: dict[str, Any],
     ) -> dict[str, Any]:
         colors = {prompt["id"]: prompt["color"] for prompt in prompts}
         chunks = self.database.fetch_all(
@@ -234,6 +235,9 @@ class Worker:
                 **metadata,
             },
             "prompts": prompts,
+            "settings": {
+                "boat_reference_line": settings.get("boat_reference_line", "centerline")
+            },
             "instances": [
                 {**entry, "color": colors.get(entry["prompt_id"], "#35C2FF")}
                 for entry in instances.values()
@@ -309,6 +313,10 @@ def _frame_to_dict(frame: FrameResult) -> dict[str, Any]:
         "centerline_segmentation": frame.centerline_segmentation,
         "centerline_box_xywh": frame.centerline_box_xywh,
         "centerline_line_xyxy": frame.centerline_line_xyxy,
+        "waterline_segmentation": frame.waterline_segmentation,
+        "waterline_box_xywh": frame.waterline_box_xywh,
+        "waterline_line_xyxy": frame.waterline_line_xyxy,
+        "waterline_confidence": frame.waterline_confidence,
     }
 
 

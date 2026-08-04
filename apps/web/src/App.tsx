@@ -28,19 +28,22 @@ const DETECTION_PRESETS: Record<Exclude<DetectionMode, "custom">, JobSettings> =
     score_threshold: 0.3,
     redetect_interval_frames: 1,
     max_detections_per_frame: 13,
-    dedupe_iou_threshold: 0.6
+    dedupe_iou_threshold: 0.6,
+    boat_reference_line: "centerline"
   },
   balanced: {
     score_threshold: 0.35,
     redetect_interval_frames: 10,
     max_detections_per_frame: 13,
-    dedupe_iou_threshold: 0.6
+    dedupe_iou_threshold: 0.6,
+    boat_reference_line: "centerline"
   },
   fast: {
     score_threshold: 0.5,
     redetect_interval_frames: 0,
     max_detections_per_frame: 13,
-    dedupe_iou_threshold: 0.6
+    dedupe_iou_threshold: 0.6,
+    boat_reference_line: "centerline"
   }
 };
 
@@ -128,7 +131,10 @@ export default function App() {
   function setPreset(mode: DetectionMode) {
     setDetectionMode(mode);
     if (mode !== "custom") {
-      setJobSettings(DETECTION_PRESETS[mode]);
+      setJobSettings((current) => ({
+        ...DETECTION_PRESETS[mode],
+        boat_reference_line: current.boat_reference_line
+      }));
     }
   }
 
@@ -194,6 +200,24 @@ export default function App() {
                   <option value="balanced">Balanced</option>
                   <option value="fast">Fast tracking</option>
                   <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Boat reference line</span>
+                <select
+                  value={jobSettings.boat_reference_line}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setJobSettings((current) => ({
+                      ...current,
+                      boat_reference_line: event.target.value as
+                        | "centerline"
+                        | "waterline"
+                    }))
+                  }
+                >
+                  <option value="centerline">Centerline</option>
+                  <option value="waterline">Waterline</option>
                 </select>
               </label>
               <div className="settings-grid">

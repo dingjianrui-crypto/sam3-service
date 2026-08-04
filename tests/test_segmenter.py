@@ -9,6 +9,7 @@ from sam3_service.segmenter import (
     Sam3Segmenter,
     _configure_sam3_batches,
     _fit_centerline_mask,
+    _fit_waterline_mask,
     _patch_sam3_init_state,
 )
 
@@ -276,6 +277,29 @@ class Sam3CompatibilityTest(unittest.TestCase):
         self.assertGreaterEqual(centerline.box_xywh[3], 11)
         self.assertLessEqual(centerline.box_xywh[3], 13)
         self.assertEqual(len(centerline.line_xyxy), 4)
+
+    def test_fits_waterline_from_lower_central_boat_boundary(self) -> None:
+        mask = [[False for _ in range(170)] for _ in range(100)]
+        for x in range(10, 160):
+            end_curve = max(0, 22 - min(x - 10, 159 - x))
+            top = 30 + end_curve // 3
+            bottom = 62 + round(x * 0.06) - end_curve
+            for y in range(top, bottom + 1):
+                mask[y][x] = True
+
+        centerline = _fit_centerline_mask(mask)
+        waterline = _fit_waterline_mask(mask, centerline)
+
+        self.assertIsNotNone(centerline)
+        self.assertIsNotNone(waterline)
+        assert centerline is not None
+        assert waterline is not None
+        self.assertEqual(waterline.segmentation["type"], "rle")
+        self.assertGreater(waterline.line_xyxy[2] - waterline.line_xyxy[0], 80)
+        centerline_y = (centerline.line_xyxy[1] + centerline.line_xyxy[3]) / 2
+        waterline_y = (waterline.line_xyxy[1] + waterline.line_xyxy[3]) / 2
+        self.assertGreater(waterline_y, centerline_y + 8)
+        self.assertGreater(waterline.confidence, 0.3)
 
 
 def _rle_area(rle: dict[str, object]) -> int:

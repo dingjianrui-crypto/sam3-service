@@ -25,6 +25,7 @@ export type JobSettings = {
   redetect_interval_frames: number;
   max_detections_per_frame: number;
   dedupe_iou_threshold: number;
+  boat_reference_line: "centerline" | "waterline";
 };
 
 export type FrameMask = {
@@ -36,11 +37,17 @@ export type FrameMask = {
   box_xywh: number[];
   centerline_box_xywh?: number[] | null;
   centerline_line_xyxy?: number[] | null;
+  waterline_box_xywh?: number[] | null;
+  waterline_line_xyxy?: number[] | null;
   score: number | null;
   segmentation:
     | { type: "polygon"; points: number[][] }
     | { type: "rle"; size: number[]; counts: number[] };
   centerline_segmentation?:
+    | { type: "polygon"; points: number[][] }
+    | { type: "rle"; size: number[]; counts: number[] }
+    | null;
+  waterline_segmentation?:
     | { type: "polygon"; points: number[][] }
     | { type: "rle"; size: number[]; counts: number[] }
     | null;
@@ -58,6 +65,7 @@ export type ResultManifest = {
     frame_count: number;
   };
   prompts: Prompt[];
+  settings?: Pick<JobSettings, "boat_reference_line">;
   instances: { id: string; prompt_id: string; color: string }[];
   chunks: {
     sequence: number;
@@ -71,6 +79,7 @@ export type ResultManifest = {
 export type ExportVideoOptions = {
   angle_label_position: "top" | "bottom";
   angle_label_font_size: number;
+  include_angles: boolean;
   include_spm: boolean;
   metric_count: number;
   metric_center_offset_percent: number;
@@ -207,6 +216,7 @@ export async function exportJobVideo(
     t: String(Date.now()),
     angle_label_position: options.angle_label_position,
     angle_label_font_size: String(options.angle_label_font_size),
+    include_angles: String(options.include_angles),
     include_spm: String(options.include_spm),
     metric_count: String(options.metric_count),
     metric_center_offset_percent: String(options.metric_center_offset_percent)

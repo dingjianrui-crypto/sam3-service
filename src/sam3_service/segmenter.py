@@ -4,6 +4,7 @@ import inspect
 import math
 import os
 import random
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import wraps
@@ -64,6 +65,10 @@ class FrameResult:
     centerline_segmentation: dict[str, Any] | None = None
     centerline_box_xywh: list[float] | None = None
     centerline_line_xyxy: list[float] | None = None
+    waterline_segmentation: dict[str, Any] | None = None
+    waterline_box_xywh: list[float] | None = None
+    waterline_line_xyxy: list[float] | None = None
+    waterline_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,14 @@ class CenterlineMask:
     segmentation: dict[str, Any]
     box_xywh: list[float]
     line_xyxy: list[float]
+
+
+@dataclass(frozen=True)
+class WaterlineMask:
+    segmentation: dict[str, Any]
+    box_xywh: list[float]
+    line_xyxy: list[float]
+    confidence: float
 
 
 @dataclass(frozen=True)
@@ -110,7 +123,7 @@ class MockSegmenter:
         progress: Callable[[int, int], None],
         cancelled: Callable[[], bool],
     ) -> Iterable[FrameResult]:
-        del video_path, prompt, score_threshold, job_settings
+        del video_path, score_threshold
         width = int(metadata["width"])
         height = int(metadata["height"])
         fps = float(metadata["fps"])
@@ -154,6 +167,17 @@ class MockSegmenter:
                     center_x + dx,
                     center_y + dy,
                 ],
+                waterline_line_xyxy=(
+                    [
+                        center_x - dx + (px if py > 0 else -px),
+                        center_y - dy + abs(py),
+                        center_x + dx + (px if py > 0 else -px),
+                        center_y + dy + abs(py),
+                    ]
+                    if job_settings.get("boat_reference_line") == "waterline"
+                    and _is_boat_prompt(prompt)
+                    else None
+                ),
             )
         progress(total, total)
 
@@ -263,6 +287,10 @@ class Sam3Segmenter:
         total = int(metadata["frame_count"])
         fps = float(metadata["fps"])
         detection_settings = _detection_settings(job_settings)
+        derive_waterline = (
+            job_settings.get("boat_reference_line", "centerline") == "waterline"
+            and _is_boat_prompt(prompt)
+        )
         try:
             response = self.predictor.handle_request(
                 {
@@ -292,6 +320,7 @@ class Sam3Segmenter:
                     frame_index,
                     fps,
                     detection_settings,
+                    derive_waterline,
                 )
                 if prompt_results:
                     emitted_prompt_frames.add(frame_index)
@@ -323,6 +352,7 @@ class Sam3Segmenter:
                     frame_index,
                     fps,
                     detection_settings,
+                    derive_waterline,
                 )
                 progress(min(frame_index + 1, total), total)
         except self.torch.OutOfMemoryError as exc:
@@ -363,6 +393,10 @@ def _detection_settings(job_settings: dict[str, Any]) -> DetectionSettings:
     )
 
 
+def _is_boat_prompt(prompt: str) -> bool:
+    return bool(re.search(r"\b(?:boat|kayak|canoe|shell)\b", prompt, re.IGNORECASE))
+
+
 def _redetect_anchor_frames(total: int, settings: DetectionSettings) -> list[int]:
     if total <= 0:
         return [0]
@@ -381,6 +415,7 @@ def _frame_results_from_response(
     fallback_frame_index: int,
     fps: float,
     settings: DetectionSettings,
+    derive_waterline: bool = False,
 ) -> list[FrameResult]:
     outputs = response.get("outputs")
     if not isinstance(outputs, dict):
@@ -400,6 +435,7 @@ def _frame_results_from_response(
             continue
         mask = masks[index]
         centerline = _fit_centerline_mask(mask)
+        waterline = _fit_waterline_mask(mask, centerline) if derive_waterline else None
         box = _scaled_box(boxes[index], metadata) if index < len(boxes) else _box_from_any_mask(mask)
         if box is None:
             continue
@@ -415,6 +451,10 @@ def _frame_results_from_response(
                 centerline_segmentation=centerline.segmentation if centerline else None,
                 centerline_box_xywh=centerline.box_xywh if centerline else None,
                 centerline_line_xyxy=centerline.line_xyxy if centerline else None,
+                waterline_segmentation=waterline.segmentation if waterline else None,
+                waterline_box_xywh=waterline.box_xywh if waterline else None,
+                waterline_line_xyxy=waterline.line_xyxy if waterline else None,
+                waterline_confidence=waterline.confidence if waterline else None,
             )
         )
     return _dedupe_frame_results(results, settings)
@@ -558,6 +598,101 @@ def _fit_centerline_mask(mask: Any) -> CenterlineMask | None:
         segmentation=_encode_uncompressed_rle(rows),
         box_xywh=box,
         line_xyxy=line_xyxy,
+    )
+
+
+def _fit_waterline_mask(
+    mask: Any, centerline: CenterlineMask | None
+) -> WaterlineMask | None:
+    mask, height, width = _coerce_2d_mask(mask)
+    points = _mask_points(mask, height, width)
+    if centerline is None or len(points) < 12:
+        return None
+
+    x1, y1, x2, y2 = centerline.line_xyxy
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 4:
+        return None
+    unit_x = (x2 - x1) / length
+    unit_y = (y2 - y1) / length
+    normal_x, normal_y = -unit_y, unit_x
+    if normal_y < 0:
+        normal_x, normal_y = -normal_x, -normal_y
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+
+    projected = [
+        (
+            (point[0] - center_x) * unit_x + (point[1] - center_y) * unit_y,
+            (point[0] - center_x) * normal_x + (point[1] - center_y) * normal_y,
+            point,
+        )
+        for point in points
+    ]
+    longitudinal = sorted(value[0] for value in projected)
+    start = _percentile(longitudinal, 15)
+    end = _percentile(longitudinal, 85)
+    span = end - start
+    if span < 6:
+        return None
+
+    bin_count = max(12, min(96, round(span / 6)))
+    bottom_by_bin: dict[int, tuple[float, tuple[float, float]]] = {}
+    for along, outward, point in projected:
+        if along < start or along > end:
+            continue
+        bucket = min(bin_count - 1, int((along - start) * bin_count / span))
+        existing = bottom_by_bin.get(bucket)
+        if existing is None or outward > existing[0]:
+            bottom_by_bin[bucket] = (outward, point)
+    candidates = [entry[1] for entry in bottom_by_bin.values()]
+    if len(candidates) < 8:
+        return None
+
+    line = _ransac_line(candidates, width, height) or _principal_line(candidates)
+    if line is None:
+        return None
+    threshold = max(2.0, min(8.0, min(width, height) * 0.008))
+    inliers = [point for point in candidates if _line_distance(point, line) <= threshold]
+    if len(inliers) < max(6, len(candidates) // 2):
+        return None
+    refined = _principal_line(inliers)
+    if refined is not None:
+        line = refined
+
+    projections = sorted(_line_projection(point, line) for point in inliers)
+    line_start = _percentile(projections, 2)
+    line_end = _percentile(projections, 98)
+    if line_end - line_start < 4:
+        return None
+    rows = _line_band_mask(
+        height,
+        width,
+        line,
+        line_start,
+        line_end,
+        _fixed_centerline_half_width(),
+    )
+    box = _box_from_mask(rows)
+    if box is None:
+        return None
+    line_center_x, line_center_y, line_unit_x, line_unit_y = line
+    line_xyxy = [
+        line_center_x + line_start * line_unit_x,
+        line_center_y + line_start * line_unit_y,
+        line_center_x + line_end * line_unit_x,
+        line_center_y + line_end * line_unit_y,
+    ]
+    coverage = len(candidates) / bin_count
+    support = len(inliers) / len(candidates)
+    mean_residual = sum(_line_distance(point, line) for point in inliers) / len(inliers)
+    residual_score = max(0.0, 1.0 - mean_residual / max(threshold, 1.0))
+    confidence = max(0.0, min(1.0, coverage * support * residual_score))
+    return WaterlineMask(
+        segmentation=_encode_uncompressed_rle(rows),
+        box_xywh=box,
+        line_xyxy=line_xyxy,
+        confidence=round(confidence, 4),
     )
 
 

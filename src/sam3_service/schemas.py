@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -36,6 +38,7 @@ class JobSettings(BaseModel):
     redetect_interval_frames: int | None = Field(default=None, ge=0, le=300)
     max_detections_per_frame: int | None = Field(default=None, ge=1, le=256)
     dedupe_iou_threshold: float | None = Field(default=None, ge=0, le=1)
+    boat_reference_line: Literal["centerline", "waterline"] = "centerline"
 
 
 class JobCreate(BaseModel):

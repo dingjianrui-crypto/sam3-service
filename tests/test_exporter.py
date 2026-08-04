@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from sam3_service.exporter import (
     Centerline,
     DegreeLabel,
     ExportOptions,
     SpmEstimator,
+    _draw_frame_overlay,
     _degree_label_entries,
     _degree_labels,
     _degree_slots,
@@ -21,6 +23,63 @@ from sam3_service.exporter import (
 
 
 class ExporterTest(unittest.TestCase):
+    def test_export_can_hide_angles_without_removing_angle_measurements(self) -> None:
+        records = [
+            {
+                "prompt_id": "boat",
+                "instance_id": "boat:1",
+                "centerline_line_xyxy": [0, 20, 100, 20],
+            },
+            {
+                "prompt_id": "paddle",
+                "instance_id": "paddle:1",
+                "centerline_line_xyxy": [50, 0, 50, 80],
+            },
+        ]
+        options = ExportOptions(
+            include_angles=False,
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+        )
+
+        with (
+            patch("sam3_service.exporter._draw_degree_label_block") as draw_block,
+            patch("sam3_service.exporter._draw_target_degree_marker") as draw_marker,
+        ):
+            _draw_frame_overlay(
+                bytearray(100 * 100 * 4),
+                100,
+                100,
+                records,
+                {"boat": (255, 181, 71, 255), "paddle": (53, 194, 255, 255)},
+                export_options=options,
+                timestamp_ms=0,
+                spm_estimator=SpmEstimator(),
+            )
+
+        draw_block.assert_not_called()
+        draw_marker.assert_not_called()
+
+    def test_record_line_can_select_waterline_and_fall_back_to_centerline(self) -> None:
+        record = {
+            "centerline_line_xyxy": [0, 20, 100, 20],
+            "waterline_line_xyxy": [0, 30, 100, 32],
+        }
+
+        self.assertEqual(
+            _record_line(record, 100, 100, use_waterline=True),
+            (0.0, 30.0, 100.0, 32.0),
+        )
+        self.assertEqual(
+            _record_line(
+                {"centerline_line_xyxy": [0, 20, 100, 20]},
+                100,
+                100,
+                use_waterline=True,
+            ),
+            (0.0, 20.0, 100.0, 20.0),
+        )
+
     def test_computes_degree_label_for_each_target_paddle(self) -> None:
         reference = Centerline(
             record={"prompt_id": "boat", "instance_id": "boat:1"},
