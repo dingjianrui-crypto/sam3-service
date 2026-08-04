@@ -97,6 +97,10 @@ export function Player({ manifest }: Props) {
   const [exportMetricCount, setExportMetricCount] = useState(1);
   const [exportAnglesEnabled, setExportAnglesEnabled] = useState(true);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
+  const [exportCatchEnabled, setExportCatchEnabled] = useState(false);
+  const [exportExitEnabled, setExportExitEnabled] = useState(false);
+  const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.5);
+  const [exportProgress, setExportProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
   const [enabledPrompts, setEnabledPrompts] = useState(
@@ -431,20 +435,32 @@ export function Player({ manifest }: Props) {
 
   const exportCenterlineVideo = useCallback(async () => {
     setExporting(true);
-    setExportStatus("Rendering MP4 on server…");
+    setExportProgress(0);
+    setExportStatus("Starting export…");
     try {
-      const blob = await exportJobVideo(manifest.job_id, {
-        angle_label_position: exportLabelPosition,
-        angle_label_font_size: exportFontSize,
-        include_angles: exportAnglesEnabled,
-        include_spm: exportSpmEnabled,
-        metric_count: exportMetricCount,
-        metric_center_offset_percent: exportMetricCenterOffsetPercent,
-        reference_prompt_id: angleReferencePromptId,
-        target_prompt_ids: [...angleTargetPromptIds],
-        selection_keyframes: selectionKeyframes.length ? selectionKeyframes : undefined
-      });
+      const blob = await exportJobVideo(
+        manifest.job_id,
+        {
+          angle_label_position: exportLabelPosition,
+          angle_label_font_size: exportFontSize,
+          include_angles: exportAnglesEnabled,
+          include_spm: exportSpmEnabled,
+          include_catch: exportCatchEnabled,
+          include_exit: exportExitEnabled,
+          event_hold_seconds: exportEventHoldSeconds,
+          metric_count: exportMetricCount,
+          metric_center_offset_percent: exportMetricCenterOffsetPercent,
+          reference_prompt_id: angleReferencePromptId,
+          target_prompt_ids: [...angleTargetPromptIds],
+          selection_keyframes: selectionKeyframes.length ? selectionKeyframes : undefined
+        },
+        (progress) => {
+          setExportProgress(progress.percent);
+          setExportStatus(progress.error ?? progress.message);
+        }
+      );
       downloadBlob(blob, `sam3-${manifest.job_id}-centerlines.mp4`);
+      setExportProgress(100);
       setExportStatus("Export complete.");
     } catch (reason) {
       setExportStatus(reason instanceof Error ? reason.message : String(reason));
@@ -456,6 +472,9 @@ export function Player({ manifest }: Props) {
     angleTargetPromptIds,
     exportFontSize,
     exportAnglesEnabled,
+    exportCatchEnabled,
+    exportEventHoldSeconds,
+    exportExitEnabled,
     exportLabelPosition,
     exportMetricCount,
     exportMetricCenterOffsetPercent,
@@ -643,6 +662,18 @@ export function Player({ manifest }: Props) {
             <h3>Export</h3>
             {exportStatus && <span className="export-status">{exportStatus}</span>}
           </div>
+          {exporting && (
+            <div
+              className="export-progress"
+              role="progressbar"
+              aria-label="Export progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(exportProgress)}
+            >
+              <span style={{ width: `${exportProgress}%` }} />
+            </div>
+          )}
           <div className="export-switches">
             <label className="checkbox">
               <input
@@ -659,6 +690,40 @@ export function Player({ manifest }: Props) {
                 onChange={(event) => setExportSpmEnabled(event.target.checked)}
               />
               Include SPM
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportCatchEnabled}
+                onChange={(event) => setExportCatchEnabled(event.target.checked)}
+              />
+              Catch
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportExitEnabled}
+                onChange={(event) => setExportExitEnabled(event.target.checked)}
+              />
+              Exit
+            </label>
+            <label className="event-hold-control">
+              Event hold
+              <input
+                type="number"
+                min="0.1"
+                max="10"
+                step="0.1"
+                value={exportEventHoldSeconds}
+                disabled={!exportCatchEnabled && !exportExitEnabled}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportEventHoldSeconds(
+                    Number.isFinite(value) ? clamp(value, 0.1, 10) : 1.5
+                  );
+                }}
+              />
+              seconds
             </label>
           </div>
           <div className="angle-controls">

@@ -6,6 +6,7 @@ import math
 import mimetypes
 import os
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,6 +41,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = configured
         app.state.database = database
         app.state.storage = LocalStorage(configured.data_dir)
+        app.state.export_progress = {}
+        app.state.export_progress_lock = threading.Lock()
         yield
 
     app = FastAPI(
@@ -418,6 +421,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         angle_label_font_size: int = Query(default=32, ge=12, le=96),
         include_angles: bool = Query(default=True),
         include_spm: bool = Query(default=False),
+        include_catch: bool = Query(default=False),
+        include_exit: bool = Query(default=False),
+        event_hold_seconds: float = Query(default=1.5, ge=0.1, le=10),
+        export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
@@ -457,6 +464,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=400,
             )
         parsed_selection_keyframes = _parse_selection_keyframes(selection_keyframes)
+        task_id = export_task_id or uuid.uuid4().hex
+
+        def update_export_progress(stage: str, percent: float, message: str) -> None:
+            with request.app.state.export_progress_lock:
+                request.app.state.export_progress[job_id] = {
+                    "task_id": task_id,
+                    "state": "running",
+                    "stage": stage,
+                    "percent": round(percent, 1),
+                    "message": message,
+                }
+
+        update_export_progress("preparing", 0, "Preparing export")
         video = _video_or_404(database, job["video_id"])
         video_path = Path(video["source_path"] or video["normalized_path"])
         manifest = _result_manifest_with_tracks(database, storage, job_id)
@@ -465,47 +485,81 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         chunk_paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
         output_path = storage.export_path(job_id)
-        export_centerline_video(
-            video_path=video_path,
-            output_path=output_path,
-            temporary_dir=storage.export_tmp_dir(job_id),
-            manifest=manifest,
-            chunk_paths=chunk_paths,
-            options=ExportOptions(
-                angle_label_position=angle_label_position,
-                angle_label_font_size=angle_label_font_size,
-                include_angles=include_angles,
-                include_spm=include_spm,
-                target_slot_count=metric_count or 0,
-                metric_center_offset_percent=metric_center_offset_percent,
-                reference_prompt_id=reference_prompt_id,
-                target_prompt_ids=tuple(
-                    item.strip() for item in (target_prompt_ids or "").split(",") if item.strip()
+        try:
+            export_centerline_video(
+                video_path=video_path,
+                output_path=output_path,
+                temporary_dir=storage.export_tmp_dir(job_id),
+                manifest=manifest,
+                chunk_paths=chunk_paths,
+                options=ExportOptions(
+                    angle_label_position=angle_label_position,
+                    angle_label_font_size=angle_label_font_size,
+                    include_angles=include_angles,
+                    include_spm=include_spm,
+                    include_catch=include_catch,
+                    include_exit=include_exit,
+                    event_hold_seconds=event_hold_seconds,
+                    target_slot_count=metric_count or 0,
+                    metric_center_offset_percent=metric_center_offset_percent,
+                    reference_prompt_id=reference_prompt_id,
+                    target_prompt_ids=tuple(
+                        item.strip()
+                        for item in (target_prompt_ids or "").split(",")
+                        if item.strip()
+                    ),
+                    reference_track_ids=tuple(
+                        item.strip()
+                        for item in (reference_track_ids or reference_instance_ids or "").split(",")
+                        if item.strip()
+                    ),
+                    target_track_ids=tuple(
+                        item.strip()
+                        for item in (target_track_ids or target_instance_ids or "").split(",")
+                        if item.strip()
+                    ),
+                    selection_rect=(
+                        (selection_x, selection_y, selection_width, selection_height)
+                        if all(value is not None for value in selection_values)
+                        else None
+                    ),
+                    selection_keyframes=parsed_selection_keyframes,
                 ),
-                reference_track_ids=tuple(
-                    item.strip()
-                    for item in (reference_track_ids or reference_instance_ids or "").split(",")
-                    if item.strip()
-                ),
-                target_track_ids=tuple(
-                    item.strip()
-                    for item in (target_track_ids or target_instance_ids or "").split(",")
-                    if item.strip()
-                ),
-                selection_rect=(
-                    (selection_x, selection_y, selection_width, selection_height)
-                    if all(value is not None for value in selection_values)
-                    else None
-                ),
-                selection_keyframes=parsed_selection_keyframes,
-            ),
-        )
+                progress=update_export_progress,
+            )
+        except Exception as exc:
+            with request.app.state.export_progress_lock:
+                request.app.state.export_progress[job_id] = {
+                    "task_id": task_id,
+                    "state": "failed",
+                    "stage": "failed",
+                    "percent": 100,
+                    "message": "Export failed",
+                    "error": str(exc),
+                }
+            raise
+        with request.app.state.export_progress_lock:
+            request.app.state.export_progress[job_id] = {
+                "task_id": task_id,
+                "state": "completed",
+                "stage": "completed",
+                "percent": 100,
+                "message": "Export complete",
+            }
         return FileResponse(
             output_path,
             media_type="video/mp4",
             filename=f"sam3-{job_id}-centerlines.mp4",
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/api/v1/jobs/{job_id}/export/status")
+    def export_status(job_id: str, request: Request, task_id: str = Query(min_length=1)):
+        with request.app.state.export_progress_lock:
+            progress = request.app.state.export_progress.get(job_id)
+        if not progress or progress.get("task_id") != task_id:
+            raise ServiceError("NOT_FOUND", "Export task was not found.", status_code=404)
+        return progress
 
     @app.delete("/api/v1/jobs/{job_id}", status_code=204)
     def delete_job(job_id: str, request: Request) -> None:

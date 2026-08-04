@@ -9,6 +9,7 @@ import zlib
 from bisect import bisect_left
 from dataclasses import dataclass, replace
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from .errors import ServiceError
@@ -29,6 +30,10 @@ SPM_MIN_INTERVAL_MS = 500
 SPM_MAX_INTERVAL_MS = 3500
 SPM_MIN_INTERVALS = 3
 SPM_MIN_PROMINENCE_DEGREES = 10
+PADDLE_EVENT_CONFIRM_SAMPLES = 2
+PADDLE_CATCH_DEPTH_RATIO = 0.015
+PADDLE_EXIT_DEPTH_RATIO = 0.005
+PADDLE_EVENT_DEDUPE_MS = 250
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,9 @@ class ExportOptions:
     angle_label_font_size: int | None = None
     include_angles: bool = True
     include_spm: bool = False
+    include_catch: bool = False
+    include_exit: bool = False
+    event_hold_seconds: float = 1.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     reference_line_mode: str | None = None
@@ -75,6 +83,25 @@ class DegreeLabelEntry:
 class SpmEstimate:
     instantaneous: float | None
     average: float | None
+
+
+@dataclass(frozen=True)
+class PaddleEvent:
+    kind: str
+    timestamp_ms: int
+    instance_id: str
+    line: Line
+    confidence: float
+
+
+@dataclass
+class _PaddleEventState:
+    immersed: bool | None = None
+    candidate_kind: str | None = None
+    candidate_count: int = 0
+    candidate_timestamp_ms: int = 0
+    candidate_line: Line | None = None
+    candidate_confidence: float = 0.0
 
 
 class SpmEstimator:
@@ -166,12 +193,14 @@ def export_centerline_video(
     manifest: dict[str, Any],
     chunk_paths: list[Path],
     options: ExportOptions | None = None,
+    progress: Callable[[str, float, str], None] | None = None,
 ) -> Path:
     if not video_path.is_file():
         raise ServiceError("NOT_FOUND", "Video content is unavailable.", status_code=404)
     if not chunk_paths:
         raise ServiceError("NOT_FOUND", "Result chunks are unavailable.", status_code=404)
 
+    _report_progress(progress, "preparing", 2, "Preparing export")
     manifest_video = manifest["video"]
     manifest_width = int(manifest_video["width"])
     manifest_height = int(manifest_video["height"])
@@ -218,6 +247,19 @@ def export_centerline_video(
                 scale_y,
             ),
         )
+    events: list[PaddleEvent] = []
+    if export_options.include_catch or export_options.include_exit:
+        _report_progress(progress, "analyzing_events", 5, "Analyzing paddle events")
+        events = _detect_paddle_events(
+            frames,
+            export_options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+            progress,
+        )
+    _report_progress(progress, "rendering", 15, "Rendering overlay frames")
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
     for frame_index in range(frame_count):
@@ -243,8 +285,17 @@ def export_centerline_video(
             export_options=export_options,
             timestamp_ms=timestamp_ms,
             spm_estimator=spm_estimator,
+            paddle_events=_active_paddle_events(events, timestamp_ms, export_options),
         )
         _write_png_rgba(frames_dir / f"{frame_index:06d}.png", width, height, image)
+        if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
+            percent = 15 + 75 * (frame_index + 1) / frame_count
+            _report_progress(
+                progress,
+                "rendering",
+                percent,
+                f"Rendering frame {frame_index + 1} of {frame_count}",
+            )
 
     filter_complex = "[0:v][1:v]overlay=0:0:format=auto[ov]"
     filter_complex += ";[ov]null[v]"
@@ -282,9 +333,11 @@ def export_centerline_video(
         "+faststart",
         str(temporary_output),
     ]
+    _report_progress(progress, "encoding", 92, "Encoding MP4")
     try:
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=3600)
         temporary_output.replace(output_path)
+        _report_progress(progress, "finalizing", 99, "Finalizing export")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         temporary_output.unlink(missing_ok=True)
         detail = exc.stderr[-1000:] if isinstance(exc, subprocess.CalledProcessError) else str(exc)
@@ -298,6 +351,16 @@ def export_centerline_video(
         shutil.rmtree(temporary_dir, ignore_errors=True)
 
     return output_path
+
+
+def _report_progress(
+    progress: Callable[[str, float, str], None] | None,
+    stage: str,
+    percent: float,
+    message: str,
+) -> None:
+    if progress is not None:
+        progress(stage, max(0.0, min(100.0, percent)), message)
 
 
 def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[str, Any]]]:
@@ -373,6 +436,9 @@ def _normalize_export_options(
         angle_label_font_size=max(12, min(96, int(font_size))),
         include_angles=bool(requested.include_angles),
         include_spm=bool(requested.include_spm),
+        include_catch=bool(requested.include_catch),
+        include_exit=bool(requested.include_exit),
+        event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         reference_line_mode=reference_line_mode,
@@ -543,6 +609,7 @@ def _draw_frame_overlay(
     export_options: ExportOptions,
     timestamp_ms: int,
     spm_estimator: SpmEstimator,
+    paddle_events: tuple[PaddleEvent, ...] = (),
 ) -> None:
     centerlines: list[Centerline] = []
     for record in records:
@@ -574,6 +641,8 @@ def _draw_frame_overlay(
         spm_labels = displayed_labels if has_selection or has_fixed_metric_slots else labels
         estimate = spm_estimator.update(timestamp_ms, spm_labels)
         _draw_spm_label(image, width, height, estimate, export_options)
+    for event in paddle_events:
+        _draw_paddle_event_label(image, width, height, event, export_options)
 
 
 def _record_line(
@@ -724,6 +793,181 @@ def _degree_slots(labels: list[DegreeLabel], options: ExportOptions) -> list[Deg
     ]
 
 
+def _detect_paddle_events(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+    progress: Callable[[str, float, str], None] | None = None,
+) -> list[PaddleEvent]:
+    states: dict[str, _PaddleEventState] = {}
+    detected: list[PaddleEvent] = []
+    timestamps = sorted(frames)
+    target_prompt_ids = set(options.target_prompt_ids)
+    for index, timestamp_ms in enumerate(timestamps):
+        records = [_scale_record(record, scale_x, scale_y) for record in frames[timestamp_ms]]
+        records = [
+            record
+            for record in records
+            if _record_selected_for_export(record, options, width, height, timestamp_ms)
+        ]
+        references: list[Centerline] = []
+        targets: list[Centerline] = []
+        for record in records:
+            is_reference = record.get("prompt_id") == options.reference_prompt_id
+            line = _record_line(
+                record,
+                width,
+                height,
+                use_waterline=is_reference and options.reference_line_mode == "waterline",
+            )
+            if line is None:
+                continue
+            centerline = Centerline(record=record, line=line, color=(255, 255, 255, 255))
+            if is_reference:
+                references.append(centerline)
+            elif record.get("prompt_id") in target_prompt_ids:
+                targets.append(centerline)
+        if references:
+            for target in targets:
+                reference = _nearest_centerline(target, references)
+                depth_ratio = _paddle_water_depth_ratio(target.line, reference.line)
+                if depth_ratio is None:
+                    continue
+                track_id = _record_track_id(target.record)
+                event = _update_paddle_event_state(
+                    states.setdefault(track_id, _PaddleEventState()),
+                    track_id,
+                    timestamp_ms,
+                    target.line,
+                    depth_ratio,
+                )
+                if event is not None:
+                    detected.append(event)
+        if index == len(timestamps) - 1 or index % max(1, len(timestamps) // 20) == 0:
+            _report_progress(
+                progress,
+                "analyzing_events",
+                5 + 8 * (index + 1) / max(len(timestamps), 1),
+                f"Analyzing events {index + 1} of {len(timestamps)}",
+            )
+    deduplicated = _dedupe_paddle_events(detected, width, height)
+    return [
+        event
+        for event in deduplicated
+        if (event.kind == "catch" and options.include_catch)
+        or (event.kind == "exit" and options.include_exit)
+    ]
+
+
+def _paddle_water_depth_ratio(paddle: Line, waterline: Line) -> float | None:
+    water_dx = waterline[2] - waterline[0]
+    water_dy = waterline[3] - waterline[1]
+    water_length = math.hypot(water_dx, water_dy)
+    if water_length < 2:
+        return None
+    normal_x = -water_dy / water_length
+    normal_y = water_dx / water_length
+    if normal_y < 0:
+        normal_x, normal_y = -normal_x, -normal_y
+    origin_x, origin_y = _line_center(waterline)
+    depths = [
+        (x - origin_x) * normal_x + (y - origin_y) * normal_y
+        for x, y in ((paddle[0], paddle[1]), (paddle[2], paddle[3]))
+    ]
+    return max(depths) / water_length
+
+
+def _update_paddle_event_state(
+    state: _PaddleEventState,
+    instance_id: str,
+    timestamp_ms: int,
+    line: Line,
+    depth_ratio: float,
+) -> PaddleEvent | None:
+    if state.immersed is None:
+        state.immersed = depth_ratio >= PADDLE_CATCH_DEPTH_RATIO
+        return None
+    candidate_kind: str | None = None
+    threshold = PADDLE_CATCH_DEPTH_RATIO
+    if not state.immersed and depth_ratio >= PADDLE_CATCH_DEPTH_RATIO:
+        candidate_kind = "catch"
+        threshold = PADDLE_CATCH_DEPTH_RATIO
+    elif state.immersed and depth_ratio <= PADDLE_EXIT_DEPTH_RATIO:
+        candidate_kind = "exit"
+        threshold = PADDLE_EXIT_DEPTH_RATIO
+    if candidate_kind is None:
+        state.candidate_kind = None
+        state.candidate_count = 0
+        state.candidate_line = None
+        return None
+    confidence = min(1.0, 0.55 + abs(depth_ratio - threshold) / 0.04)
+    if state.candidate_kind != candidate_kind:
+        state.candidate_kind = candidate_kind
+        state.candidate_count = 1
+        state.candidate_timestamp_ms = timestamp_ms
+        state.candidate_line = line
+        state.candidate_confidence = confidence
+        return None
+    state.candidate_count += 1
+    state.candidate_confidence = max(state.candidate_confidence, confidence)
+    if state.candidate_count < PADDLE_EVENT_CONFIRM_SAMPLES or state.candidate_line is None:
+        return None
+    event = PaddleEvent(
+        kind=candidate_kind,
+        timestamp_ms=state.candidate_timestamp_ms,
+        instance_id=instance_id,
+        line=state.candidate_line,
+        confidence=round(state.candidate_confidence, 3),
+    )
+    state.immersed = candidate_kind == "catch"
+    state.candidate_kind = None
+    state.candidate_count = 0
+    state.candidate_line = None
+    return event
+
+
+def _dedupe_paddle_events(
+    events: list[PaddleEvent], width: int, height: int
+) -> list[PaddleEvent]:
+    kept: list[PaddleEvent] = []
+    distance_limit = min(width, height) * 0.12
+    for event in sorted(events, key=lambda item: (item.timestamp_ms, item.kind)):
+        duplicate_index = next(
+            (
+                index
+                for index, previous in enumerate(kept)
+                if previous.kind == event.kind
+                and abs(previous.timestamp_ms - event.timestamp_ms) <= PADDLE_EVENT_DEDUPE_MS
+                and (
+                    math.dist(
+                        _line_center(previous.line), _line_center(event.line)
+                    )
+                    <= distance_limit
+                )
+            ),
+            None,
+        )
+        if duplicate_index is None:
+            kept.append(event)
+        elif event.confidence > kept[duplicate_index].confidence:
+            kept[duplicate_index] = event
+    return kept
+
+
+def _active_paddle_events(
+    events: list[PaddleEvent], timestamp_ms: int, options: ExportOptions
+) -> tuple[PaddleEvent, ...]:
+    hold_ms = round(options.event_hold_seconds * 1000)
+    return tuple(
+        event
+        for event in events
+        if event.timestamp_ms <= timestamp_ms < event.timestamp_ms + hold_ms
+    )
+
+
 def _nearest_centerline(target: Centerline, references: list[Centerline]) -> Centerline:
     target_x, target_y = _line_center(target.line)
     return min(
@@ -786,6 +1030,79 @@ def _draw_target_degree_marker(
         entry.text,
         entry.text_color,
     )
+
+
+def _draw_paddle_event_label(
+    image: bytearray,
+    width: int,
+    height: int,
+    event: PaddleEvent,
+    options: ExportOptions,
+) -> None:
+    center_x, center_y = _line_center(event.line)
+    dx = event.line[2] - event.line[0]
+    dy = event.line[3] - event.line[1]
+    length = max(math.hypot(dx, dy), 1.0)
+    offset = max(28, min(width, height) * 0.06)
+    label_x = center_x + (-dy / length) * offset
+    label_y = center_y + (dx / length) * offset
+    color = (74, 222, 128, 255) if event.kind == "catch" else (255, 82, 96, 255)
+    _draw_line(
+        image,
+        width,
+        height,
+        (center_x, center_y, label_x, label_y),
+        color,
+        max(2, round(min(width, height) * 0.004)),
+    )
+    text = event.kind.upper()
+    if _draw_paddle_event_label_with_pillow(
+        image, width, height, label_x, label_y, text, color, options
+    ):
+        return
+    _draw_small_degree_label(image, width, height, label_x, label_y, text, color)
+
+
+def _draw_paddle_event_label_with_pillow(
+    image: bytearray,
+    width: int,
+    height: int,
+    center_x: float,
+    center_y: float,
+    text: str,
+    color: Color,
+    options: ExportOptions,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+    font_path = _find_export_font()
+    if font_path is None:
+        return False
+    font_size = max(14, round((options.angle_label_font_size or 32) * 0.8))
+    try:
+        font = ImageFont.truetype(str(font_path), font_size)
+    except OSError:
+        return False
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    stroke_width = max(1, round(font_size * 0.08))
+    box = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    text_width = box[2] - box[0]
+    text_height = box[3] - box[1]
+    left = max(2, min(width - text_width - 2, round(center_x - text_width / 2)))
+    top = max(2, min(height - text_height - 2, round(center_y - text_height / 2)))
+    draw.text(
+        (left - box[0], top - box[1]),
+        text,
+        font=font,
+        fill=color,
+        stroke_width=stroke_width,
+        stroke_fill=(2, 5, 9, 255),
+    )
+    _blend_overlay(image, width, overlay.tobytes())
+    return True
 
 
 def _draw_degree_label_block(

@@ -802,6 +802,30 @@ h2 {
   align-items: center;
 }
 
+.event-hold-control input {
+  width: 64px;
+  box-sizing: border-box;
+}
+
+.event-hold-control input:disabled {
+  opacity: 0.45;
+}
+
+.export-progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  background: #132a3b;
+}
+
+.export-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 2px;
+  background: #55d7f2;
+  transition: width 180ms ease;
+}
+
 .playback-settings output {
   width: 34px;
   color: #b9ccda;
@@ -914,7 +938,11 @@ h2 {
 }
 
 .export-status {
+  overflow: hidden;
   color: #8299ab;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .checkbox input {

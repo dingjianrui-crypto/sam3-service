@@ -81,6 +81,9 @@ export type ExportVideoOptions = {
   angle_label_font_size: number;
   include_angles: boolean;
   include_spm: boolean;
+  include_catch: boolean;
+  include_exit: boolean;
+  event_hold_seconds: number;
   metric_count: number;
   metric_center_offset_percent: number;
   reference_prompt_id?: string;
@@ -93,6 +96,15 @@ export type ExportVideoOptions = {
     width: number;
     height: number;
   }>;
+};
+
+export type ExportProgress = {
+  task_id: string;
+  state: "running" | "completed" | "failed";
+  stage: string;
+  percent: number;
+  message: string;
+  error?: string;
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -210,14 +222,20 @@ export function deleteJob(jobId: string): Promise<void> {
 
 export async function exportJobVideo(
   jobId: string,
-  options: ExportVideoOptions
+  options: ExportVideoOptions,
+  onProgress?: (progress: ExportProgress) => void
 ): Promise<Blob> {
+  const taskId = idempotencyKey();
   const params = new URLSearchParams({
     t: String(Date.now()),
+    export_task_id: taskId,
     angle_label_position: options.angle_label_position,
     angle_label_font_size: String(options.angle_label_font_size),
     include_angles: String(options.include_angles),
     include_spm: String(options.include_spm),
+    include_catch: String(options.include_catch),
+    include_exit: String(options.include_exit),
+    event_hold_seconds: String(options.event_hold_seconds),
     metric_count: String(options.metric_count),
     metric_center_offset_percent: String(options.metric_center_offset_percent)
   });
@@ -247,12 +265,37 @@ export async function exportJobVideo(
       )
     );
   }
-  const response = await fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
+  let finished = false;
+  const responsePromise = fetch(`/api/v1/jobs/${jobId}/export?${params}`, {
     cache: "no-store"
+  }).finally(() => {
+    finished = true;
   });
+  const poller = (async () => {
+    while (!finished) {
+      const progressResponse = await fetch(
+        `/api/v1/jobs/${jobId}/export/status?task_id=${encodeURIComponent(taskId)}`,
+        { cache: "no-store" }
+      ).catch(() => null);
+      if (progressResponse?.ok) {
+        const progress = (await progressResponse.json()) as ExportProgress;
+        onProgress?.(progress);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+    }
+  })();
+  const response = await responsePromise;
+  await poller;
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
   }
+  onProgress?.({
+    task_id: taskId,
+    state: "completed",
+    stage: "completed",
+    percent: 100,
+    message: "Export complete"
+  });
   return response.blob();
 }

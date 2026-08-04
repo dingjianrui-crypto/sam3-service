@@ -7,22 +7,71 @@ from sam3_service.exporter import (
     Centerline,
     DegreeLabel,
     ExportOptions,
+    PaddleEvent,
     SpmEstimator,
+    _PaddleEventState,
+    _active_paddle_events,
     _draw_frame_overlay,
     _degree_label_entries,
     _degree_labels,
     _degree_slots,
     _metric_label_top,
     _maximum_target_count_in_selection,
+    _paddle_water_depth_ratio,
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
     _selection_rect_at,
     _spm_label_top,
+    _update_paddle_event_state,
 )
 
 
 class ExporterTest(unittest.TestCase):
+    def test_paddle_water_depth_is_normalized_against_waterline(self) -> None:
+        waterline = (0.0, 50.0, 100.0, 50.0)
+
+        self.assertAlmostEqual(
+            _paddle_water_depth_ratio((50.0, 10.0, 50.0, 60.0), waterline) or 0,
+            0.1,
+        )
+        self.assertLess(
+            _paddle_water_depth_ratio((50.0, 10.0, 50.0, 45.0), waterline) or 0,
+            0,
+        )
+
+    def test_paddle_event_state_confirms_and_backdates_catch_and_exit(self) -> None:
+        state = _PaddleEventState()
+        line = (20.0, 10.0, 20.0, 40.0)
+
+        self.assertIsNone(_update_paddle_event_state(state, "paddle:1", 0, line, 0.0))
+        self.assertIsNone(_update_paddle_event_state(state, "paddle:1", 100, line, 0.02))
+        catch = _update_paddle_event_state(state, "paddle:1", 200, line, 0.03)
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        self.assertEqual((catch.kind, catch.timestamp_ms), ("catch", 100))
+
+        self.assertIsNone(_update_paddle_event_state(state, "paddle:1", 300, line, 0.02))
+        self.assertIsNone(_update_paddle_event_state(state, "paddle:1", 400, line, 0.0))
+        exit_event = _update_paddle_event_state(state, "paddle:1", 500, line, -0.01)
+        self.assertIsNotNone(exit_event)
+        assert exit_event is not None
+        self.assertEqual((exit_event.kind, exit_event.timestamp_ms), ("exit", 400))
+
+    def test_event_hold_controls_active_overlay_window(self) -> None:
+        event = PaddleEvent(
+            kind="catch",
+            timestamp_ms=1000,
+            instance_id="paddle:1",
+            line=(0, 0, 10, 10),
+            confidence=0.9,
+        )
+        options = ExportOptions(event_hold_seconds=1.5)
+
+        self.assertEqual(_active_paddle_events([event], 1000, options), (event,))
+        self.assertEqual(_active_paddle_events([event], 2499, options), (event,))
+        self.assertEqual(_active_paddle_events([event], 2500, options), ())
+
     def test_export_can_hide_angles_without_removing_angle_measurements(self) -> None:
         records = [
             {
