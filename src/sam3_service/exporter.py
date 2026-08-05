@@ -34,6 +34,9 @@ PADDLE_EVENT_CONFIRM_SAMPLES = 2
 PADDLE_CATCH_DEPTH_RATIO = 0.015
 PADDLE_EXIT_DEPTH_RATIO = 0.005
 PADDLE_EVENT_DEDUPE_MS = 250
+PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
+PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
+PADDLE_EVENT_ANGLE_COLOR = (255, 255, 255, 255)
 
 
 @dataclass(frozen=True)
@@ -272,8 +275,7 @@ def export_centerline_video(
     freeze_moments = _freeze_moments(events, fps, frame_count)
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
-    freeze_extra_frames = freeze_frame_count - 1
-    output_frame_count = frame_count + freeze_extra_frames * len(freeze_moments)
+    output_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
     _report_progress(progress, "rendering", 15, "Rendering overlay frames")
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
@@ -302,18 +304,27 @@ def export_centerline_video(
             export_options=export_options,
             timestamp_ms=timestamp_ms,
             spm_estimator=spm_estimator,
-            paddle_events=freeze_moment.events if freeze_moment is not None else (),
+            paddle_events=(),
         )
-        output_frame_path = frames_dir / f"{output_frame_index:06d}.png"
-        _write_png_rgba(output_frame_path, width, height, image)
-        output_frame_index += 1
         if freeze_moment is not None:
-            for _ in range(freeze_extra_frames):
+            event_image = bytearray(image)
+            for event in freeze_moment.events:
+                _draw_paddle_event_label(
+                    event_image, width, height, event, export_options
+                )
+            event_frame_path = frames_dir / f"{output_frame_index:06d}.png"
+            _write_png_rgba(event_frame_path, width, height, event_image)
+            output_frame_index += 1
+            for _ in range(freeze_frame_count - 1):
                 shutil.copyfile(
-                    output_frame_path,
+                    event_frame_path,
                     frames_dir / f"{output_frame_index:06d}.png",
                 )
                 output_frame_index += 1
+        _write_png_rgba(
+            frames_dir / f"{output_frame_index:06d}.png", width, height, image
+        )
+        output_frame_index += 1
         if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
             percent = 15 + 75 * (frame_index + 1) / frame_count
             _report_progress(
@@ -325,11 +336,11 @@ def export_centerline_video(
 
     has_audio = bool(freeze_moments) and _has_audio_stream(video_path)
     filter_parts = [
-        _freeze_video_filter(freeze_moments, freeze_extra_frames, fps, frame_count)
+        _freeze_video_filter(freeze_moments, freeze_frame_count, fps, frame_count)
     ]
     if has_audio:
         filter_parts.append(
-            _freeze_audio_filter(freeze_moments, freeze_extra_frames, fps, frame_count)
+            _freeze_audio_filter(freeze_moments, freeze_frame_count, fps, frame_count)
         )
     filter_parts.append("[base][1:v]overlay=0:0:format=auto:shortest=1[ov]")
     filter_complex = ";".join(filter_parts)
@@ -426,11 +437,11 @@ def _freeze_moments(
 
 def _freeze_video_filter(
     moments: tuple[FreezeMoment, ...],
-    extra_frames: int,
+    freeze_frames: int,
     fps: float,
     frame_count: int,
 ) -> str:
-    if not moments or extra_frames <= 0:
+    if not moments or freeze_frames <= 0:
         return "[0:v]null[base]"
     segments = _freeze_segments(moments, frame_count)
     branches = "".join(f"[vpart{index}]" for index in range(len(segments)))
@@ -440,14 +451,13 @@ def _freeze_video_filter(
             f"[0:v]fps=fps={fps:.6f}:start_time=0,"
             f"split={len(segments)}{branches}"
         )
-    hold_frames = extra_frames + 1
-    hold_seconds = hold_frames / fps
-    extra_seconds = extra_frames / fps
+    hold_seconds = freeze_frames / fps
+    padding_seconds = max(0, freeze_frames - 1) / fps
     for index, (kind, start_frame, end_frame) in enumerate(segments):
         if kind == "freeze":
             graph.append(
                 f"[vpart{index}]trim=start_frame={start_frame}:end_frame={end_frame},"
-                f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={extra_seconds:.9f},"
+                f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={padding_seconds:.9f},"
                 f"trim=duration={hold_seconds:.9f}[vseg{index}]"
             )
         else:
@@ -465,7 +475,7 @@ def _freeze_video_filter(
 
 def _freeze_audio_filter(
     moments: tuple[FreezeMoment, ...],
-    extra_frames: int,
+    freeze_frames: int,
     fps: float,
     frame_count: int,
 ) -> str:
@@ -474,7 +484,7 @@ def _freeze_audio_filter(
     graph = ["[0:a]anull[apart0]"]
     if len(segments) > 1:
         graph[0] = f"[0:a]asplit={len(segments)}{branches}"
-    hold_seconds = (extra_frames + 1) / fps
+    hold_seconds = freeze_frames / fps
     for index, (kind, start_frame, end_frame) in enumerate(segments):
         start_seconds = start_frame / fps
         end_seconds = end_frame / fps
@@ -506,7 +516,7 @@ def _freeze_segments(
         if cursor < frame_index:
             segments.append(("normal", cursor, frame_index))
         segments.append(("freeze", frame_index, frame_index + 1))
-        cursor = frame_index + 1
+        cursor = frame_index
     if cursor < frame_count:
         segments.append(("normal", cursor, frame_count))
     return tuple(segments)
@@ -1211,6 +1221,24 @@ def _draw_paddle_event_label(
     event: PaddleEvent,
     options: ExportOptions,
 ) -> None:
+    line_width = max(3, round(min(width, height) * 0.007))
+    _draw_line(
+        image,
+        width,
+        height,
+        event.line,
+        PADDLE_EVENT_PADDLE_COLOR,
+        line_width,
+    )
+    if event.reference_line is not None:
+        _draw_line(
+            image,
+            width,
+            height,
+            event.reference_line,
+            PADDLE_EVENT_REFERENCE_COLOR,
+            line_width,
+        )
     if event.reference_line is not None and event.degree is not None:
         vertex = _line_intersection(event.line, event.reference_line)
         if vertex is not None and (
@@ -1226,21 +1254,37 @@ def _draw_paddle_event_label(
     offset = max(28, min(width, height) * 0.06)
     label_x = center_x + (-dy / length) * offset
     label_y = center_y + (dx / length) * offset
-    color = (74, 222, 128, 255) if event.kind == "catch" else (255, 82, 96, 255)
     _draw_line(
         image,
         width,
         height,
         (center_x, center_y, label_x, label_y),
-        color,
+        PADDLE_EVENT_PADDLE_COLOR,
         max(2, round(min(width, height) * 0.004)),
     )
     text = _event_label_text(event)
+    if not text:
+        return
     if _draw_paddle_event_label_with_pillow(
-        image, width, height, label_x, label_y, text, color, options
+        image,
+        width,
+        height,
+        label_x,
+        label_y,
+        text,
+        PADDLE_EVENT_ANGLE_COLOR,
+        options,
     ):
         return
-    _draw_small_degree_label(image, width, height, label_x, label_y, text, color)
+    _draw_small_degree_label(
+        image,
+        width,
+        height,
+        label_x,
+        label_y,
+        text,
+        PADDLE_EVENT_ANGLE_COLOR,
+    )
 
 
 def _draw_event_angle_marker(
@@ -1269,9 +1313,11 @@ def _draw_event_angle_marker(
     end_angle = math.atan2(paddle_vector[1], paddle_vector[0])
     delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
     radius = max(24.0, min(width, height) * 0.065)
-    color = (74, 222, 128, 255) if event.kind == "catch" else (255, 82, 96, 255)
     line_width = max(2, round(min(width, height) * 0.004))
-    for vector in (reference_vector, paddle_vector):
+    for vector, color in (
+        (reference_vector, PADDLE_EVENT_REFERENCE_COLOR),
+        (paddle_vector, PADDLE_EVENT_PADDLE_COLOR),
+    ):
         _draw_line(
             image,
             width,
@@ -1301,7 +1347,7 @@ def _draw_event_angle_marker(
             width,
             height,
             (previous[0], previous[1], point[0], point[1]),
-            color,
+            PADDLE_EVENT_ANGLE_COLOR,
             line_width,
         )
         previous = point
@@ -1311,15 +1357,30 @@ def _draw_event_angle_marker(
     label_y = vertex[1] + math.sin(middle_angle) * label_radius
     text = _event_label_text(event)
     if not _draw_paddle_event_label_with_pillow(
-        image, width, height, label_x, label_y, text, color, options
+        image,
+        width,
+        height,
+        label_x,
+        label_y,
+        text,
+        PADDLE_EVENT_ANGLE_COLOR,
+        options,
     ):
-        _draw_small_degree_label(image, width, height, label_x, label_y, text, color)
+        _draw_small_degree_label(
+            image,
+            width,
+            height,
+            label_x,
+            label_y,
+            text,
+            PADDLE_EVENT_ANGLE_COLOR,
+        )
 
 
 def _event_label_text(event: PaddleEvent) -> str:
     if event.degree is None:
-        return event.kind.upper()
-    return f"{event.kind.upper()} {round(event.degree)}°"
+        return ""
+    return f"{round(event.degree)}°"
 
 
 def _line_intersection(first: Line, second: Line) -> tuple[float, float] | None:
@@ -1346,6 +1407,8 @@ def _draw_paddle_event_label_with_pillow(
     color: Color,
     options: ExportOptions,
 ) -> bool:
+    if not text:
+        return False
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:

@@ -91,7 +91,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([moment.frame_index for moment in moments], [30, 54])
         self.assertEqual(moments[0].events, (first, second))
 
-    def test_freeze_filters_replace_event_frame_with_held_segment(self) -> None:
+    def test_freeze_filters_insert_pause_before_resuming_event_frame(self) -> None:
         event = PaddleEvent(
             kind="catch",
             timestamp_ms=1000,
@@ -101,15 +101,15 @@ class ExporterTest(unittest.TestCase):
         )
         moments = _freeze_moments([event], 30, 90)
 
-        video_filter = _freeze_video_filter(moments, 44, 30, 90)
-        audio_filter = _freeze_audio_filter(moments, 44, 30, 90)
+        video_filter = _freeze_video_filter(moments, 45, 30, 90)
+        audio_filter = _freeze_audio_filter(moments, 45, 30, 90)
 
         self.assertEqual(
             _freeze_segments(moments, 90),
             (
                 ("normal", 0, 30),
                 ("freeze", 30, 31),
-                ("normal", 31, 90),
+                ("normal", 30, 90),
             ),
         )
         self.assertIn("trim=start_frame=30:end_frame=31", video_filter)
@@ -138,7 +138,9 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(event.line, paddle)
         self.assertEqual(event.reference_line, waterline)
         self.assertEqual(event.degree, 90)
-        self.assertEqual(_event_label_text(event), "CATCH 90°")
+        self.assertEqual(_event_label_text(event), "90°")
+        self.assertNotIn("CATCH", _event_label_text(event))
+        self.assertNotIn("EXIT", _event_label_text(event))
         self.assertEqual(_line_intersection(paddle, waterline), (50.0, 50.0))
 
     def test_export_can_hide_angles_without_removing_angle_measurements(self) -> None:
