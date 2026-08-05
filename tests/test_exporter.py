@@ -30,11 +30,9 @@ from sam3_service.exporter import (
     _estimate_paddle_direction,
     _event_phase_allowed,
     _event_label_text,
-    _final_frame_guard_filter,
     _freeze_audio_filter,
     _freeze_moments,
     _freeze_segments,
-    _freeze_video_filter,
     _line_intersection,
     _load_frames_by_index,
     _metric_label_top,
@@ -45,6 +43,7 @@ from sam3_service.exporter import (
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
+    _resolved_export_frame_count,
     _selection_rect_at,
     _spm_label_top,
     _update_directed_paddle_state,
@@ -92,6 +91,16 @@ def _axis_track(angles: list[float]) -> list[_TimedPaddleObservation]:
 
 
 class ExporterTest(unittest.TestCase):
+    def test_export_frame_count_prefers_decoded_count_over_rounded_duration(self) -> None:
+        metadata = {"frame_count": 563, "duration_ms": 18767}
+
+        self.assertEqual(_resolved_export_frame_count(metadata, 30.0), 563)
+
+    def test_export_frame_count_uses_rounded_duration_only_as_fallback(self) -> None:
+        metadata = {"frame_count": 0, "duration_ms": 18767}
+
+        self.assertEqual(_resolved_export_frame_count(metadata, 30.0), 563)
+
     def test_loads_export_records_by_exact_source_frame_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             chunk_path = Path(directory) / "chunk.json"
@@ -503,7 +512,6 @@ class ExporterTest(unittest.TestCase):
         )
         moments = _freeze_moments([event], 30, 90)
 
-        video_filter = _freeze_video_filter(moments, 45, 30, 90)
         audio_filter = _freeze_audio_filter(moments, 45, 30, 90)
 
         self.assertEqual(
@@ -514,18 +522,8 @@ class ExporterTest(unittest.TestCase):
                 ("normal", 30, 90),
             ),
         )
-        self.assertIn("trim=start_frame=30:end_frame=31", video_filter)
-        self.assertIn("tpad=stop_mode=clone:stop_duration=1.466666667", video_filter)
-        self.assertIn("trim=duration=1.500000000", video_filter)
         self.assertIn("atrim=start=1.000000000:end=1.033333333", audio_filter)
         self.assertIn("volume=0", audio_filter)
-
-    def test_final_frame_guard_clones_terminal_frame_for_quicktime(self) -> None:
-        self.assertEqual(
-            _final_frame_guard_filter(2, 30.0, 565),
-            "[composited]tpad=stop_mode=clone:stop_duration=0.066666667,"
-            "trim=end_frame=565[v]",
-        )
 
     def test_event_angle_uses_first_crossing_geometry(self) -> None:
         state = _PaddleEventState(immersed=False)

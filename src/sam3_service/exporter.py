@@ -5,12 +5,11 @@ import math
 import os
 import shutil
 import subprocess
-import zlib
 from bisect import bisect_left
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Iterator
 
 from .errors import ServiceError
 from .media import probe_video
@@ -287,18 +286,13 @@ def export_centerline_video(
     width = int(video_metadata["width"] or manifest_width)
     height = int(video_metadata["height"] or manifest_height)
     fps = float(video_metadata["fps"] or manifest_fps or 30)
-    frame_count = max(
-        int(video_metadata["frame_count"] or 0),
-        math.ceil(float(video_metadata["duration_ms"] or 0) * fps / 1000),
-    )
+    frame_count = _resolved_export_frame_count(video_metadata, fps)
     if width <= 0 or height <= 0 or frame_count <= 0:
         raise ServiceError("EXPORT_FAILED", "Result manifest has invalid video metadata.")
 
     export_options = _normalize_export_options(options, manifest, width, height)
     if temporary_dir.exists():
         shutil.rmtree(temporary_dir)
-    frames_dir = temporary_dir / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_output = output_path.with_suffix(".tmp.mp4")
 
@@ -348,99 +342,38 @@ def export_centerline_video(
     freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
     content_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
     output_frame_count = content_frame_count + EXPORT_END_GUARD_FRAMES
-    _report_progress(progress, "rendering", 15, "Rendering overlay frames")
-    result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
-    spm_estimator = SpmEstimator()
-    output_frame_index = 0
-    for frame_index in range(frame_count):
-        image = _transparent_image(width, height)
-        timestamp_ms = round(frame_index * 1000 / fps)
-        freeze_moment = freeze_by_frame.get(frame_index)
-        records = (
-            frames_by_index.get(frame_index, [])
-            if frames_by_index is not None
-            else _records_for_timestamp(
-                frames, frame_timestamps, timestamp_ms, result_tolerance_ms
-            )
-        )
-        scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
-        scaled_records = [
-            record
-            for record in scaled_records
-            if _record_selected_for_export(
-                record, export_options, width, height, timestamp_ms
-            )
-        ]
-        _draw_frame_overlay(
-            image,
-            width,
-            height,
-            scaled_records,
-            colors,
-            export_options=export_options,
-            timestamp_ms=timestamp_ms,
-            spm_estimator=spm_estimator,
-            paddle_events=(),
-        )
-        if freeze_moment is not None:
-            event_image = bytearray(image)
-            for event in freeze_moment.events:
-                _draw_paddle_event_label(
-                    event_image, width, height, event, export_options
-                )
-            event_frame_path = frames_dir / f"{output_frame_index:06d}.png"
-            _write_png_rgba(event_frame_path, width, height, event_image)
-            output_frame_index += 1
-            for _ in range(freeze_frame_count - 1):
-                shutil.copyfile(
-                    event_frame_path,
-                    frames_dir / f"{output_frame_index:06d}.png",
-                )
-                output_frame_index += 1
-        _write_png_rgba(
-            frames_dir / f"{output_frame_index:06d}.png", width, height, image
-        )
-        output_frame_index += 1
-        if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
-            percent = 15 + 75 * (frame_index + 1) / frame_count
-            _report_progress(
-                progress,
-                "rendering",
-                percent,
-                f"Rendering frame {frame_index + 1} of {frame_count}",
-            )
-
     has_audio = bool(freeze_moments) and _has_audio_stream(video_path)
-    filter_parts = [
-        _freeze_video_filter(freeze_moments, freeze_frame_count, fps, frame_count)
-    ]
+    filter_parts: list[str] = []
     if has_audio:
         filter_parts.append(
-            _freeze_audio_filter(freeze_moments, freeze_frame_count, fps, frame_count)
+            _freeze_audio_filter(
+                freeze_moments,
+                freeze_frame_count,
+                fps,
+                frame_count,
+                input_label="1:a",
+            )
         )
-    filter_parts.append("[base][1:v]overlay=0:0:format=auto:shortest=1[composited]")
-    filter_parts.append(
-        _final_frame_guard_filter(
-            EXPORT_END_GUARD_FRAMES,
-            fps,
-            output_frame_count,
-        )
-    )
-    filter_complex = ";".join(filter_parts)
-
+    filter_parts.append("[0:v]null[v]")
     command = [
         "ffmpeg",
         "-y",
         "-v",
         "error",
-        "-i",
-        str(video_path),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-video_size",
+        f"{width}x{height}",
         "-framerate",
         f"{fps:.6f}",
         "-i",
-        str(frames_dir / "%06d.png"),
+        "pipe:0",
+        "-i",
+        str(video_path),
         "-filter_complex",
-        filter_complex,
+        ";".join(filter_parts),
         "-map",
         "[v]",
         "-frames:v",
@@ -457,16 +390,113 @@ def export_centerline_video(
     if has_audio:
         command.extend(["-map", "[a]", "-c:a", "aac"])
     else:
-        command.extend(["-map", "0:a?", "-c:a", "copy"])
+        command.extend(["-map", "1:a?", "-c:a", "copy"])
     command.extend(["-movflags", "+faststart", str(temporary_output)])
-    _report_progress(progress, "encoding", 92, "Encoding MP4")
+
+    _report_progress(progress, "rendering", 15, "Rendering overlay frames")
+    result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
+    spm_estimator = SpmEstimator()
+    output_frame_index = 0
+    decoded_frame_count = 0
+    final_image: bytearray | None = None
+    encoder = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    assert encoder.stdin is not None
+    assert encoder.stderr is not None
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=3600)
+        for frame_index, image in enumerate(
+            _decode_rgba_video_frames(video_path, width, height, fps, frame_count)
+        ):
+            decoded_frame_count += 1
+            timestamp_ms = round(frame_index * 1000 / fps)
+            freeze_moment = freeze_by_frame.get(frame_index)
+            records = (
+                frames_by_index.get(frame_index, [])
+                if frames_by_index is not None
+                else _records_for_timestamp(
+                    frames, frame_timestamps, timestamp_ms, result_tolerance_ms
+                )
+            )
+            scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
+            scaled_records = [
+                record
+                for record in scaled_records
+                if _record_selected_for_export(
+                    record, export_options, width, height, timestamp_ms
+                )
+            ]
+            _draw_frame_overlay(
+                image,
+                width,
+                height,
+                scaled_records,
+                colors,
+                export_options=export_options,
+                timestamp_ms=timestamp_ms,
+                spm_estimator=spm_estimator,
+                paddle_events=(),
+            )
+            if freeze_moment is not None:
+                event_image = bytearray(image)
+                for event in freeze_moment.events:
+                    _draw_paddle_event_label(
+                        event_image, width, height, event, export_options
+                    )
+                for _ in range(freeze_frame_count):
+                    encoder.stdin.write(event_image)
+                    output_frame_index += 1
+            encoder.stdin.write(image)
+            output_frame_index += 1
+            final_image = image
+            if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
+                percent = 15 + 75 * (frame_index + 1) / frame_count
+                _report_progress(
+                    progress,
+                    "rendering",
+                    percent,
+                    f"Rendering frame {frame_index + 1} of {frame_count}",
+                )
+
+        if decoded_frame_count != frame_count or final_image is None:
+            raise ServiceError(
+                "EXPORT_FAILED",
+                f"Decoded {decoded_frame_count} video frames; expected {frame_count}.",
+                retryable=True,
+                status_code=500,
+            )
+        for _ in range(EXPORT_END_GUARD_FRAMES):
+            encoder.stdin.write(final_image)
+            output_frame_index += 1
+        if output_frame_index != output_frame_count:
+            raise ServiceError(
+                "EXPORT_FAILED",
+                f"Rendered {output_frame_index} frames; expected {output_frame_count}.",
+                retryable=True,
+                status_code=500,
+            )
+        _report_progress(progress, "encoding", 92, "Finalizing MP4")
+        encoder.stdin.close()
+        detail = encoder.stderr.read().decode("utf-8", errors="replace")[-1000:]
+        return_code = encoder.wait(timeout=3600)
+        if return_code != 0:
+            raise ServiceError(
+                "EXPORT_FAILED",
+                f"Video encoding failed: {detail}",
+                retryable=True,
+                status_code=500,
+            )
         temporary_output.replace(output_path)
         _report_progress(progress, "finalizing", 99, "Finalizing export")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except ServiceError:
         temporary_output.unlink(missing_ok=True)
-        detail = exc.stderr[-1000:] if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise
+    except (BrokenPipeError, subprocess.TimeoutExpired) as exc:
+        temporary_output.unlink(missing_ok=True)
+        detail = encoder.stderr.read().decode("utf-8", errors="replace")[-1000:]
         raise ServiceError(
             "EXPORT_FAILED",
             f"Video export failed: {detail}",
@@ -474,9 +504,86 @@ def export_centerline_video(
             status_code=500,
         ) from exc
     finally:
+        if encoder.poll() is None:
+            encoder.kill()
+            encoder.wait()
         shutil.rmtree(temporary_dir, ignore_errors=True)
 
     return output_path
+
+
+def _resolved_export_frame_count(video_metadata: dict[str, Any], fps: float) -> int:
+    detected_frame_count = int(video_metadata.get("frame_count") or 0)
+    if detected_frame_count > 0:
+        return detected_frame_count
+    duration_ms = float(video_metadata.get("duration_ms") or 0)
+    return max(0, round(duration_ms * fps / 1000))
+
+
+def _decode_rgba_video_frames(
+    video_path: Path,
+    width: int,
+    height: int,
+    fps: float,
+    frame_count: int,
+) -> Iterator[bytearray]:
+    frame_size = width * height * 4
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(video_path),
+        "-vf",
+        f"fps=fps={fps:.6f}:start_time=0",
+        "-frames:v",
+        str(frame_count),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "pipe:1",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    try:
+        for frame_index in range(frame_count):
+            chunks: list[bytes] = []
+            remaining = frame_size
+            while remaining > 0:
+                chunk = process.stdout.read(remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if remaining:
+                detail = process.stderr.read().decode("utf-8", errors="replace")[-1000:]
+                raise ServiceError(
+                    "EXPORT_FAILED",
+                    f"Video decoding stopped at frame {frame_index}: {detail}",
+                    retryable=True,
+                    status_code=500,
+                )
+            yield bytearray(b"".join(chunks))
+        process.stdout.close()
+        detail = process.stderr.read().decode("utf-8", errors="replace")[-1000:]
+        return_code = process.wait(timeout=60)
+        if return_code != 0:
+            raise ServiceError(
+                "EXPORT_FAILED",
+                f"Video decoding failed: {detail}",
+                retryable=True,
+                status_code=500,
+            )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 def _report_progress(
@@ -531,69 +638,18 @@ def _freeze_moments(
     )
 
 
-def _freeze_video_filter(
-    moments: tuple[FreezeMoment, ...],
-    freeze_frames: int,
-    fps: float,
-    frame_count: int,
-) -> str:
-    if not moments or freeze_frames <= 0:
-        return "[0:v]null[base]"
-    segments = _freeze_segments(moments, frame_count)
-    branches = "".join(f"[vpart{index}]" for index in range(len(segments)))
-    graph = [f"[0:v]fps=fps={fps:.6f}:start_time=0[vpart0]"]
-    if len(segments) > 1:
-        graph[0] = (
-            f"[0:v]fps=fps={fps:.6f}:start_time=0,"
-            f"split={len(segments)}{branches}"
-        )
-    hold_seconds = freeze_frames / fps
-    padding_seconds = max(0, freeze_frames - 1) / fps
-    for index, (kind, start_frame, end_frame) in enumerate(segments):
-        if kind == "freeze":
-            graph.append(
-                f"[vpart{index}]trim=start_frame={start_frame}:end_frame={end_frame},"
-                f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={padding_seconds:.9f},"
-                f"trim=duration={hold_seconds:.9f}[vseg{index}]"
-            )
-        else:
-            graph.append(
-                f"[vpart{index}]trim=start_frame={start_frame}:end_frame={end_frame},"
-                f"setpts=PTS-STARTPTS[vseg{index}]"
-            )
-    if len(segments) == 1:
-        graph.append("[vseg0]null[base]")
-    else:
-        inputs = "".join(f"[vseg{index}]" for index in range(len(segments)))
-        graph.append(f"{inputs}concat=n={len(segments)}:v=1:a=0[base]")
-    return ";".join(graph)
-
-
-def _final_frame_guard_filter(
-    guard_frames: int,
-    fps: float,
-    output_frame_count: int,
-) -> str:
-    if guard_frames <= 0:
-        return "[composited]null[v]"
-    padding_seconds = guard_frames / max(fps, 1.0)
-    return (
-        f"[composited]tpad=stop_mode=clone:stop_duration={padding_seconds:.9f},"
-        f"trim=end_frame={output_frame_count}[v]"
-    )
-
-
 def _freeze_audio_filter(
     moments: tuple[FreezeMoment, ...],
     freeze_frames: int,
     fps: float,
     frame_count: int,
+    input_label: str = "0:a",
 ) -> str:
     segments = _freeze_segments(moments, frame_count)
     branches = "".join(f"[apart{index}]" for index in range(len(segments)))
-    graph = ["[0:a]anull[apart0]"]
+    graph = [f"[{input_label}]anull[apart0]"]
     if len(segments) > 1:
-        graph[0] = f"[0:a]asplit={len(segments)}{branches}"
+        graph[0] = f"[{input_label}]asplit={len(segments)}{branches}"
     hold_seconds = freeze_frames / fps
     for index, (kind, start_frame, end_frame) in enumerate(segments):
         start_seconds = start_frame / fps
@@ -2860,10 +2916,6 @@ def _fill_rect(
             _blend_pixel(image, width, x, y, color)
 
 
-def _transparent_image(width: int, height: int) -> bytearray:
-    return bytearray(width * height * 4)
-
-
 def _blend_pixel(image: bytearray, width: int, x: int, y: int, color: Color) -> None:
     if color[3] <= 0:
         return
@@ -2891,33 +2943,6 @@ def _blend_overlay(image: bytearray, width: int, overlay: bytes) -> None:
         )
 
 
-def _write_png_rgba(path: Path, width: int, height: int, pixels: bytearray) -> None:
-    raw = bytearray()
-    stride = width * 4
-    for y in range(height):
-        raw.append(0)
-        start = y * stride
-        raw.extend(pixels[start : start + stride])
-    payload = b"".join(
-        [
-            b"\x89PNG\r\n\x1a\n",
-            _png_chunk(
-                b"IHDR",
-                width.to_bytes(4, "big")
-                + height.to_bytes(4, "big")
-                + b"\x08\x06\x00\x00\x00",
-            ),
-            _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=1)),
-            _png_chunk(b"IEND", b""),
-        ]
-    )
-    path.write_bytes(payload)
-
-
-def _png_chunk(kind: bytes, data: bytes) -> bytes:
-    checksum = zlib.crc32(kind)
-    checksum = zlib.crc32(data, checksum)
-    return len(data).to_bytes(4, "big") + kind + data + checksum.to_bytes(4, "big")
 
 
 def _parse_hex(value: str) -> Color:
