@@ -462,8 +462,10 @@ PaddleEvent
   confidence
 ```
 
-The freeze frame may continue to display the existing acute angle unless the
-product explicitly opts to display the directed phase angle.
+The freeze frame displays `phase_angle` in the full directed `[0°, 360°)` range.
+Catch angle arcs and labels are red; exit angle arcs and labels are green. The
+legacy acute `degree` remains available for compatibility and non-event angle
+metrics.
 
 ## 17. Confidence
 

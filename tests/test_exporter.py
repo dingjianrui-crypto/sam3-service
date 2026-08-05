@@ -36,6 +36,7 @@ from sam3_service.exporter import (
     _maximum_target_count_in_selection,
     _paddle_water_depth_ratio,
     _paddle_rotation_deltas,
+    _paddle_event_angle_color,
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
@@ -139,6 +140,26 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([event.active_blade for event in events], [1, 1])
         self.assertEqual(events[0].travel_direction, "right")
         self.assertAlmostEqual(events[0].phase_angle or 0, 45)
+        self.assertEqual(_event_label_text(events[0]), "45°")
+        self.assertEqual(_event_label_text(events[1]), "135°")
+        self.assertEqual(_paddle_event_angle_color(events[0]), (255, 82, 96, 255))
+        self.assertEqual(_paddle_event_angle_color(events[1]), (46, 204, 113, 255))
+
+    def test_event_label_prefers_directed_phase_angle_over_acute_angle(self) -> None:
+        event = PaddleEvent(
+            kind="catch",
+            timestamp_ms=100,
+            instance_id="paddle:physical:1",
+            line=(20, 20, 80, 80),
+            confidence=1.0,
+            degree=45,
+            phase_angle=315,
+            active_blade=1,
+            rotation_direction="clockwise",
+            travel_direction="right",
+        )
+
+        self.assertEqual(_event_label_text(event), "315°")
 
     def test_opposite_blade_is_ignored_and_next_360_cycle_resets_catch(self) -> None:
         state = _PaddleEventState(

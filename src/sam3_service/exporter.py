@@ -48,7 +48,8 @@ PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
 PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
 PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
-PADDLE_EVENT_ANGLE_COLOR = (255, 255, 255, 255)
+PADDLE_EVENT_CATCH_ANGLE_COLOR = (255, 82, 96, 255)
+PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
 
 
 @dataclass(frozen=True)
@@ -2040,6 +2041,7 @@ def _draw_paddle_event_label(
     event: PaddleEvent,
     options: ExportOptions,
 ) -> None:
+    angle_color = _paddle_event_angle_color(event)
     line_width = max(3, round(min(width, height) * 0.007))
     _draw_line(
         image,
@@ -2058,7 +2060,7 @@ def _draw_paddle_event_label(
             PADDLE_EVENT_REFERENCE_COLOR,
             line_width,
         )
-    if event.reference_line is not None and event.degree is not None:
+    if event.reference_line is not None and _event_display_angle(event) is not None:
         vertex = _line_intersection(event.line, event.reference_line)
         if vertex is not None and (
             -width * 0.1 <= vertex[0] <= width * 1.1
@@ -2091,7 +2093,7 @@ def _draw_paddle_event_label(
         label_x,
         label_y,
         text,
-        PADDLE_EVENT_ANGLE_COLOR,
+        angle_color,
         options,
     ):
         return
@@ -2102,7 +2104,7 @@ def _draw_paddle_event_label(
         label_x,
         label_y,
         text,
-        PADDLE_EVENT_ANGLE_COLOR,
+        angle_color,
     )
 
 
@@ -2115,22 +2117,37 @@ def _draw_event_angle_marker(
     options: ExportOptions,
 ) -> None:
     assert event.reference_line is not None
+    angle_color = _paddle_event_angle_color(event)
     reference_vector = _normalize(
         (
             event.reference_line[2] - event.reference_line[0],
             event.reference_line[3] - event.reference_line[1],
         )
     )
-    paddle_vector = _normalize(
-        (event.line[2] - event.line[0], event.line[3] - event.line[1])
-    )
+    center = _line_center(event.line)
+    if event.active_blade == 0:
+        paddle_vector = _normalize((event.line[0] - center[0], event.line[1] - center[1]))
+    elif event.active_blade == 1:
+        paddle_vector = _normalize((event.line[2] - center[0], event.line[3] - center[1]))
+    else:
+        paddle_vector = _normalize(
+            (event.line[2] - event.line[0], event.line[3] - event.line[1])
+        )
     if reference_vector is None or paddle_vector is None:
         return
-    if _dot(reference_vector, paddle_vector) < 0:
+    if event.travel_direction == "right" and reference_vector[0] < 0:
+        reference_vector = (-reference_vector[0], -reference_vector[1])
+    elif event.travel_direction == "left" and reference_vector[0] > 0:
+        reference_vector = (-reference_vector[0], -reference_vector[1])
+    elif event.phase_angle is None and _dot(reference_vector, paddle_vector) < 0:
         paddle_vector = (-paddle_vector[0], -paddle_vector[1])
     start_angle = math.atan2(reference_vector[1], reference_vector[0])
-    end_angle = math.atan2(paddle_vector[1], paddle_vector[0])
-    delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
+    if event.phase_angle is not None and event.travel_direction in {"left", "right"}:
+        phase_radians = math.radians(event.phase_angle % 360)
+        delta = phase_radians if event.travel_direction == "right" else -phase_radians
+    else:
+        end_angle = math.atan2(paddle_vector[1], paddle_vector[0])
+        delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
     radius = max(24.0, min(width, height) * 0.065)
     line_width = max(2, round(min(width, height) * 0.004))
     for vector, color in (
@@ -2166,7 +2183,7 @@ def _draw_event_angle_marker(
             width,
             height,
             (previous[0], previous[1], point[0], point[1]),
-            PADDLE_EVENT_ANGLE_COLOR,
+            angle_color,
             line_width,
         )
         previous = point
@@ -2182,7 +2199,7 @@ def _draw_event_angle_marker(
         label_x,
         label_y,
         text,
-        PADDLE_EVENT_ANGLE_COLOR,
+        angle_color,
         options,
     ):
         _draw_small_degree_label(
@@ -2192,14 +2209,25 @@ def _draw_event_angle_marker(
             label_x,
             label_y,
             text,
-            PADDLE_EVENT_ANGLE_COLOR,
+            angle_color,
         )
 
 
+def _event_display_angle(event: PaddleEvent) -> float | None:
+    return event.phase_angle if event.phase_angle is not None else event.degree
+
+
 def _event_label_text(event: PaddleEvent) -> str:
-    if event.degree is None:
+    angle = _event_display_angle(event)
+    if angle is None:
         return ""
-    return f"{round(event.degree)}°"
+    return f"{round(angle) % 360}°"
+
+
+def _paddle_event_angle_color(event: PaddleEvent) -> Color:
+    if event.kind == "catch":
+        return PADDLE_EVENT_CATCH_ANGLE_COLOR
+    return PADDLE_EVENT_EXIT_ANGLE_COLOR
 
 
 def _line_intersection(first: Line, second: Line) -> tuple[float, float] | None:
