@@ -46,6 +46,7 @@ PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
+EXPORT_END_GUARD_FRAMES = 2
 PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
 PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
 PADDLE_EVENT_CATCH_ANGLE_COLOR = (255, 82, 96, 255)
@@ -345,7 +346,8 @@ def export_centerline_video(
     )
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
-    output_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
+    content_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
+    output_frame_count = content_frame_count + EXPORT_END_GUARD_FRAMES
     _report_progress(progress, "rendering", 15, "Rendering overlay frames")
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
@@ -416,9 +418,15 @@ def export_centerline_video(
         filter_parts.append(
             _freeze_audio_filter(freeze_moments, freeze_frame_count, fps, frame_count)
         )
-    filter_parts.append("[base][1:v]overlay=0:0:format=auto:shortest=1[ov]")
+    filter_parts.append("[base][1:v]overlay=0:0:format=auto:shortest=1[composited]")
+    filter_parts.append(
+        _final_frame_guard_filter(
+            EXPORT_END_GUARD_FRAMES,
+            fps,
+            output_frame_count,
+        )
+    )
     filter_complex = ";".join(filter_parts)
-    filter_complex += ";[ov]null[v]"
 
     command = [
         "ffmpeg",
@@ -559,6 +567,20 @@ def _freeze_video_filter(
         inputs = "".join(f"[vseg{index}]" for index in range(len(segments)))
         graph.append(f"{inputs}concat=n={len(segments)}:v=1:a=0[base]")
     return ";".join(graph)
+
+
+def _final_frame_guard_filter(
+    guard_frames: int,
+    fps: float,
+    output_frame_count: int,
+) -> str:
+    if guard_frames <= 0:
+        return "[composited]null[v]"
+    padding_seconds = guard_frames / max(fps, 1.0)
+    return (
+        f"[composited]tpad=stop_mode=clone:stop_duration={padding_seconds:.9f},"
+        f"trim=end_frame={output_frame_count}[v]"
+    )
 
 
 def _freeze_audio_filter(

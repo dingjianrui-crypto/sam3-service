@@ -30,6 +30,7 @@ from sam3_service.exporter import (
     _estimate_paddle_direction,
     _event_phase_allowed,
     _event_label_text,
+    _final_frame_guard_filter,
     _freeze_audio_filter,
     _freeze_moments,
     _freeze_segments,
@@ -518,6 +519,13 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("trim=duration=1.500000000", video_filter)
         self.assertIn("atrim=start=1.000000000:end=1.033333333", audio_filter)
         self.assertIn("volume=0", audio_filter)
+
+    def test_final_frame_guard_clones_terminal_frame_for_quicktime(self) -> None:
+        self.assertEqual(
+            _final_frame_guard_filter(2, 30.0, 565),
+            "[composited]tpad=stop_mode=clone:stop_duration=0.066666667,"
+            "trim=end_frame=565[v]",
+        )
 
     def test_event_angle_uses_first_crossing_geometry(self) -> None:
         state = _PaddleEventState(immersed=False)
