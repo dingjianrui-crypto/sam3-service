@@ -340,8 +340,6 @@ def export_centerline_video(
     )
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
-    content_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
-    output_frame_count = content_frame_count + EXPORT_END_GUARD_FRAMES
     has_audio = bool(freeze_moments) and _has_audio_stream(video_path)
     filter_parts: list[str] = []
     if has_audio:
@@ -376,8 +374,6 @@ def export_centerline_video(
         ";".join(filter_parts),
         "-map",
         "[v]",
-        "-frames:v",
-        str(output_frame_count),
         "-c:v",
         "libx264",
         "-preset",
@@ -409,7 +405,7 @@ def export_centerline_video(
     assert encoder.stderr is not None
     try:
         for frame_index, image in enumerate(
-            _decode_rgba_video_frames(video_path, width, height, fps, frame_count)
+            _decode_rgba_video_frames(video_path, width, height, fps)
         ):
             decoded_frame_count += 1
             timestamp_ms = round(frame_index * 1000 / fps)
@@ -461,23 +457,16 @@ def export_centerline_video(
                     f"Rendering frame {frame_index + 1} of {frame_count}",
                 )
 
-        if decoded_frame_count != frame_count or final_image is None:
+        if final_image is None:
             raise ServiceError(
                 "EXPORT_FAILED",
-                f"Decoded {decoded_frame_count} video frames; expected {frame_count}.",
+                "Video decoding produced no frames.",
                 retryable=True,
                 status_code=500,
             )
         for _ in range(EXPORT_END_GUARD_FRAMES):
             encoder.stdin.write(final_image)
             output_frame_index += 1
-        if output_frame_index != output_frame_count:
-            raise ServiceError(
-                "EXPORT_FAILED",
-                f"Rendered {output_frame_index} frames; expected {output_frame_count}.",
-                retryable=True,
-                status_code=500,
-            )
         _report_progress(progress, "encoding", 92, "Finalizing MP4")
         encoder.stdin.close()
         detail = encoder.stderr.read().decode("utf-8", errors="replace")[-1000:]
@@ -525,7 +514,6 @@ def _decode_rgba_video_frames(
     width: int,
     height: int,
     fps: float,
-    frame_count: int,
 ) -> Iterator[bytearray]:
     frame_size = width * height * 4
     command = [
@@ -536,8 +524,6 @@ def _decode_rgba_video_frames(
         str(video_path),
         "-vf",
         f"fps=fps={fps:.6f}:start_time=0",
-        "-frames:v",
-        str(frame_count),
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -552,7 +538,8 @@ def _decode_rgba_video_frames(
     assert process.stdout is not None
     assert process.stderr is not None
     try:
-        for frame_index in range(frame_count):
+        frame_index = 0
+        while True:
             chunks: list[bytes] = []
             remaining = frame_size
             while remaining > 0:
@@ -561,6 +548,8 @@ def _decode_rgba_video_frames(
                     break
                 chunks.append(chunk)
                 remaining -= len(chunk)
+            if remaining == frame_size:
+                break
             if remaining:
                 detail = process.stderr.read().decode("utf-8", errors="replace")[-1000:]
                 raise ServiceError(
@@ -570,6 +559,7 @@ def _decode_rgba_video_frames(
                     status_code=500,
                 )
             yield bytearray(b"".join(chunks))
+            frame_index += 1
         process.stdout.close()
         detail = process.stderr.read().decode("utf-8", errors="replace")[-1000:]
         return_code = process.wait(timeout=60)
