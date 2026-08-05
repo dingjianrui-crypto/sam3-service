@@ -476,6 +476,28 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([moment.frame_index for moment in moments], [30, 54])
         self.assertEqual(moments[0].events, (first, second))
 
+    def test_nearby_catch_and_exit_use_separate_freeze_moments(self) -> None:
+        catch = PaddleEvent(
+            kind="catch",
+            timestamp_ms=1000,
+            instance_id="paddle:1",
+            line=(0, 0, 10, 10),
+            confidence=0.9,
+        )
+        exit_event = PaddleEvent(
+            kind="exit",
+            timestamp_ms=1200,
+            instance_id="paddle:1",
+            line=(10, 0, 0, 10),
+            confidence=0.9,
+        )
+
+        moments = _freeze_moments([catch, exit_event], 30, 90)
+
+        self.assertEqual([moment.frame_index for moment in moments], [30, 36])
+        self.assertEqual(moments[0].events, (catch,))
+        self.assertEqual(moments[1].events, (exit_event,))
+
     def test_freeze_moment_respects_configured_metric_count(self) -> None:
         events = [
             PaddleEvent(

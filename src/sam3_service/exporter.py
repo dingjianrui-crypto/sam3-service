@@ -425,6 +425,10 @@ def export_centerline_video(
                     record, export_options, width, height, timestamp_ms
                 )
             ]
+            # Event geometry is backdated to the actual waterline crossing and can
+            # differ from the regular geometry stored for this source frame. Keep
+            # a clean copy so a held event frame does not show both line sets.
+            event_image = bytearray(image) if freeze_moment is not None else None
             _draw_frame_overlay(
                 image,
                 width,
@@ -437,7 +441,7 @@ def export_centerline_video(
                 paddle_events=(),
             )
             if freeze_moment is not None:
-                event_image = bytearray(image)
+                assert event_image is not None
                 for event in freeze_moment.events:
                     _draw_paddle_event_label(
                         event_image, width, height, event, export_options
@@ -598,6 +602,7 @@ def _freeze_moments(
     for event in sorted(events, key=lambda item: item.timestamp_ms):
         if (
             groups
+            and event.kind == groups[-1][0].kind
             and event.timestamp_ms - groups[-1][0].timestamp_ms
             <= PADDLE_EVENT_DEDUPE_MS
         ):
