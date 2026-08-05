@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 from unittest.mock import patch
 
@@ -11,14 +12,19 @@ from sam3_service.exporter import (
     SpmEstimator,
     _PaddleObservation,
     _PaddleEventState,
+    _TimedPaddleObservation,
+    _advance_directed_paddle_phase,
     _blade_waterline_overlaps,
     _catch_phase_allowed,
     _consolidate_paddle_observations,
     _dedupe_paddle_events,
+    _detect_paddle_events,
     _draw_frame_overlay,
     _degree_label_entries,
     _degree_labels,
     _degree_slots,
+    _directed_blade_angle,
+    _estimate_paddle_direction,
     _event_phase_allowed,
     _event_label_text,
     _freeze_audio_filter,
@@ -29,203 +35,244 @@ from sam3_service.exporter import (
     _metric_label_top,
     _maximum_target_count_in_selection,
     _paddle_water_depth_ratio,
+    _paddle_rotation_deltas,
     _record_line,
     _record_selected_for_export,
     _resolve_requested_track_ids,
     _selection_rect_at,
     _spm_label_top,
+    _update_directed_paddle_state,
     _update_paddle_event_state,
-    _update_paddle_phase,
-    _update_phase_aware_paddle_state,
 )
 
 
+def _rotating_observation(
+    angle: float,
+    *,
+    travel_direction: str = "right",
+) -> _PaddleObservation:
+    radians = math.radians(angle)
+    forward_x = 1.0 if travel_direction == "right" else -1.0
+    vector = (30 * math.cos(radians) * forward_x, 30 * math.sin(radians))
+    center = (50.0, 30.0)
+    return _PaddleObservation(
+        source_ids=("paddle:1",),
+        reference_id="boat:1",
+        line=(
+            center[0] - vector[0],
+            center[1] - vector[1],
+            center[0] + vector[0],
+            center[1] + vector[1],
+        ),
+        reference_line=(0.0, 50.0, 100.0, 50.0),
+    )
+
+
+def _axis_track(angles: list[float]) -> list[_TimedPaddleObservation]:
+    observations: list[_TimedPaddleObservation] = []
+    for index, angle in enumerate(angles):
+        radians = math.radians(angle)
+        vector = (30 * math.cos(radians), 30 * math.sin(radians))
+        observation = _PaddleObservation(
+            source_ids=("paddle:1",),
+            reference_id="boat:1",
+            line=(50 - vector[0], 30 - vector[1], 50 + vector[0], 30 + vector[1]),
+            reference_line=(0.0, 50.0, 100.0, 50.0),
+        )
+        observations.append(
+            _TimedPaddleObservation(index * 100, "paddle:physical:1", observation)
+        )
+    return observations
+
+
 class ExporterTest(unittest.TestCase):
-    def test_thick_band_overlap_detects_catch_despite_shortened_paddle(self) -> None:
-        state = _PaddleEventState(physical_id="paddle:physical:1")
-        reference = (0.0, 50.0, 100.0, 50.0)
-
-        first = _PaddleObservation(
-            source_ids=("paddle:1",),
-            reference_id="boat:1",
-            line=(50.0, 0.0, 50.0, 35.0),
-            reference_line=reference,
+    def test_rotation_direction_maps_to_kayak_travel_direction(self) -> None:
+        clockwise = _estimate_paddle_direction(
+            _paddle_rotation_deltas(_axis_track([0, 15, 30, 45, 60, 75, 90]))
         )
-        contact = _PaddleObservation(
-            source_ids=("paddle:1",),
-            reference_id="boat:1",
-            line=(50.0, 0.0, 50.0, 44.0),
-            reference_line=reference,
-        )
-        shortened = _PaddleObservation(
-            source_ids=("paddle:1",),
-            reference_id="boat:1",
-            line=(50.0, 4.0, 50.0, 44.0),
-            reference_line=reference,
+        anticlockwise = _estimate_paddle_direction(
+            _paddle_rotation_deltas(_axis_track([170, 155, 140, 125, 110, 95, 80]))
         )
 
-        self.assertIsNone(_update_phase_aware_paddle_state(state, first, 0, 4.0))
-        self.assertIsNone(
-            _update_phase_aware_paddle_state(state, contact, 100, 4.0)
-        )
-        catch = _update_phase_aware_paddle_state(state, shortened, 200, 4.0)
+        self.assertEqual(clockwise[:2], ("clockwise", "right"))
+        self.assertEqual(anticlockwise[:2], ("anticlockwise", "left"))
+        self.assertGreaterEqual(clockwise[2], 0.75)
+        self.assertGreaterEqual(anticlockwise[2], 0.75)
 
-        self.assertIsNotNone(catch)
-        assert catch is not None
-        self.assertEqual((catch.kind, catch.timestamp_ms), ("catch", 100))
+    def test_mirrored_travel_uses_the_same_normalized_phase_angle(self) -> None:
+        for angle in [0, 30, 90, 180, 270, 350]:
+            right = _rotating_observation(angle, travel_direction="right")
+            left = _rotating_observation(angle, travel_direction="left")
 
-    def test_catch_uses_first_contact_when_fourth_phase_is_confirmed_later(self) -> None:
-        state = _PaddleEventState(
-            physical_id="paddle:physical:1",
-            last_catch_phase=0,
-            phase_index=3,
-        )
-        reference = (0.0, 50.0, 100.0, 50.0)
-
-        def observation(bottom: float) -> _PaddleObservation:
-            return _PaddleObservation(
-                source_ids=("paddle:1",),
-                reference_id="boat:1",
-                line=(50.0, 0.0, 50.0, bottom),
-                reference_line=reference,
+            self.assertAlmostEqual(
+                _directed_blade_angle(right.line, right.reference_line, 1, "right"),
+                angle,
+            )
+            self.assertAlmostEqual(
+                _directed_blade_angle(left.line, left.reference_line, 1, "left"),
+                angle,
             )
 
-        self.assertIsNone(
-            _update_phase_aware_paddle_state(state, observation(35), 0, 4.0)
+    def test_directed_detector_backdates_catch_and_exit(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
         )
-        self.assertIsNone(
-            _update_phase_aware_paddle_state(state, observation(44), 100, 4.0)
+        events = []
+        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150]):
+            event = _update_directed_paddle_state(
+                state,
+                _rotating_observation(angle),
+                index * 100,
+                4.0,
+            )
+            if event is not None:
+                events.append(event)
+
+        self.assertEqual([(event.kind, event.timestamp_ms) for event in events], [
+            ("catch", 200),
+            ("exit", 600),
+        ])
+        self.assertEqual([event.cycle_index for event in events], [0, 0])
+        self.assertEqual([event.active_blade for event in events], [1, 1])
+        self.assertEqual(events[0].travel_direction, "right")
+        self.assertAlmostEqual(events[0].phase_angle or 0, 45)
+
+    def test_opposite_blade_is_ignored_and_next_360_cycle_resets_catch(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
         )
-        self.assertIsNone(
-            _update_phase_aware_paddle_state(state, observation(44), 200, 4.0)
+        events = []
+        angles = [
+            0, 30, 45, 60, 90, 120, 135, 150,
+            180, 210, 225, 240, 270, 300, 315, 330,
+            360, 390, 405, 420,
+        ]
+        for index, angle in enumerate(angles):
+            event = _update_directed_paddle_state(
+                state,
+                _rotating_observation(angle),
+                index * 100,
+                4.0,
+            )
+            if event is not None:
+                events.append(event)
+
+        self.assertEqual(
+            [(event.kind, event.cycle_index) for event in events],
+            [("catch", 0), ("exit", 0), ("catch", 1)],
         )
 
-        state.phase_index = 4
-        catch = _update_phase_aware_paddle_state(state, observation(60), 300, 4.0)
+    def test_catch_and_exit_gates_reset_independently_each_cycle(self) -> None:
+        state = _PaddleEventState(active_blade=1)
+        state.emitted_events.update({(0, "catch"), (0, "exit")})
+        state.last_directed_angle = 350
+        state.unwrapped_angle = 350
 
-        self.assertIsNotNone(catch)
-        assert catch is not None
-        self.assertEqual((catch.kind, catch.timestamp_ms), ("catch", 100))
-        self.assertEqual(catch.line, (50.0, 0.0, 50.0, 44.0))
-
-    def test_catch_and_exit_have_independent_four_phase_gates(self) -> None:
-        state = _PaddleEventState(last_catch_phase=0, last_exit_phase=1)
-
-        state.phase_index = 1
-        self.assertFalse(_catch_phase_allowed(state, 0))
         self.assertFalse(_catch_phase_allowed(state, 1))
         self.assertFalse(_event_phase_allowed(state, "exit"))
-        state.phase_index = 4
-        self.assertTrue(_catch_phase_allowed(state, 0))
+        self.assertTrue(_advance_directed_paddle_phase(state, 10))
+        self.assertEqual(state.cycle_index, 1)
         self.assertTrue(_catch_phase_allowed(state, 1))
-        self.assertFalse(_event_phase_allowed(state, "exit"))
-        state.phase_index = 5
         self.assertTrue(_event_phase_allowed(state, "exit"))
 
-    def test_missed_exit_state_cannot_block_next_fourth_phase_catch(self) -> None:
+    def test_exit_can_bootstrap_without_a_detected_catch(self) -> None:
         state = _PaddleEventState(
             physical_id="paddle:physical:1",
-            last_catch_phase=0,
-            last_exit_phase=None,
-            phase_index=4,
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
         )
-        reference = (0.0, 50.0, 100.0, 50.0)
-
-        def observation(bottom: float) -> _PaddleObservation:
-            return _PaddleObservation(
-                source_ids=("paddle:1",),
-                reference_id="boat:1",
-                line=(50.0, 0.0, 50.0, bottom),
-                reference_line=reference,
+        events = []
+        for index, angle in enumerate([90, 120, 135, 150]):
+            event = _update_directed_paddle_state(
+                state,
+                _rotating_observation(angle),
+                index * 100,
+                4.0,
             )
+            if event is not None:
+                events.append(event)
 
-        _update_phase_aware_paddle_state(state, observation(35), 0, 4.0)
-        _update_phase_aware_paddle_state(state, observation(44), 100, 4.0)
-        catch = _update_phase_aware_paddle_state(state, observation(44), 200, 4.0)
+        self.assertEqual([(event.kind, event.timestamp_ms) for event in events], [
+            ("exit", 200),
+        ])
+        self.assertNotIn((0, "catch"), state.emitted_events)
 
-        self.assertEqual(catch.kind if catch else None, "catch")
-        self.assertEqual(state.last_catch_phase, 4)
+    def test_event_analysis_pipeline_handles_both_travel_directions(self) -> None:
+        for travel_direction in ("right", "left"):
+            with self.subTest(travel_direction=travel_direction):
+                frames: dict[int, list[dict[str, object]]] = {}
+                for index, angle in enumerate([0, 15, 30, 45, 60, 90, 120, 135, 150]):
+                    observation = _rotating_observation(
+                        angle,
+                        travel_direction=travel_direction,
+                    )
+                    frames[index * 100] = [
+                        {
+                            "prompt_id": "boat",
+                            "instance_id": "boat:1",
+                            "track_id": "boat:track:1",
+                            "centerline_line_xyxy": list(observation.reference_line),
+                            "waterline_line_xyxy": list(observation.reference_line),
+                        },
+                        {
+                            "prompt_id": "paddle",
+                            "instance_id": "paddle:1",
+                            "track_id": "paddle:track:1",
+                            "centerline_line_xyxy": list(observation.line),
+                        },
+                    ]
 
-    def test_all_catches_require_four_phases_regardless_of_blade_endpoint(self) -> None:
-        state = _PaddleEventState(last_catch_phase=0)
+                events = _detect_paddle_events(
+                    frames,
+                    ExportOptions(
+                        include_catch=True,
+                        include_exit=True,
+                        reference_prompt_id="boat",
+                        reference_line_mode="waterline",
+                        target_prompt_ids=("paddle",),
+                    ),
+                    100,
+                    100,
+                    1.0,
+                    1.0,
+                )
 
-        state.phase_index = 2
-        self.assertFalse(_catch_phase_allowed(state, 0))
-        self.assertFalse(_catch_phase_allowed(state, 1))
-        state.phase_index = 3
-        self.assertFalse(_catch_phase_allowed(state, 0))
-        state.phase_index = 4
-        self.assertTrue(_catch_phase_allowed(state, 0))
-        self.assertTrue(_catch_phase_allowed(state, 1))
+                self.assertEqual(
+                    [
+                        (event.kind, event.timestamp_ms, event.travel_direction)
+                        for event in events
+                    ],
+                    [
+                        ("catch", 300, travel_direction),
+                        ("exit", 700, travel_direction),
+                    ],
+                )
 
-    def test_same_blade_reentry_is_rejected_until_fourth_phase(self) -> None:
-        state = _PaddleEventState(physical_id="paddle:physical:1")
-        reference = (0.0, 50.0, 100.0, 50.0)
-
-        def observation(bottom: float, top: float = 0.0) -> _PaddleObservation:
-            return _PaddleObservation(
-                source_ids=("paddle:1",),
-                reference_id="boat:1",
-                line=(50.0, top, 50.0, bottom),
-                reference_line=reference,
-            )
-
-        _update_phase_aware_paddle_state(state, observation(35), 0, 4.0)
-        _update_phase_aware_paddle_state(state, observation(44), 100, 4.0)
-        catch = _update_phase_aware_paddle_state(state, observation(44), 200, 4.0)
-        self.assertEqual(catch.kind if catch else None, "catch")
-        _update_phase_aware_paddle_state(state, observation(35, -9), 300, 4.0)
-        exit_event = _update_phase_aware_paddle_state(
-            state, observation(35, -9), 400, 4.0
+    def test_gap_does_not_synthesize_a_waterline_transition(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
         )
-        self.assertEqual(exit_event.kind if exit_event else None, "exit")
 
         self.assertIsNone(
-            _update_phase_aware_paddle_state(state, observation(44), 500, 4.0)
+            _update_directed_paddle_state(state, _rotating_observation(30), 0, 4.0)
         )
         self.assertIsNone(
-            _update_phase_aware_paddle_state(state, observation(44), 600, 4.0)
+            _update_directed_paddle_state(state, _rotating_observation(60), 500, 4.0)
         )
-
-        state.phase_index = 4
-        _update_phase_aware_paddle_state(state, observation(35, -9), 700, 4.0)
-        _update_phase_aware_paddle_state(state, observation(44), 800, 4.0)
-        next_catch = _update_phase_aware_paddle_state(
-            state, observation(44), 900, 4.0
+        self.assertIsNone(
+            _update_directed_paddle_state(state, _rotating_observation(90), 600, 4.0)
         )
-        self.assertEqual(next_catch.kind if next_catch else None, "catch")
-
-    def test_angle_state_counts_sustained_zero_to_ninety_phases(self) -> None:
-        state = _PaddleEventState()
-        for angle in [
-            5,
-            20,
-            45,
-            75,
-            88,
-            88,
-            75,
-            45,
-            15,
-            5,
-            5,
-            20,
-            45,
-            75,
-            88,
-            88,
-            75,
-            45,
-            15,
-            5,
-            5,
-            20,
-            45,
-            75,
-        ]:
-            _update_paddle_phase(state, angle)
-
-        self.assertEqual(state.phase_index, 4)
+        self.assertEqual(state.emitted_events, set())
 
     def test_collinear_exit_fragments_are_one_observation_and_one_event(self) -> None:
         reference = Centerline(
