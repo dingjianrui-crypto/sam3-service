@@ -74,6 +74,40 @@ class ExporterTest(unittest.TestCase):
         assert catch is not None
         self.assertEqual((catch.kind, catch.timestamp_ms), ("catch", 100))
 
+    def test_catch_uses_first_contact_when_fourth_phase_is_confirmed_later(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            last_catch_phase=0,
+            phase_index=3,
+        )
+        reference = (0.0, 50.0, 100.0, 50.0)
+
+        def observation(bottom: float) -> _PaddleObservation:
+            return _PaddleObservation(
+                source_ids=("paddle:1",),
+                reference_id="boat:1",
+                line=(50.0, 0.0, 50.0, bottom),
+                reference_line=reference,
+            )
+
+        self.assertIsNone(
+            _update_phase_aware_paddle_state(state, observation(35), 0, 4.0)
+        )
+        self.assertIsNone(
+            _update_phase_aware_paddle_state(state, observation(44), 100, 4.0)
+        )
+        self.assertIsNone(
+            _update_phase_aware_paddle_state(state, observation(44), 200, 4.0)
+        )
+
+        state.phase_index = 4
+        catch = _update_phase_aware_paddle_state(state, observation(60), 300, 4.0)
+
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        self.assertEqual((catch.kind, catch.timestamp_ms), ("catch", 100))
+        self.assertEqual(catch.line, (50.0, 0.0, 50.0, 44.0))
+
     def test_catch_and_exit_have_independent_four_phase_gates(self) -> None:
         state = _PaddleEventState(last_catch_phase=0, last_exit_phase=1)
 

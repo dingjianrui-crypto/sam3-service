@@ -35,6 +35,7 @@ PADDLE_CATCH_DEPTH_RATIO = 0.015
 PADDLE_EXIT_DEPTH_RATIO = 0.005
 PADDLE_EVENT_DEDUPE_MS = 250
 PADDLE_EVENT_MAX_CONFIRM_GAP_MS = 400
+PADDLE_EVENT_MAX_PHASE_DEFER_MS = 1500
 PADDLE_EVENT_TRACK_GAP_MS = 1500
 PADDLE_BLADE_ZONE_RATIO = 0.28
 PADDLE_FRAGMENT_ANGLE_DEGREES = 14.0
@@ -1300,23 +1301,36 @@ def _update_phase_aware_paddle_state(
     state.last_line = line
 
     event: PaddleEvent | None = None
+    candidate_age_ms = timestamp_ms - state.candidate_timestamp_ms
+    candidate_max_age_ms = (
+        PADDLE_EVENT_MAX_PHASE_DEFER_MS
+        if state.candidate_count >= PADDLE_EVENT_CONFIRM_SAMPLES
+        else PADDLE_EVENT_MAX_CONFIRM_GAP_MS
+    )
     if (
         state.candidate_kind is not None
         and state.candidate_blade is not None
-        and timestamp_ms - state.candidate_timestamp_ms <= PADDLE_EVENT_MAX_CONFIRM_GAP_MS
+        and candidate_age_ms <= candidate_max_age_ms
     ):
         blade = state.candidate_blade
-        condition_holds = (
-            overlaps[blade]
-            if state.candidate_kind == "catch"
-            else not overlaps[blade]
-        )
-        if condition_holds:
-            state.candidate_count += 1
-            if state.candidate_count >= PADDLE_EVENT_CONFIRM_SAMPLES:
+        if state.candidate_count >= PADDLE_EVENT_CONFIRM_SAMPLES:
+            if _event_phase_allowed(state, state.candidate_kind):
                 event = _confirm_phase_event(state)
         else:
-            _clear_paddle_event_candidate(state)
+            condition_holds = (
+                overlaps[blade]
+                if state.candidate_kind == "catch"
+                else not overlaps[blade]
+            )
+            if condition_holds:
+                state.candidate_count += 1
+                if (
+                    state.candidate_count >= PADDLE_EVENT_CONFIRM_SAMPLES
+                    and _event_phase_allowed(state, state.candidate_kind)
+                ):
+                    event = _confirm_phase_event(state)
+            else:
+                _clear_paddle_event_candidate(state)
     elif state.candidate_kind is not None:
         _clear_paddle_event_candidate(state)
 
@@ -1332,14 +1346,14 @@ def _update_phase_aware_paddle_state(
             if (
                 not previous_overlaps[blade]
                 and overlaps[blade]
-                and _event_phase_allowed(state, "catch")
+                and _event_phase_candidate_allowed(state, "catch")
                 and depth_delta >= -band_half_width * 0.25
             ):
                 catch_candidates.append((depth_delta, blade))
             if (
                 previous_overlaps[blade]
                 and not overlaps[blade]
-                and _event_phase_allowed(state, "exit")
+                and _event_phase_candidate_allowed(state, "exit")
                 and depth_delta <= band_half_width * 0.25
             ):
                 exit_candidates.append((depth_delta, blade))
@@ -1400,6 +1414,8 @@ def _confirm_phase_event(state: _PaddleEventState) -> PaddleEvent | None:
     ):
         return None
     kind = state.candidate_kind
+    if not _event_phase_allowed(state, kind):
+        return None
     event = PaddleEvent(
         kind=kind,
         timestamp_ms=state.candidate_timestamp_ms,
@@ -1434,6 +1450,15 @@ def _event_phase_allowed(state: _PaddleEventState, kind: str) -> bool:
     if last_phase is None:
         return True
     return state.phase_index - last_phase >= PADDLE_EVENT_PHASE_GAP
+
+
+def _event_phase_candidate_allowed(state: _PaddleEventState, kind: str) -> bool:
+    last_phase = (
+        state.last_catch_phase if kind == "catch" else state.last_exit_phase
+    )
+    if last_phase is None:
+        return True
+    return state.phase_index - last_phase >= PADDLE_EVENT_PHASE_GAP - 1
 
 
 def _catch_phase_allowed(state: _PaddleEventState, blade: int = 0) -> bool:
