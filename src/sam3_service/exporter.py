@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import zlib
 from bisect import bisect_left
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -34,6 +34,13 @@ PADDLE_EVENT_CONFIRM_SAMPLES = 2
 PADDLE_CATCH_DEPTH_RATIO = 0.015
 PADDLE_EXIT_DEPTH_RATIO = 0.005
 PADDLE_EVENT_DEDUPE_MS = 250
+PADDLE_EVENT_MAX_CONFIRM_GAP_MS = 400
+PADDLE_EVENT_TRACK_GAP_MS = 1500
+PADDLE_BLADE_ZONE_RATIO = 0.28
+PADDLE_FRAGMENT_ANGLE_DEGREES = 14.0
+PADDLE_PHASE_LOW_DEGREES = 20.0
+PADDLE_PHASE_HIGH_DEGREES = 70.0
+PADDLE_EVENT_PHASE_GAP = 4
 PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
 PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
 PADDLE_EVENT_ANGLE_COLOR = (255, 255, 255, 255)
@@ -105,10 +112,38 @@ class FreezeMoment:
     events: tuple[PaddleEvent, ...]
 
 
+@dataclass(frozen=True)
+class _PaddleObservation:
+    source_ids: tuple[str, ...]
+    reference_id: str
+    line: Line
+    reference_line: Line
+
+
 @dataclass
 class _PaddleEventState:
+    physical_id: str = ""
+    source_ids: set[str] = field(default_factory=set)
+    reference_id: str = ""
+    last_seen_ms: int = -1
+    last_line: Line | None = None
+    stable_lengths: list[float] = field(default_factory=list)
+    angle_samples: list[float] = field(default_factory=list)
+    last_phase_angle: float | None = None
+    phase_direction: int = 0
+    pending_phase_direction: int = 0
+    pending_phase_count: int = 0
+    phase_min_angle: float = 90.0
+    phase_max_angle: float = 0.0
+    phase_index: int = 0
+    blade_overlaps: tuple[bool, bool] | None = None
+    endpoint_depths: tuple[float, float] | None = None
+    last_catch_phase: int | None = None
+    last_exit_phase: int | None = None
     immersed: bool | None = None
     candidate_kind: str | None = None
+    candidate_blade: int | None = None
+    candidate_phase_index: int = 0
     candidate_count: int = 0
     candidate_timestamp_ms: int = 0
     candidate_line: Line | None = None
@@ -983,10 +1018,11 @@ def _detect_paddle_events(
     scale_y: float,
     progress: Callable[[str, float, str], None] | None = None,
 ) -> list[PaddleEvent]:
-    states: dict[str, _PaddleEventState] = {}
+    states: list[_PaddleEventState] = []
     detected: list[PaddleEvent] = []
     timestamps = sorted(frames)
     target_prompt_ids = set(options.target_prompt_ids)
+    band_half_width = _event_band_half_width(scale_x, scale_y)
     for index, timestamp_ms in enumerate(timestamps):
         records = [_scale_record(record, scale_x, scale_y) for record in frames[timestamp_ms]]
         records = [
@@ -1011,23 +1047,21 @@ def _detect_paddle_events(
                 references.append(centerline)
             elif record.get("prompt_id") in target_prompt_ids:
                 targets.append(centerline)
-        if references:
-            for target in targets:
-                reference = _nearest_centerline(target, references)
-                depth_ratio = _paddle_water_depth_ratio(target.line, reference.line)
-                if depth_ratio is None:
-                    continue
-                track_id = _record_track_id(target.record)
-                event = _update_paddle_event_state(
-                    states.setdefault(track_id, _PaddleEventState()),
-                    track_id,
-                    timestamp_ms,
-                    target.line,
-                    depth_ratio,
-                    reference.line,
-                )
-                if event is not None:
-                    detected.append(event)
+        observations = _consolidate_paddle_observations(
+            targets, references, width, height
+        )
+        assignments = _assign_paddle_observations(
+            observations, states, timestamp_ms, width, height
+        )
+        for observation, state in assignments:
+            event = _update_phase_aware_paddle_state(
+                state,
+                observation,
+                timestamp_ms,
+                band_half_width,
+            )
+            if event is not None:
+                detected.append(event)
         if index == len(timestamps) - 1 or index % max(1, len(timestamps) // 20) == 0:
             _report_progress(
                 progress,
@@ -1042,6 +1076,544 @@ def _detect_paddle_events(
         if (event.kind == "catch" and options.include_catch)
         or (event.kind == "exit" and options.include_exit)
     ]
+
+
+def _event_band_half_width(scale_x: float, scale_y: float) -> float:
+    raw = os.getenv(
+        "SAM3_CENTERLINE_THICKNESS_PIXELS",
+        os.getenv("SAM3_SHAFT_THICKNESS_PIXELS", "8"),
+    )
+    try:
+        thickness = float(raw)
+    except ValueError:
+        thickness = 8.0
+    return max(1.0, min(64.0, thickness / 2)) * max(scale_x, scale_y)
+
+
+def _consolidate_paddle_observations(
+    targets: list[Centerline],
+    references: list[Centerline],
+    width: int,
+    height: int,
+) -> list[_PaddleObservation]:
+    if not references:
+        return []
+    grouped: dict[str, tuple[Centerline, list[list[Centerline]]]] = {}
+    for target in sorted(targets, key=lambda item: _line_length(item.line), reverse=True):
+        reference = _nearest_centerline(target, references)
+        reference_id = _record_track_id(reference.record)
+        entry = grouped.setdefault(reference_id, (reference, []))
+        clusters = entry[1]
+        cluster = next(
+            (
+                candidate
+                for candidate in clusters
+                if _paddle_fragments_compatible(
+                    target.line,
+                    _merge_paddle_lines([item.line for item in candidate]),
+                    width,
+                    height,
+                )
+            ),
+            None,
+        )
+        if cluster is None:
+            clusters.append([target])
+        else:
+            cluster.append(target)
+    observations: list[_PaddleObservation] = []
+    for reference_id, (reference, clusters) in grouped.items():
+        for cluster in clusters:
+            observations.append(
+                _PaddleObservation(
+                    source_ids=tuple(
+                        sorted({_record_track_id(item.record) for item in cluster})
+                    ),
+                    reference_id=reference_id,
+                    line=_merge_paddle_lines([item.line for item in cluster]),
+                    reference_line=reference.line,
+                )
+            )
+    return observations
+
+
+def _paddle_fragments_compatible(
+    first: Line,
+    second: Line,
+    width: int,
+    height: int,
+) -> bool:
+    angle = _acute_line_angle_degrees(first, second)
+    if angle > PADDLE_FRAGMENT_ANGLE_DEGREES:
+        return False
+    first_center = _line_center(first)
+    second_center = _line_center(second)
+    axis = _normalize((first[2] - first[0], first[3] - first[1]))
+    if axis is None:
+        return False
+    perpendicular = (-axis[1], axis[0])
+    center_delta = (
+        second_center[0] - first_center[0],
+        second_center[1] - first_center[1],
+    )
+    perpendicular_gap = abs(_dot(center_delta, perpendicular))
+    perpendicular_limit = max(12.0, min(width, height) * 0.025)
+    if perpendicular_gap > perpendicular_limit:
+        return False
+    first_interval = sorted(
+        _dot((point[0] - first_center[0], point[1] - first_center[1]), axis)
+        for point in ((first[0], first[1]), (first[2], first[3]))
+    )
+    second_interval = sorted(
+        _dot((point[0] - first_center[0], point[1] - first_center[1]), axis)
+        for point in ((second[0], second[1]), (second[2], second[3]))
+    )
+    longitudinal_gap = max(
+        0.0,
+        max(first_interval[0], second_interval[0])
+        - min(first_interval[1], second_interval[1]),
+    )
+    return longitudinal_gap <= max(
+        20.0, max(_line_length(first), _line_length(second)) * 0.3
+    )
+
+
+def _merge_paddle_lines(lines: list[Line]) -> Line:
+    anchor = max(lines, key=_line_length)
+    axis = _normalize((anchor[2] - anchor[0], anchor[3] - anchor[1]))
+    if axis is None:
+        return anchor
+    normal = (-axis[1], axis[0])
+    origin = _line_center(anchor)
+    projections: list[float] = []
+    offsets: list[float] = []
+    for line in lines:
+        for point in ((line[0], line[1]), (line[2], line[3])):
+            delta = (point[0] - origin[0], point[1] - origin[1])
+            projections.append(_dot(delta, axis))
+            offsets.append(_dot(delta, normal))
+    offset = _median(offsets)
+    start = min(projections)
+    end = max(projections)
+    return (
+        origin[0] + axis[0] * start + normal[0] * offset,
+        origin[1] + axis[1] * start + normal[1] * offset,
+        origin[0] + axis[0] * end + normal[0] * offset,
+        origin[1] + axis[1] * end + normal[1] * offset,
+    )
+
+
+def _assign_paddle_observations(
+    observations: list[_PaddleObservation],
+    states: list[_PaddleEventState],
+    timestamp_ms: int,
+    width: int,
+    height: int,
+) -> list[tuple[_PaddleObservation, _PaddleEventState]]:
+    available = {
+        index
+        for index, state in enumerate(states)
+        if timestamp_ms - state.last_seen_ms <= PADDLE_EVENT_TRACK_GAP_MS
+    }
+    assigned: list[tuple[_PaddleObservation, _PaddleEventState]] = []
+    for observation in sorted(observations, key=lambda item: _line_center(item.line)[0]):
+        best_index: int | None = None
+        best_cost = math.inf
+        for state_index in available:
+            state = states[state_index]
+            if state.last_line is None:
+                continue
+            angle = _acute_line_angle_degrees(observation.line, state.last_line)
+            center_distance = math.dist(
+                _line_center(observation.line), _line_center(state.last_line)
+            )
+            shared_source = bool(state.source_ids.intersection(observation.source_ids))
+            if angle > 40 or center_distance > max(
+                min(width, height) * 0.22,
+                max(_line_length(observation.line), _line_length(state.last_line)) * 0.55,
+            ):
+                continue
+            reference_penalty = 0 if observation.reference_id == state.reference_id else 0.25
+            source_bonus = -0.35 if shared_source else 0
+            cost = (
+                center_distance / max(min(width, height), 1)
+                + angle / 180
+                + reference_penalty
+                + source_bonus
+            )
+            if cost < best_cost:
+                best_cost = cost
+                best_index = state_index
+        if best_index is None:
+            state = _PaddleEventState(physical_id=f"paddle:physical:{len(states) + 1}")
+            states.append(state)
+        else:
+            state = states[best_index]
+            available.remove(best_index)
+        state.source_ids.update(observation.source_ids)
+        state.reference_id = observation.reference_id
+        assigned.append((observation, state))
+    return assigned
+
+
+def _update_phase_aware_paddle_state(
+    state: _PaddleEventState,
+    observation: _PaddleObservation,
+    timestamp_ms: int,
+    band_half_width: float,
+) -> PaddleEvent | None:
+    line = _stabilize_paddle_line(state, observation.line)
+    angle = _acute_line_angle_degrees(line, observation.reference_line)
+    _update_paddle_phase(state, angle)
+    overlaps = _blade_waterline_overlaps(
+        line, observation.reference_line, band_half_width
+    )
+    depths = _endpoint_signed_depths(line, observation.reference_line)
+    previous_overlaps = state.blade_overlaps
+    previous_depths = state.endpoint_depths
+    previous_seen_ms = state.last_seen_ms
+    state.last_seen_ms = timestamp_ms
+    state.last_line = line
+
+    event: PaddleEvent | None = None
+    if (
+        state.candidate_kind is not None
+        and state.candidate_blade is not None
+        and timestamp_ms - state.candidate_timestamp_ms <= PADDLE_EVENT_MAX_CONFIRM_GAP_MS
+    ):
+        blade = state.candidate_blade
+        condition_holds = (
+            overlaps[blade]
+            if state.candidate_kind == "catch"
+            else not overlaps[blade]
+        )
+        if condition_holds:
+            state.candidate_count += 1
+            if state.candidate_count >= PADDLE_EVENT_CONFIRM_SAMPLES:
+                event = _confirm_phase_event(state)
+        else:
+            _clear_paddle_event_candidate(state)
+    elif state.candidate_kind is not None:
+        _clear_paddle_event_candidate(state)
+
+    if event is None and previous_overlaps is not None:
+        catch_candidates: list[tuple[float, int]] = []
+        exit_candidates: list[tuple[float, int]] = []
+        for blade in range(2):
+            depth_delta = (
+                0.0
+                if previous_depths is None
+                else depths[blade] - previous_depths[blade]
+            )
+            if (
+                not previous_overlaps[blade]
+                and overlaps[blade]
+                and _event_phase_allowed(state, "catch")
+                and depth_delta >= -band_half_width * 0.25
+            ):
+                catch_candidates.append((depth_delta, blade))
+            if (
+                previous_overlaps[blade]
+                and not overlaps[blade]
+                and _event_phase_allowed(state, "exit")
+                and depth_delta <= band_half_width * 0.25
+            ):
+                exit_candidates.append((depth_delta, blade))
+        if catch_candidates:
+            _, blade = max(catch_candidates)
+            _start_paddle_event_candidate(
+                state,
+                "catch",
+                blade,
+                timestamp_ms,
+                line,
+                observation.reference_line,
+                0.9,
+            )
+        elif exit_candidates:
+            _, blade = min(exit_candidates)
+            _start_paddle_event_candidate(
+                state,
+                "exit",
+                blade,
+                timestamp_ms,
+                line,
+                observation.reference_line,
+                0.9,
+            )
+    if previous_seen_ms >= 0 and timestamp_ms - previous_seen_ms > PADDLE_EVENT_TRACK_GAP_MS:
+        _clear_paddle_event_candidate(state)
+    state.blade_overlaps = overlaps
+    state.endpoint_depths = depths
+    return event
+
+
+def _start_paddle_event_candidate(
+    state: _PaddleEventState,
+    kind: str,
+    blade: int,
+    timestamp_ms: int,
+    line: Line,
+    reference_line: Line,
+    confidence: float,
+) -> None:
+    state.candidate_kind = kind
+    state.candidate_blade = blade
+    state.candidate_phase_index = state.phase_index
+    state.candidate_count = 1
+    state.candidate_timestamp_ms = timestamp_ms
+    state.candidate_line = line
+    state.candidate_reference_line = reference_line
+    state.candidate_degree = _line_angle_degrees(line, reference_line)
+    state.candidate_confidence = confidence
+
+
+def _confirm_phase_event(state: _PaddleEventState) -> PaddleEvent | None:
+    if (
+        state.candidate_kind is None
+        or state.candidate_blade is None
+        or state.candidate_line is None
+    ):
+        return None
+    kind = state.candidate_kind
+    event = PaddleEvent(
+        kind=kind,
+        timestamp_ms=state.candidate_timestamp_ms,
+        instance_id=state.physical_id,
+        line=state.candidate_line,
+        confidence=round(state.candidate_confidence, 3),
+        reference_line=state.candidate_reference_line,
+        degree=state.candidate_degree,
+    )
+    if kind == "catch":
+        state.last_catch_phase = state.candidate_phase_index
+    else:
+        state.last_exit_phase = state.candidate_phase_index
+    _clear_paddle_event_candidate(state)
+    return event
+
+
+def _clear_paddle_event_candidate(state: _PaddleEventState) -> None:
+    state.candidate_kind = None
+    state.candidate_blade = None
+    state.candidate_phase_index = 0
+    state.candidate_count = 0
+    state.candidate_line = None
+    state.candidate_reference_line = None
+    state.candidate_degree = None
+
+
+def _event_phase_allowed(state: _PaddleEventState, kind: str) -> bool:
+    last_phase = (
+        state.last_catch_phase if kind == "catch" else state.last_exit_phase
+    )
+    if last_phase is None:
+        return True
+    return state.phase_index - last_phase >= PADDLE_EVENT_PHASE_GAP
+
+
+def _catch_phase_allowed(state: _PaddleEventState, blade: int = 0) -> bool:
+    del blade
+    return _event_phase_allowed(state, "catch")
+
+
+def _update_paddle_phase(state: _PaddleEventState, angle: float) -> None:
+    state.angle_samples.append(angle)
+    state.angle_samples = state.angle_samples[-3:]
+    smoothed = _median(state.angle_samples)
+    if state.last_phase_angle is None:
+        state.last_phase_angle = smoothed
+        state.phase_min_angle = smoothed
+        state.phase_max_angle = smoothed
+        return
+    slope = _sign(smoothed - state.last_phase_angle, epsilon=1.0)
+    state.phase_min_angle = min(state.phase_min_angle, smoothed)
+    state.phase_max_angle = max(state.phase_max_angle, smoothed)
+    if slope != 0:
+        if state.phase_direction == 0:
+            if state.pending_phase_direction == slope:
+                state.pending_phase_count += 1
+            else:
+                state.pending_phase_direction = slope
+                state.pending_phase_count = 1
+            if state.pending_phase_count >= 2:
+                state.phase_direction = slope
+                state.pending_phase_count = 0
+        elif slope == state.phase_direction:
+            state.pending_phase_direction = 0
+            state.pending_phase_count = 0
+        else:
+            reached_extreme = (
+                state.phase_direction > 0
+                and state.phase_max_angle >= PADDLE_PHASE_HIGH_DEGREES
+            ) or (
+                state.phase_direction < 0
+                and state.phase_min_angle <= PADDLE_PHASE_LOW_DEGREES
+            )
+            if reached_extreme:
+                if state.pending_phase_direction == slope:
+                    state.pending_phase_count += 1
+                else:
+                    state.pending_phase_direction = slope
+                    state.pending_phase_count = 1
+                if state.pending_phase_count >= 2:
+                    state.phase_index += 1
+                    state.phase_direction = slope
+                    state.pending_phase_direction = 0
+                    state.pending_phase_count = 0
+                    state.phase_min_angle = smoothed
+                    state.phase_max_angle = smoothed
+    state.last_phase_angle = smoothed
+
+
+def _stabilize_paddle_line(state: _PaddleEventState, observed: Line) -> Line:
+    line = _orient_line_like(observed, state.last_line)
+    observed_length = _line_length(line)
+    if observed_length < 2:
+        return line
+    state.stable_lengths.append(observed_length)
+    state.stable_lengths = state.stable_lengths[-7:]
+    stable_length = sorted(state.stable_lengths)[
+        min(len(state.stable_lengths) - 1, round((len(state.stable_lengths) - 1) * 0.75))
+    ]
+    if stable_length <= observed_length * 1.08:
+        return line
+    unit = _normalize((line[2] - line[0], line[3] - line[1]))
+    if unit is None:
+        return line
+    if state.last_line is not None:
+        start_distance = math.dist((line[0], line[1]), (state.last_line[0], state.last_line[1]))
+        end_distance = math.dist((line[2], line[3]), (state.last_line[2], state.last_line[3]))
+        if start_distance <= end_distance:
+            return (
+                line[0],
+                line[1],
+                line[0] + unit[0] * stable_length,
+                line[1] + unit[1] * stable_length,
+            )
+        return (
+            line[2] - unit[0] * stable_length,
+            line[3] - unit[1] * stable_length,
+            line[2],
+            line[3],
+        )
+    center = _line_center(line)
+    return (
+        center[0] - unit[0] * stable_length / 2,
+        center[1] - unit[1] * stable_length / 2,
+        center[0] + unit[0] * stable_length / 2,
+        center[1] + unit[1] * stable_length / 2,
+    )
+
+
+def _orient_line_like(line: Line, previous: Line | None) -> Line:
+    if previous is None:
+        return line
+    same_cost = math.dist((line[0], line[1]), (previous[0], previous[1])) + math.dist(
+        (line[2], line[3]), (previous[2], previous[3])
+    )
+    flipped_cost = math.dist(
+        (line[2], line[3]), (previous[0], previous[1])
+    ) + math.dist((line[0], line[1]), (previous[2], previous[3]))
+    return line if same_cost <= flipped_cost else (line[2], line[3], line[0], line[1])
+
+
+def _blade_waterline_overlaps(
+    paddle: Line, reference: Line, band_half_width: float
+) -> tuple[bool, bool]:
+    first_end = (
+        paddle[0],
+        paddle[1],
+        paddle[0] + (paddle[2] - paddle[0]) * PADDLE_BLADE_ZONE_RATIO,
+        paddle[1] + (paddle[3] - paddle[1]) * PADDLE_BLADE_ZONE_RATIO,
+    )
+    second_end = (
+        paddle[2] - (paddle[2] - paddle[0]) * PADDLE_BLADE_ZONE_RATIO,
+        paddle[3] - (paddle[3] - paddle[1]) * PADDLE_BLADE_ZONE_RATIO,
+        paddle[2],
+        paddle[3],
+    )
+    overlap_distance = band_half_width * 2
+    return (
+        _segment_distance(first_end, reference) <= overlap_distance,
+        _segment_distance(second_end, reference) <= overlap_distance,
+    )
+
+
+def _endpoint_signed_depths(paddle: Line, reference: Line) -> tuple[float, float]:
+    reference_dx = reference[2] - reference[0]
+    reference_dy = reference[3] - reference[1]
+    length = max(math.hypot(reference_dx, reference_dy), 1.0)
+    normal = (-reference_dy / length, reference_dx / length)
+    if normal[1] < 0:
+        normal = (-normal[0], -normal[1])
+    origin = _line_center(reference)
+    return tuple(
+        (point[0] - origin[0]) * normal[0] + (point[1] - origin[1]) * normal[1]
+        for point in ((paddle[0], paddle[1]), (paddle[2], paddle[3]))
+    )  # type: ignore[return-value]
+
+
+def _segment_distance(first: Line, second: Line) -> float:
+    if _line_intersection_within_segments(first, second):
+        return 0.0
+    return min(
+        _point_segment_distance((first[0], first[1]), second),
+        _point_segment_distance((first[2], first[3]), second),
+        _point_segment_distance((second[0], second[1]), first),
+        _point_segment_distance((second[2], second[3]), first),
+    )
+
+
+def _line_intersection_within_segments(first: Line, second: Line) -> bool:
+    point = _line_intersection(first, second)
+    if point is None:
+        return False
+    tolerance = 1e-6
+    return all(
+        min(line[0], line[2]) - tolerance <= point[0] <= max(line[0], line[2]) + tolerance
+        and min(line[1], line[3]) - tolerance
+        <= point[1]
+        <= max(line[1], line[3]) + tolerance
+        for line in (first, second)
+    )
+
+
+def _point_segment_distance(point: tuple[float, float], segment: Line) -> float:
+    dx = segment[2] - segment[0]
+    dy = segment[3] - segment[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 1e-9:
+        return math.dist(point, (segment[0], segment[1]))
+    projection = _clamp(
+        ((point[0] - segment[0]) * dx + (point[1] - segment[1]) * dy)
+        / length_squared,
+        0,
+        1,
+    )
+    closest = (segment[0] + projection * dx, segment[1] + projection * dy)
+    return math.dist(point, closest)
+
+
+def _acute_line_angle_degrees(first: Line, second: Line) -> float:
+    first_vector = _normalize((first[2] - first[0], first[3] - first[1]))
+    second_vector = _normalize((second[2] - second[0], second[3] - second[1]))
+    if first_vector is None or second_vector is None:
+        return 0.0
+    dot = abs(_clamp(_dot(first_vector, second_vector), -1, 1))
+    return math.degrees(math.acos(dot))
+
+
+def _line_length(line: Line) -> float:
+    return math.hypot(line[2] - line[0], line[3] - line[1])
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def _paddle_water_depth_ratio(paddle: Line, waterline: Line) -> float | None:
@@ -1126,7 +1698,6 @@ def _dedupe_paddle_events(
     events: list[PaddleEvent], width: int, height: int
 ) -> list[PaddleEvent]:
     kept: list[PaddleEvent] = []
-    distance_limit = min(width, height) * 0.12
     for event in sorted(events, key=lambda item: (item.timestamp_ms, item.kind)):
         duplicate_index = next(
             (
@@ -1134,18 +1705,21 @@ def _dedupe_paddle_events(
                 for index, previous in enumerate(kept)
                 if previous.kind == event.kind
                 and abs(previous.timestamp_ms - event.timestamp_ms) <= PADDLE_EVENT_DEDUPE_MS
-                and (
-                    math.dist(
-                        _line_center(previous.line), _line_center(event.line)
-                    )
-                    <= distance_limit
+                and _paddle_fragments_compatible(
+                    previous.line,
+                    event.line,
+                    width,
+                    height,
                 )
             ),
             None,
         )
         if duplicate_index is None:
             kept.append(event)
-        elif event.confidence > kept[duplicate_index].confidence:
+        elif (event.confidence, _line_length(event.line)) > (
+            kept[duplicate_index].confidence,
+            _line_length(kept[duplicate_index].line),
+        ):
             kept[duplicate_index] = event
     return kept
 
