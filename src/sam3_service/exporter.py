@@ -306,6 +306,7 @@ def export_centerline_video(
         for prompt in manifest.get("prompts", [])
     }
     frames = _load_frames_by_timestamp(chunk_paths)
+    frames_by_index = _load_frames_by_index(chunk_paths)
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
@@ -353,8 +354,12 @@ def export_centerline_video(
         image = _transparent_image(width, height)
         timestamp_ms = round(frame_index * 1000 / fps)
         freeze_moment = freeze_by_frame.get(frame_index)
-        records = _records_for_timestamp(
-            frames, frame_timestamps, timestamp_ms, result_tolerance_ms
+        records = (
+            frames_by_index.get(frame_index, [])
+            if frames_by_index is not None
+            else _records_for_timestamp(
+                frames, frame_timestamps, timestamp_ms, result_tolerance_ms
+            )
         )
         scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
         scaled_records = [
@@ -634,6 +639,31 @@ def _load_frames_by_timestamp(chunk_paths: list[Path]) -> dict[int, list[dict[st
         for record in payload.get("frames", []):
             frames.setdefault(int(record["timestamp_ms"]), []).append(record)
     return frames
+
+
+def _load_frames_by_index(
+    chunk_paths: list[Path],
+) -> dict[int, list[dict[str, Any]]] | None:
+    """Load exact source-frame mappings, or None for legacy result chunks.
+
+    An empty list for a known frame is meaningful: it means that frame has no
+    detections and must not inherit geometry from a neighboring timestamp.
+    """
+    frames: dict[int, list[dict[str, Any]]] = {}
+    found_frame_index = False
+    for path in chunk_paths:
+        payload = json.loads(path.read_text())
+        for record in payload.get("frames", []):
+            frame_index = record.get("frame_index")
+            if frame_index is None:
+                continue
+            try:
+                index = int(frame_index)
+            except (TypeError, ValueError):
+                continue
+            found_frame_index = True
+            frames.setdefault(index, []).append(record)
+    return frames if found_frame_index else None
 
 
 def _normalize_export_options(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from sam3_service.exporter import (
@@ -32,6 +35,7 @@ from sam3_service.exporter import (
     _freeze_segments,
     _freeze_video_filter,
     _line_intersection,
+    _load_frames_by_index,
     _metric_label_top,
     _maximum_target_count_in_selection,
     _paddle_water_depth_ratio,
@@ -87,6 +91,39 @@ def _axis_track(angles: list[float]) -> list[_TimedPaddleObservation]:
 
 
 class ExporterTest(unittest.TestCase):
+    def test_loads_export_records_by_exact_source_frame_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            chunk_path = Path(directory) / "chunk.json"
+            chunk_path.write_text(
+                json.dumps(
+                    {
+                        "frames": [
+                            {"frame_index": 561, "timestamp_ms": 18700, "id": "previous"},
+                            {"frame_index": 562, "timestamp_ms": 18733, "id": "final"},
+                        ]
+                    }
+                )
+            )
+
+            frames = _load_frames_by_index([chunk_path])
+
+        self.assertIsNotNone(frames)
+        assert frames is not None
+        self.assertEqual([record["id"] for record in frames[561]], ["previous"])
+        self.assertEqual([record["id"] for record in frames[562]], ["final"])
+        self.assertEqual(frames.get(560, []), [])
+
+    def test_legacy_chunks_without_frame_indices_use_timestamp_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            chunk_path = Path(directory) / "chunk.json"
+            chunk_path.write_text(
+                json.dumps({"frames": [{"timestamp_ms": 18700, "id": "legacy"}]})
+            )
+
+            frames = _load_frames_by_index([chunk_path])
+
+        self.assertIsNone(frames)
+
     def test_rotation_direction_maps_to_kayak_travel_direction(self) -> None:
         clockwise = _estimate_paddle_direction(
             _paddle_rotation_deltas(_axis_track([0, 15, 30, 45, 60, 75, 90]))

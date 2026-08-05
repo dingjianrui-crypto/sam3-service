@@ -163,7 +163,13 @@ export function Player({ manifest }: Props) {
       if (!descriptor) return;
       const records = chunksRef.current.get(descriptor.sequence);
       if (!records) return;
-      const nearby = recordsForTime(records, timeMs, manifest.video.fps, enabledPrompts);
+      const nearby = recordsForTime(
+        records,
+        timeMs,
+        manifest.video.fps,
+        manifest.video.frame_count,
+        enabledPrompts
+      );
       drawOverlay(context, nearby, {
         angleConfig: {
           enabled: previewAnglesEnabled,
@@ -243,6 +249,10 @@ export function Player({ manifest }: Props) {
       const timeMs = Math.round(video.currentTime * 1000);
       acceptVideoTime(timeMs);
     };
+    const syncPlaybackAndOverlay = () => {
+      syncPlayback();
+      draw(video.currentTime);
+    };
     const clearManualTimelineTime = () => {
       manualTimelineActiveRef.current = false;
       video.closest<HTMLElement>(".video-shell")?.removeAttribute("data-timeline-time-ms");
@@ -251,19 +261,21 @@ export function Player({ manifest }: Props) {
       if (Number.isFinite(video.duration)) setVideoDurationMs(Math.round(video.duration * 1000));
     };
     video.addEventListener("timeupdate", syncPlayback);
-    video.addEventListener("seeked", syncPlayback);
+    video.addEventListener("seeked", syncPlaybackAndOverlay);
+    video.addEventListener("ended", syncPlaybackAndOverlay);
     video.addEventListener("play", clearManualTimelineTime);
     video.addEventListener("loadedmetadata", syncDuration);
     video.addEventListener("durationchange", syncDuration);
     syncDuration();
     return () => {
       video.removeEventListener("timeupdate", syncPlayback);
-      video.removeEventListener("seeked", syncPlayback);
+      video.removeEventListener("seeked", syncPlaybackAndOverlay);
+      video.removeEventListener("ended", syncPlaybackAndOverlay);
       video.removeEventListener("play", clearManualTimelineTime);
       video.removeEventListener("loadedmetadata", syncDuration);
       video.removeEventListener("durationchange", syncDuration);
     };
-  }, [manifest.job_id]);
+  }, [draw, manifest.job_id]);
 
   function togglePrompt(id: string) {
     setEnabledPrompts((current) => {
@@ -966,8 +978,16 @@ function recordsForTime(
   records: FrameMask[],
   timeMs: number,
   fps: number,
+  frameCount: number,
   enabledPrompts: Set<string>
 ) {
+  if (frameCount > 0 && records.some((record) => Number.isFinite(record.frame_index))) {
+    const frameIndex = clamp(Math.round((timeMs * fps) / 1000), 0, frameCount - 1);
+    return records.filter(
+      (record) =>
+        record.frame_index === frameIndex && enabledPrompts.has(record.prompt_id)
+    );
+  }
   const tolerance = 500 / Math.max(fps, 1);
   let nearestTimestamp: number | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
