@@ -58,6 +58,7 @@ export default function App() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
 
   async function refreshJobs() {
     try {
@@ -141,6 +142,37 @@ export default function App() {
   function updateJobSetting<K extends keyof JobSettings>(key: K, value: JobSettings[K]) {
     setDetectionMode("custom");
     setJobSettings((current) => ({ ...current, [key]: value }));
+  }
+
+  async function copyJobId(jobId: string) {
+    try {
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(jobId);
+          copied = true;
+        } catch {
+          // Clipboard access can be unavailable when the app is served over HTTP.
+        }
+      }
+      if (!copied) {
+        const input = document.createElement("textarea");
+        input.value = jobId;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        copied = document.execCommand("copy");
+        input.remove();
+      }
+      if (!copied) throw new Error("Copy command was rejected");
+      setCopiedJobId(jobId);
+      window.setTimeout(() => {
+        setCopiedJobId((current) => (current === jobId ? null : current));
+      }, 1500);
+    } catch {
+      setError("Could not copy the job ID. Select the ID and copy it manually.");
+    }
   }
 
   return (
@@ -315,26 +347,38 @@ export default function App() {
             </div>
             {jobs.length === 0 && <p className="empty">No videos yet.</p>}
             {jobs.map((job) => (
-              <button
+              <div
                 key={job.job_id}
                 className={selected?.job_id === job.job_id ? "job active" : "job"}
-                onClick={() => setSelected(job)}
               >
-                <span className={`status-dot ${job.state}`} />
-                <span>
-                  <strong>{job.prompts.map((item) => item.text).join(", ")}</strong>
-                  <small>
-                    {job.state} ·{" "}
-                    {new Date(job.created_at).toLocaleString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit"
-                    })}
-                  </small>
-                </span>
-                {ACTIVE_STATES.has(job.state) && <b>{job.progress.percent}%</b>}
-              </button>
+                <button className="job-select" onClick={() => setSelected(job)}>
+                  <span className={`status-dot ${job.state}`} />
+                  <span>
+                    <strong>{job.prompts.map((item) => item.text).join(", ")}</strong>
+                    <small>
+                      {job.state} ·{" "}
+                      {new Date(job.created_at).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit"
+                      })}
+                    </small>
+                  </span>
+                  {ACTIVE_STATES.has(job.state) && <b>{job.progress.percent}%</b>}
+                </button>
+                <div className="job-identifier">
+                  <span>Job ID</span>
+                  <code title={job.job_id}>{job.job_id}</code>
+                  <button
+                    type="button"
+                    onClick={() => void copyJobId(job.job_id)}
+                    aria-label={`Copy job ID ${job.job_id}`}
+                  >
+                    {copiedJobId === job.job_id ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
             ))}
           </section>
         </aside>

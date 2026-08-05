@@ -271,14 +271,21 @@ h2 {
 
 .job {
   width: 100%;
+  padding: 8px 10px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+}
+
+.job-select {
+  width: 100%;
   display: grid;
   grid-template-columns: 9px 1fr auto;
   gap: 10px;
   align-items: center;
-  padding: 12px;
+  padding: 4px 2px 6px;
   text-align: left;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  border: 0;
   background: transparent;
   cursor: pointer;
 }
@@ -289,12 +296,12 @@ h2 {
   background: #0d2132;
 }
 
-.job strong,
-.job small {
+.job-select strong,
+.job-select small {
   display: block;
 }
 
-.job strong {
+.job-select strong {
   overflow: hidden;
   margin-bottom: 3px;
   font-size: 13px;
@@ -302,15 +309,50 @@ h2 {
   white-space: nowrap;
 }
 
-.job small {
+.job-select small {
   color: #647d91;
   font-size: 10px;
   text-transform: capitalize;
 }
 
-.job b {
+.job-select b {
   color: #56cde9;
   font-size: 11px;
+}
+
+.job-identifier {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 2px 0 21px;
+  border-top: 1px solid rgba(30, 67, 89, 0.55);
+  color: #567084;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.job-identifier code {
+  overflow: hidden;
+  color: #8aa5b6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+  user-select: all;
+}
+
+.job-identifier button {
+  padding: 2px 4px;
+  color: #56cde9;
+  border: 0;
+  background: transparent;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
 }
 
 .status-dot {
