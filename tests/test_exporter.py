@@ -233,6 +233,42 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(len(observations), 1)
         self.assertEqual(len(events), 1)
 
+    def test_offset_parallel_exit_lines_from_screenshot_are_consolidated(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "track_id": "boat:track:1"},
+            line=(120.0, 190.0, 400.0, 170.0),
+            color=(255, 255, 255, 255),
+        )
+        targets = [
+            Centerline(
+                record={"prompt_id": "paddle", "track_id": f"paddle:{index}"},
+                line=line,
+                color=(255, 255, 255, 255),
+            )
+            for index, line in enumerate(
+                [
+                    (232.0, 9.0, 279.0, 224.0),
+                    (248.0, 10.0, 301.0, 214.0),
+                ],
+                start=1,
+            )
+        ]
+
+        observations = _consolidate_paddle_observations(
+            targets, [reference], 537, 243
+        )
+        events = _dedupe_paddle_events(
+            [
+                PaddleEvent("exit", 1000, "paddle:1", targets[0].line, 0.8),
+                PaddleEvent("exit", 1100, "paddle:2", targets[1].line, 0.9),
+            ],
+            537,
+            243,
+        )
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(len(events), 1)
+
     def test_paddle_water_depth_is_normalized_against_waterline(self) -> None:
         waterline = (0.0, 50.0, 100.0, 50.0)
 
@@ -290,6 +326,32 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual([moment.frame_index for moment in moments], [30, 54])
         self.assertEqual(moments[0].events, (first, second))
+
+    def test_freeze_moment_respects_configured_metric_count(self) -> None:
+        events = [
+            PaddleEvent(
+                kind="exit",
+                timestamp_ms=1000 + index * 50,
+                instance_id=f"paddle:{index}",
+                line=line,
+                confidence=confidence,
+            )
+            for index, (line, confidence) in enumerate(
+                [
+                    ((232.0, 9.0, 279.0, 224.0), 0.8),
+                    ((248.0, 10.0, 301.0, 214.0), 0.9),
+                ],
+                start=1,
+            )
+        ]
+
+        moments = _freeze_moments(
+            events, 30, 90, max_events_per_moment=1
+        )
+
+        self.assertEqual(len(moments), 1)
+        self.assertEqual(len(moments[0].events), 1)
+        self.assertEqual(moments[0].events[0].instance_id, "paddle:2")
 
     def test_freeze_filters_insert_pause_before_resuming_event_frame(self) -> None:
         event = PaddleEvent(

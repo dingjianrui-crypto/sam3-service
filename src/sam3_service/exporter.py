@@ -38,6 +38,8 @@ PADDLE_EVENT_MAX_CONFIRM_GAP_MS = 400
 PADDLE_EVENT_TRACK_GAP_MS = 1500
 PADDLE_BLADE_ZONE_RATIO = 0.28
 PADDLE_FRAGMENT_ANGLE_DEGREES = 14.0
+PADDLE_FRAGMENT_MIN_PERPENDICULAR_PIXELS = 24.0
+PADDLE_FRAGMENT_PERPENDICULAR_FRAME_RATIO = 0.04
 PADDLE_PHASE_LOW_DEGREES = 20.0
 PADDLE_PHASE_HIGH_DEGREES = 70.0
 PADDLE_EVENT_PHASE_GAP = 4
@@ -307,7 +309,12 @@ def export_centerline_video(
             scale_y,
             progress,
         )
-    freeze_moments = _freeze_moments(events, fps, frame_count)
+    freeze_moments = _freeze_moments(
+        events,
+        fps,
+        frame_count,
+        max_events_per_moment=export_options.target_slot_count,
+    )
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
     output_frame_count = frame_count + freeze_frame_count * len(freeze_moments)
@@ -443,7 +450,10 @@ def _report_progress(
 
 
 def _freeze_moments(
-    events: list[PaddleEvent], fps: float, frame_count: int
+    events: list[PaddleEvent],
+    fps: float,
+    frame_count: int,
+    max_events_per_moment: int = 0,
 ) -> tuple[FreezeMoment, ...]:
     if not events or frame_count <= 0:
         return ()
@@ -465,7 +475,18 @@ def _freeze_moments(
         )
         events_by_frame.setdefault(frame_index, []).extend(group)
     return tuple(
-        FreezeMoment(frame_index=frame_index, events=tuple(group))
+        FreezeMoment(
+            frame_index=frame_index,
+            events=tuple(
+                sorted(
+                    group,
+                    key=lambda event: (event.confidence, _line_length(event.line)),
+                    reverse=True,
+                )[:max_events_per_moment]
+                if max_events_per_moment > 0
+                else group
+            ),
+        )
         for frame_index, group in sorted(events_by_frame.items())
     )
 
@@ -1157,7 +1178,10 @@ def _paddle_fragments_compatible(
         second_center[1] - first_center[1],
     )
     perpendicular_gap = abs(_dot(center_delta, perpendicular))
-    perpendicular_limit = max(12.0, min(width, height) * 0.025)
+    perpendicular_limit = max(
+        PADDLE_FRAGMENT_MIN_PERPENDICULAR_PIXELS,
+        min(width, height) * PADDLE_FRAGMENT_PERPENDICULAR_FRAME_RATIO,
+    )
     if perpendicular_gap > perpendicular_limit:
         return False
     first_interval = sorted(
