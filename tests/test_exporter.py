@@ -42,6 +42,7 @@ from sam3_service.exporter import (
     _paddle_event_angle_color,
     _record_line,
     _record_selected_for_export,
+    _restore_immersed_paddle_length,
     _resolve_requested_track_ids,
     _resolved_export_frame_count,
     _selection_rect_at,
@@ -192,6 +193,59 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(_paddle_event_angle_color(events[0]), (255, 82, 96, 255))
         self.assertEqual(_paddle_event_angle_color(events[1]), (46, 204, 113, 255))
 
+    def test_catch_length_restores_cropped_immersed_blade_until_exit(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+        )
+        events: list[PaddleEvent] = []
+        lengths_at_event: list[float] = []
+        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150]):
+            observation = _rotating_observation(angle)
+            if angle >= 90:
+                line = observation.line
+                observation = _PaddleObservation(
+                    source_ids=observation.source_ids,
+                    reference_id=observation.reference_id,
+                    line=(
+                        line[0],
+                        line[1],
+                        line[0] + (line[2] - line[0]) * 0.55,
+                        line[1] + (line[3] - line[1]) * 0.55,
+                    ),
+                    reference_line=observation.reference_line,
+                )
+            event = _update_directed_paddle_state(
+                state,
+                observation,
+                index * 100,
+                4.0,
+            )
+            if event is not None:
+                events.append(event)
+                lengths_at_event.append(math.dist(event.line[:2], event.line[2:]))
+
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
+        self.assertAlmostEqual(lengths_at_event[0], 60.0)
+        self.assertAlmostEqual(lengths_at_event[1], 60.0)
+        self.assertIsNone(state.stroke_length)
+
+    def test_immersed_length_restoration_extends_only_the_active_blade(self) -> None:
+        state = _PaddleEventState(
+            stroke_length=100.0,
+            stroke_blade=0,
+            stroke_cycle_index=0,
+        )
+
+        restored = _restore_immersed_paddle_length(
+            state,
+            (40.0, 0.0, 100.0, 0.0),
+        )
+
+        self.assertEqual(restored, (0.0, 0.0, 100.0, 0.0))
+
     def test_event_label_prefers_directed_phase_angle_over_acute_angle(self) -> None:
         event = PaddleEvent(
             kind="catch",
@@ -237,7 +291,12 @@ class ExporterTest(unittest.TestCase):
         )
 
     def test_catch_and_exit_gates_reset_independently_each_cycle(self) -> None:
-        state = _PaddleEventState(active_blade=1)
+        state = _PaddleEventState(
+            active_blade=1,
+            stroke_length=60.0,
+            stroke_blade=1,
+            stroke_cycle_index=0,
+        )
         state.emitted_events.update({(0, "catch"), (0, "exit")})
         state.last_directed_angle = 350
         state.unwrapped_angle = 350
@@ -246,6 +305,7 @@ class ExporterTest(unittest.TestCase):
         self.assertFalse(_event_phase_allowed(state, "exit"))
         self.assertTrue(_advance_directed_paddle_phase(state, 10))
         self.assertEqual(state.cycle_index, 1)
+        self.assertIsNone(state.stroke_length)
         self.assertTrue(_catch_phase_allowed(state, 1))
         self.assertTrue(_event_phase_allowed(state, "exit"))
 
@@ -334,6 +394,9 @@ class ExporterTest(unittest.TestCase):
         self.assertIsNone(
             _update_directed_paddle_state(state, _rotating_observation(30), 0, 4.0)
         )
+        state.stroke_length = 60.0
+        state.stroke_blade = 1
+        state.stroke_cycle_index = 0
         self.assertIsNone(
             _update_directed_paddle_state(state, _rotating_observation(60), 500, 4.0)
         )
@@ -341,6 +404,7 @@ class ExporterTest(unittest.TestCase):
             _update_directed_paddle_state(state, _rotating_observation(90), 600, 4.0)
         )
         self.assertEqual(state.emitted_events, set())
+        self.assertIsNone(state.stroke_length)
 
     def test_collinear_exit_fragments_are_one_observation_and_one_event(self) -> None:
         reference = Centerline(
@@ -627,6 +691,17 @@ class ExporterTest(unittest.TestCase):
                 use_waterline=True,
             ),
             (0.0, 20.0, 100.0, 20.0),
+        )
+
+    def test_waterline_is_extended_to_the_boat_centerline_span(self) -> None:
+        record = {
+            "centerline_line_xyxy": [0, 20, 100, 20],
+            "waterline_line_xyxy": [25, 30, 75, 30],
+        }
+
+        self.assertEqual(
+            _record_line(record, 100, 100, use_waterline=True),
+            (0.0, 30.0, 100.0, 30.0),
         )
 
     def test_computes_degree_label_for_each_target_paddle(self) -> None:

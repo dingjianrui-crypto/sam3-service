@@ -43,6 +43,10 @@ camera and does not attempt to infer unsupported camera-side depth.
    track-ID changes.
 8. Preserve the first-transition timestamp while using temporal confirmation
    to reject single-frame noise.
+9. Preserve the paddle's catch-time length while its active blade is partially
+   occluded by water, and use the reconstructed line for exit detection.
+10. Extend the robust central waterline fit to the detected boat's longitudinal
+    bow-to-stern span without extrapolating it across unrelated image regions.
 
 ## 4. Non-goals
 
@@ -147,8 +151,10 @@ independent operation.
 3. Consolidate nearby collinear fragments into one physical observation.
 4. Associate observations with persistent physical-paddle tracks.
 5. Stabilize line length and endpoint ordering.
-6. Estimate rotation direction from the temporal paddle-axis sequence.
-7. Derive travel direction and a confidence score.
+6. Extend the fitted waterline slope to the projected span of the matched boat
+   centerline.
+7. Estimate rotation direction from the temporal paddle-axis sequence.
+8. Derive travel direction and a confidence score.
 
 ### 7.2 Pass B: phase and event analysis
 
@@ -294,9 +300,12 @@ BAND:  -band_half_width <= depth <= band_half_width
 BELOW: depth > band_half_width
 ```
 
-The transition must also project onto the finite waterline segment, extended by
-a small configurable end margin. This prevents a mathematical crossing far
-beyond the detected boat/water region from generating an event.
+The robust waterline fitter continues to estimate slope from the central hull
+boundary, excluding curved and noisy bow/stern pixels. Before event analysis or
+rendering, project the full boat centerline endpoints onto that fitted slope and
+extend the finite waterline to that bow-to-stern span. This admits legitimate
+blade crossings near either end of the boat while still rejecting mathematical
+crossings beyond the detected hull.
 
 ### 11.2 Catch candidate
 
@@ -321,6 +330,23 @@ Start an exit candidate when all conditions hold:
 The signed-depth state represents immersion across the complete underwater
 portion of the stroke. It avoids interpreting separation from a narrow
 waterline band while the blade is moving deeper as an exit.
+
+### 11.4 Catch-scoped paddle-length reconstruction
+
+When a catch is confirmed, record a robust paddle length from the catch line
+and the recent pre-catch length samples. Until exit or phase expiration:
+
+1. maintain temporal endpoint ordering;
+2. treat the catch endpoint as the active immersed blade;
+3. retain an observed line that is at least the recorded length;
+4. when the observed line is shorter, preserve the dry endpoint and extend only
+   the active endpoint along the current observed axis to the recorded length;
+5. use the reconstructed line for directed phase progression, signed-depth
+   classification, exit detection, and exit event geometry.
+
+The recorded length is cleared on confirmed exit, a new `360°` cycle, or a
+tracking gap longer than the event continuity window. The next confirmed catch
+records a fresh length.
 
 ## 12. Candidate Confirmation and Timestamping
 
@@ -361,6 +387,10 @@ PaddleTrackState
   source_ids
   last_seen_ms
   stabilized_line
+  recent_pre_catch_lengths
+  stroke_length
+  stroke_blade
+  stroke_cycle_index
   endpoint_tracks[2]
   rotation_direction
   travel_direction
@@ -408,9 +438,10 @@ For a gap no longer than the `400 ms` event/direction continuity window:
 
 For a longer gap that is still within the `1500 ms` physical-track association
 window, preserve the physical identity but clear active-blade, phase, pending
-candidate, and per-cycle eligibility state. The first returned observation is
-used only as a new baseline; a later reliable transition re-anchors the active
-blade. This prevents a transition from being synthesized across missing frames.
+candidate, per-cycle eligibility, and catch-scoped length state. The first
+returned observation is used only as a new baseline; a later reliable
+transition re-anchors the active blade. This prevents a transition from being
+synthesized across missing frames.
 
 ### 14.2 Ambiguous phase after a gap
 
@@ -554,6 +585,8 @@ right-moving videos before being exposed as user-facing configuration.
 - Endpoint signed depth is positive below the waterline.
 - Crossings outside the finite waterline extent are rejected.
 - Endpoint order swaps do not change active-blade identity.
+- A central fitted waterline extends to the projected bow-to-stern boat span.
+- A cropped immersed endpoint is reconstructed without moving the dry endpoint.
 
 ### 20.2 Direction unit tests
 
@@ -583,6 +616,9 @@ right-moving videos before being exposed as user-facing configuration.
 - Missing both events does not block either event in the next cycle.
 - A candidate confirming across a phase boundary keeps its first-frame cycle.
 - A single-frame waterline touch emits no event.
+- Catch records a robust stroke length and cropped subsequent observations use
+  that length to detect exit.
+- Stroke length clears after exit, phase advance, and a continuity-breaking gap.
 
 ### 20.5 Integration tests
 
@@ -612,6 +648,10 @@ The implementation is acceptable when all of the following hold:
 10. Hidden strokes do not generate synthetic events.
 11. Mirrored left/right test sequences produce equivalent normalized results.
 12. Existing export API and freeze rendering remain backward compatible.
+13. A paddle crossing anywhere within the detected bow-to-stern span remains
+    eligible for catch or exit.
+14. Partial underwater segmentation does not shorten the active paddle line
+    used for exit detection during a confirmed stroke.
 
 ## 22. Diagnostics and Validation
 
