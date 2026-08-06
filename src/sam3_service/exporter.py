@@ -1255,7 +1255,7 @@ def _detect_paddle_events(
     }
 
     detected: list[PaddleEvent] = []
-    band_half_width = _event_band_half_width(scale_x, scale_y)
+    band_upward_width = _event_band_upward_width(scale_x, scale_y)
     ordered_tracks = sorted(tracks.items())
     for index, (physical_id, observations) in enumerate(ordered_tracks):
         reference_id = _dominant_reference_id(observations)
@@ -1276,7 +1276,7 @@ def _detect_paddle_events(
                 state,
                 timed.observation,
                 timed.timestamp_ms,
-                band_half_width,
+                band_upward_width,
             )
             if event is not None:
                 detected.append(event)
@@ -1411,7 +1411,7 @@ def _estimate_paddle_direction(
     return "anticlockwise", "left", round(consensus, 3)
 
 
-def _event_band_half_width(scale_x: float, scale_y: float) -> float:
+def _event_band_upward_width(scale_x: float, scale_y: float) -> float:
     raw = os.getenv(
         "SAM3_CENTERLINE_THICKNESS_PIXELS",
         os.getenv("SAM3_SHAFT_THICKNESS_PIXELS", "8"),
@@ -1420,7 +1420,7 @@ def _event_band_half_width(scale_x: float, scale_y: float) -> float:
         thickness = float(raw)
     except ValueError:
         thickness = 8.0
-    return max(1.0, min(64.0, thickness / 2)) * max(scale_x, scale_y)
+    return max(1.0, min(64.0, thickness)) * max(scale_x, scale_y)
 
 
 def _consolidate_paddle_observations(
@@ -1637,7 +1637,7 @@ def _update_directed_paddle_state(
     state: _PaddleEventState,
     observation: _PaddleObservation,
     timestamp_ms: int,
-    band_half_width: float,
+    band_upward_width: float,
 ) -> PaddleEvent | None:
     previous_depths = state.endpoint_depths
     previous_seen_ms = state.last_seen_ms
@@ -1690,7 +1690,7 @@ def _update_directed_paddle_state(
         state,
         timestamp_ms,
         depths,
-        band_half_width,
+        band_upward_width,
     )
     if confirmed is not None:
         if confirmed.kind == "catch" and state.stroke_length is not None:
@@ -1712,7 +1712,7 @@ def _update_directed_paddle_state(
             previous_depths[blade],
             depths[blade],
             depth_delta,
-            band_half_width,
+            band_upward_width,
         )
         if kind is None:
             continue
@@ -1720,7 +1720,7 @@ def _update_directed_paddle_state(
             line,
             observation.reference_line,
             blade,
-            band_half_width,
+            band_upward_width,
         ):
             continue
         transitions.append((abs(depth_delta), kind, blade))
@@ -1752,7 +1752,10 @@ def _update_directed_paddle_state(
             confidence = min(
                 1.0,
                 state.direction_confidence
-                * (0.7 + min(0.3, abs(depth_delta) / max(band_half_width * 4, 1))),
+                * (
+                    0.7
+                    + min(0.3, abs(depth_delta) / max(band_upward_width * 2, 1))
+                ),
             )
             _start_directed_event_candidate(
                 state,
@@ -1771,7 +1774,7 @@ def _update_phase_aware_paddle_state(
     state: _PaddleEventState,
     observation: _PaddleObservation,
     timestamp_ms: int,
-    band_half_width: float,
+    band_upward_width: float,
 ) -> PaddleEvent | None:
     """Compatibility name for the directed phase-aware implementation."""
     line = _stabilize_paddle_line(state, observation.line)
@@ -1779,7 +1782,7 @@ def _update_phase_aware_paddle_state(
         state,
         replace(observation, line=line),
         timestamp_ms,
-        band_half_width,
+        band_upward_width,
     )
 
 
@@ -1787,17 +1790,17 @@ def _waterline_transition_kind(
     previous_depth: float,
     depth: float,
     depth_delta: float,
-    band_half_width: float,
+    band_upward_width: float,
 ) -> str | None:
     if (
-        previous_depth < -band_half_width
-        and depth >= -band_half_width
+        previous_depth < -band_upward_width
+        and depth >= -band_upward_width
         and depth_delta > PADDLE_DEPTH_MOTION_EPSILON_PIXELS
     ):
         return "catch"
     if (
-        previous_depth > band_half_width
-        and depth <= band_half_width
+        previous_depth > 0
+        and depth <= 0
         and depth_delta < -PADDLE_DEPTH_MOTION_EPSILON_PIXELS
     ):
         return "exit"
@@ -1808,7 +1811,7 @@ def _blade_transition_on_waterline(
     line: Line,
     reference_line: Line,
     blade: int,
-    band_half_width: float,
+    band_upward_width: float,
 ) -> bool:
     # Event analysis treats the fitted waterline as an infinite line. The finite
     # boat-span segment remains attached to the event solely for export drawing.
@@ -1816,10 +1819,9 @@ def _blade_transition_on_waterline(
     active_depth = depths[blade]
     dry_depth = depths[1 - blade]
     inner_depth = active_depth + (dry_depth - active_depth) * PADDLE_BLADE_ZONE_RATIO
-    overlap_distance = band_half_width * 2
     blade_zone_overlaps = (
-        min(active_depth, inner_depth) <= overlap_distance
-        and max(active_depth, inner_depth) >= -overlap_distance
+        min(active_depth, inner_depth) <= 0
+        and max(active_depth, inner_depth) >= -band_upward_width
     )
     paddle_crosses = min(depths) <= 0 <= max(depths)
     return blade_zone_overlaps or paddle_crosses
@@ -1908,14 +1910,14 @@ def _confirm_pending_directed_event(
     state: _PaddleEventState,
     timestamp_ms: int,
     depths: tuple[float, float],
-    band_half_width: float,
+    band_upward_width: float,
 ) -> PaddleEvent | None:
     for kind, candidate in list(state.candidates.items()):
         age_ms = timestamp_ms - candidate.timestamp_ms
         compatible = (
-            depths[candidate.blade] >= -band_half_width
+            depths[candidate.blade] >= -band_upward_width
             if kind == "catch"
-            else depths[candidate.blade] <= band_half_width
+            else depths[candidate.blade] <= 0
         )
         if age_ms > PADDLE_EVENT_MAX_CONFIRM_GAP_MS or not compatible:
             del state.candidates[kind]

@@ -51,6 +51,7 @@ from sam3_service.exporter import (
     _spm_label_top,
     _update_directed_paddle_state,
     _update_paddle_event_state,
+    _waterline_transition_kind,
 )
 
 
@@ -172,26 +173,26 @@ class ExporterTest(unittest.TestCase):
             direction_confidence=1.0,
         )
         events = []
-        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150]):
+        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150, 165]):
             event = _update_directed_paddle_state(
                 state,
                 _rotating_observation(angle),
                 index * 100,
-                4.0,
+                8.0,
             )
             if event is not None:
                 events.append(event)
 
         self.assertEqual([(event.kind, event.timestamp_ms) for event in events], [
-            ("catch", 200),
-            ("exit", 600),
+            ("catch", 100),
+            ("exit", 700),
         ])
         self.assertEqual([event.cycle_index for event in events], [0, 0])
         self.assertEqual([event.active_blade for event in events], [1, 1])
         self.assertEqual(events[0].travel_direction, "right")
-        self.assertAlmostEqual(events[0].phase_angle or 0, 45)
-        self.assertEqual(_event_label_text(events[0]), "45°")
-        self.assertEqual(_event_label_text(events[1]), "135°")
+        self.assertAlmostEqual(events[0].phase_angle or 0, 30)
+        self.assertEqual(_event_label_text(events[0]), "30°")
+        self.assertEqual(_event_label_text(events[1]), "150°")
         self.assertEqual(_paddle_event_angle_color(events[0]), (255, 82, 96, 255))
         self.assertEqual(_paddle_event_angle_color(events[1]), (46, 204, 113, 255))
 
@@ -204,7 +205,7 @@ class ExporterTest(unittest.TestCase):
         )
         events: list[PaddleEvent] = []
         lengths_at_event: list[float] = []
-        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150]):
+        for index, angle in enumerate([0, 30, 45, 60, 90, 120, 135, 150, 165]):
             observation = _rotating_observation(angle)
             if angle >= 90:
                 line = observation.line
@@ -223,7 +224,7 @@ class ExporterTest(unittest.TestCase):
                 state,
                 observation,
                 index * 100,
-                4.0,
+                8.0,
             )
             if event is not None:
                 events.append(event)
@@ -316,7 +317,7 @@ class ExporterTest(unittest.TestCase):
             stroke_cycle_index=0,
         )
 
-        self.assertIsNone(_update_directed_paddle_state(state, observation, 100, 4.0))
+        self.assertIsNone(_update_directed_paddle_state(state, observation, 100, 8.0))
 
         assert state.last_line is not None
         for actual, expected in zip(state.last_line, full.line, strict=True):
@@ -372,7 +373,7 @@ class ExporterTest(unittest.TestCase):
                 state,
                 _rotating_observation(angle),
                 index * 100,
-                4.0,
+                8.0,
             )
             if event is not None:
                 events.append(event)
@@ -409,18 +410,18 @@ class ExporterTest(unittest.TestCase):
             direction_confidence=1.0,
         )
         events = []
-        for index, angle in enumerate([90, 120, 135, 150]):
+        for index, angle in enumerate([90, 120, 135, 150, 165]):
             event = _update_directed_paddle_state(
                 state,
                 _rotating_observation(angle),
                 index * 100,
-                4.0,
+                8.0,
             )
             if event is not None:
                 events.append(event)
 
         self.assertEqual([(event.kind, event.timestamp_ms) for event in events], [
-            ("exit", 200),
+            ("exit", 300),
         ])
         self.assertNotIn((0, "catch"), state.emitted_events)
 
@@ -428,7 +429,9 @@ class ExporterTest(unittest.TestCase):
         for travel_direction in ("right", "left"):
             with self.subTest(travel_direction=travel_direction):
                 frames: dict[int, list[dict[str, object]]] = {}
-                for index, angle in enumerate([0, 15, 30, 45, 60, 90, 120, 135, 150]):
+                for index, angle in enumerate(
+                    [0, 15, 30, 45, 60, 90, 120, 135, 150, 165]
+                ):
                     observation = _rotating_observation(
                         angle,
                         travel_direction=travel_direction,
@@ -470,8 +473,8 @@ class ExporterTest(unittest.TestCase):
                         for event in events
                     ],
                     [
-                        ("catch", 300, travel_direction),
-                        ("exit", 700, travel_direction),
+                        ("catch", 200, travel_direction),
+                        ("exit", 800, travel_direction),
                     ],
                 )
 
@@ -484,16 +487,16 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertIsNone(
-            _update_directed_paddle_state(state, _rotating_observation(30), 0, 4.0)
+            _update_directed_paddle_state(state, _rotating_observation(30), 0, 8.0)
         )
         state.stroke_length = 60.0
         state.stroke_blade = 1
         state.stroke_cycle_index = 0
         self.assertIsNone(
-            _update_directed_paddle_state(state, _rotating_observation(60), 500, 4.0)
+            _update_directed_paddle_state(state, _rotating_observation(60), 500, 8.0)
         )
         self.assertIsNone(
-            _update_directed_paddle_state(state, _rotating_observation(90), 600, 4.0)
+            _update_directed_paddle_state(state, _rotating_observation(90), 600, 8.0)
         )
         self.assertEqual(state.emitted_events, set())
         self.assertIsNone(state.stroke_length)
@@ -850,8 +853,13 @@ class ExporterTest(unittest.TestCase):
 
         self.assertFalse(_blade_waterline_overlaps(paddle, short_waterline, 4.0)[1])
         self.assertTrue(
-            _blade_transition_on_waterline(paddle, short_waterline, 1, 4.0)
+            _blade_transition_on_waterline(paddle, short_waterline, 1, 8.0)
         )
+
+    def test_event_waterline_band_extends_eight_pixels_upward_only(self) -> None:
+        self.assertEqual(_waterline_transition_kind(-9.0, -7.0, 2.0, 8.0), "catch")
+        self.assertIsNone(_waterline_transition_kind(5.0, 1.0, -4.0, 8.0))
+        self.assertEqual(_waterline_transition_kind(1.0, -1.0, -2.0, 8.0), "exit")
 
     def test_computes_degree_label_for_each_target_paddle(self) -> None:
         reference = Centerline(

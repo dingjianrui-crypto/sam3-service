@@ -298,11 +298,18 @@ depth < 0 => above the waterline
 
 Use a finite-width band to tolerate fitted-line jitter:
 
+The event waterline has an asymmetric 8-pixel band that extends upward from the
+fitted waterline, rather than four pixels to each side:
+
 ```text
-ABOVE: depth < -band_half_width
-BAND:  -band_half_width <= depth <= band_half_width
-BELOW: depth > band_half_width
+ABOVE: depth < -band_upward_width
+BAND:  -band_upward_width <= depth <= 0
+BELOW: depth > 0
 ```
+
+The default `band_upward_width` is `8px`, scaled with the analyzed video. Catch
+enters the upper edge at `-8px`; exit enters the lower edge at the fitted
+waterline (`0px`).
 
 The robust waterline fitter continues to estimate slope from the central hull
 boundary, excluding curved and noisy bow/stern pixels. The fitted direction has
