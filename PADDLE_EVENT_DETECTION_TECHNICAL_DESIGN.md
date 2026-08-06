@@ -43,10 +43,10 @@ camera and does not attempt to infer unsupported camera-side depth.
    track-ID changes.
 8. Preserve the first-transition timestamp while using temporal confirmation
    to reject single-frame noise.
-9. Preserve the paddle's catch-time length while its active blade is partially
-   occluded by water, and use the reconstructed line for exit detection.
-10. Extend the robust central waterline fit to the detected boat's longitudinal
-    bow-to-stern span without extrapolating it across unrelated image regions.
+9. Preserve a non-decreasing paddle length during each directed `0°-180°`
+   stroke phase while its active blade is partially occluded by water.
+10. Treat the fitted waterline as infinite for event analysis while drawing it
+    only across the detected boat's longitudinal bow-to-stern span.
 11. Suppress a below-boat mirrored paddle candidate when a distinct above-boat
     candidate is detected near the same boat.
 
@@ -305,11 +305,15 @@ BELOW: depth > band_half_width
 ```
 
 The robust waterline fitter continues to estimate slope from the central hull
-boundary, excluding curved and noisy bow/stern pixels. Before event analysis or
-rendering, project the full boat centerline endpoints onto that fitted slope and
-extend the finite waterline to that bow-to-stern span. This admits legitimate
-blade crossings near either end of the boat while still rejecting mathematical
-crossings beyond the detected hull.
+boundary, excluding curved and noisy bow/stern pixels. The fitted direction has
+two uses:
+
+1. event geometry treats it as an infinite line for signed depth, paddle
+   intersection, and angle estimation, so an incomplete boat mask cannot make a
+   valid crossing miss the fitted waterline merely because it is outside the
+   detected segment;
+2. export rendering projects the detected boat centerline endpoints onto the
+   fitted slope and draws only that finite bow-to-stern span.
 
 ### 11.2 Catch candidate
 
@@ -318,7 +322,7 @@ Start a catch candidate when all conditions hold:
 1. the active endpoint moves from `ABOVE` toward `BAND` or `BELOW`, including a
    direct `ABOVE -> BELOW` transition at low frame rates;
 2. signed depth is increasing beyond a small motion epsilon;
-3. the centerline/waterline crossing lies within the finite waterline extent;
+3. the active blade zone overlaps the infinite fitted waterline;
 4. no catch has already been emitted for the candidate's cycle.
 
 ### 11.3 Exit candidate
@@ -328,29 +332,41 @@ Start an exit candidate when all conditions hold:
 1. the active endpoint moves from `BELOW` toward `BAND` or `ABOVE`, including a
    direct `BELOW -> ABOVE` transition;
 2. signed depth is decreasing beyond a small motion epsilon;
-3. the centerline/waterline crossing lies within the finite waterline extent;
+3. the active blade zone overlaps the infinite fitted waterline;
 4. no exit has already been emitted for the candidate's cycle.
 
 The signed-depth state represents immersion across the complete underwater
 portion of the stroke. It avoids interpreting separation from a narrow
 waterline band while the blade is moving deeper as an exit.
 
-### 11.4 Catch-scoped paddle-length reconstruction
+### 11.4 Stroke-phase paddle-length reconstruction
 
-When a catch is confirmed, record a robust paddle length from the catch line
-and the recent pre-catch length samples. Until exit or phase expiration:
+Within each directed `0°-180°` stroke phase, maintain a phase-local accepted
+paddle length:
 
 1. maintain temporal endpoint ordering;
-2. treat the catch endpoint as the active immersed blade;
-3. retain an observed line that is at least the recorded length;
-4. when the observed line is shorter, preserve the dry endpoint and extend only
-   the active endpoint along the current observed axis to the recorded length;
-5. use the reconstructed line for directed phase progression, signed-depth
-   classification, exit detection, and exit event geometry.
+2. retain the identified active immersed blade for the phase;
+3. initialize the accepted length from the first usable observation in the
+   phase, including the immediately preceding observation when the active blade
+   is first identified mid-phase;
+4. increase the accepted length when a longer valid line is observed, but never
+   decrease it within the same phase;
+5. when the observed line is shorter, anchor the inactive endpoint and extend
+   only the active endpoint along the current observed axis to the accepted
+   length;
+6. use the reconstructed line for signed-depth classification, catch/exit
+   detection, event angle, and event geometry.
 
-The recorded length is cleared on confirmed exit, a new `360°` cycle, or a
-tracking gap longer than the event continuity window. The next confirmed catch
-records a fresh length.
+Track association may retain a generically stabilized line for identity and
+angle continuity, but event reconstruction also retains the pre-stabilized,
+consistently oriented line. The phase-local reconstruction operates on that raw
+line so generic stabilization cannot anchor the cropped active endpoint before
+the active-blade-aware rule runs.
+
+The accepted length remains inherited after exit until the directed angle moves
+beyond `180°`. It is not inherited into the recovery half of the revolution or
+the next `0°-180°` stroke phase. A continuity-breaking tracking gap also clears
+it.
 
 ## 12. Candidate Confirmation and Timestamping
 
@@ -594,7 +610,8 @@ right-moving videos before being exposed as user-facing configuration.
 - Left/anticlockwise and mirrored right/clockwise samples produce the same
   normalized phase angles.
 - Endpoint signed depth is positive below the waterline.
-- Crossings outside the finite waterline extent are rejected.
+- Crossings outside the finite drawn waterline extent are accepted against the
+  infinite analysis waterline.
 - Endpoint order swaps do not change active-blade identity.
 - A central fitted waterline extends to the projected bow-to-stern boat span.
 - A cropped immersed endpoint is reconstructed without moving the dry endpoint.
@@ -629,9 +646,10 @@ right-moving videos before being exposed as user-facing configuration.
 - Missing both events does not block either event in the next cycle.
 - A candidate confirming across a phase boundary keeps its first-frame cycle.
 - A single-frame waterline touch emits no event.
-- Catch records a robust stroke length and cropped subsequent observations use
-  that length to detect exit.
-- Stroke length clears after exit, phase advance, and a continuity-breaking gap.
+- Paddle length never decreases within one `0°-180°` stroke phase; cropped
+  observations anchor the inactive endpoint and extend the active endpoint.
+- Stroke length remains available after exit, then clears beyond `180°`, at the
+  next phase, and after a continuity-breaking gap.
 
 ### 20.5 Integration tests
 

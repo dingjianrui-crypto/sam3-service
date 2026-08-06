@@ -17,6 +17,7 @@ from sam3_service.exporter import (
     _PaddleEventState,
     _TimedPaddleObservation,
     _advance_directed_paddle_phase,
+    _blade_transition_on_waterline,
     _blade_waterline_overlaps,
     _catch_phase_allowed,
     _consolidate_paddle_observations,
@@ -33,6 +34,7 @@ from sam3_service.exporter import (
     _freeze_audio_filter,
     _freeze_moments,
     _freeze_segments,
+    _inherit_stroke_phase_length,
     _line_intersection,
     _load_frames_by_index,
     _metric_label_top,
@@ -193,7 +195,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(_paddle_event_angle_color(events[0]), (255, 82, 96, 255))
         self.assertEqual(_paddle_event_angle_color(events[1]), (46, 204, 113, 255))
 
-    def test_catch_length_restores_cropped_immersed_blade_until_exit(self) -> None:
+    def test_stroke_phase_length_restores_cropped_immersed_blade_through_exit(self) -> None:
         state = _PaddleEventState(
             physical_id="paddle:physical:1",
             rotation_direction="clockwise",
@@ -230,7 +232,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([event.kind for event in events], ["catch", "exit"])
         self.assertAlmostEqual(lengths_at_event[0], 60.0)
         self.assertAlmostEqual(lengths_at_event[1], 60.0)
-        self.assertIsNone(state.stroke_length)
+        self.assertAlmostEqual(state.stroke_length or 0, 60.0)
 
     def test_immersed_length_restoration_extends_only_the_active_blade(self) -> None:
         state = _PaddleEventState(
@@ -245,6 +247,80 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual(restored, (0.0, 0.0, 100.0, 0.0))
+
+    def test_stroke_length_is_inherited_only_within_one_zero_to_180_phase(self) -> None:
+        state = _PaddleEventState(
+            active_blade=0,
+            cycle_index=2,
+            unwrapped_angle=750.0,
+        )
+
+        first = _inherit_stroke_phase_length(state, (0.0, 0.0, 100.0, 0.0))
+        cropped = _inherit_stroke_phase_length(state, (25.0, 0.0, 100.0, 0.0))
+
+        self.assertEqual(first, (0.0, 0.0, 100.0, 0.0))
+        self.assertEqual(cropped, (0.0, 0.0, 100.0, 0.0))
+        self.assertEqual(state.stroke_length, 100.0)
+
+        state.unwrapped_angle = 901.0
+        recovery = _inherit_stroke_phase_length(state, (25.0, 0.0, 100.0, 0.0))
+
+        self.assertEqual(recovery, (25.0, 0.0, 100.0, 0.0))
+        self.assertIsNone(state.stroke_length)
+
+        state.cycle_index = 3
+        state.unwrapped_angle = 1110.0
+        next_stroke = _inherit_stroke_phase_length(
+            state,
+            (25.0, 0.0, 100.0, 0.0),
+        )
+
+        self.assertEqual(next_stroke, (25.0, 0.0, 100.0, 0.0))
+        self.assertEqual(state.stroke_length, 75.0)
+
+    def test_phase_inheritance_uses_raw_line_before_generic_stabilization(self) -> None:
+        full = _rotating_observation(30)
+        dry = full.line[:2]
+        active = full.line[2:]
+        unit = (
+            (active[0] - dry[0]) / 60.0,
+            (active[1] - dry[1]) / 60.0,
+        )
+        cropped_active = (
+            dry[0] + unit[0] * 42.0,
+            dry[1] + unit[1] * 42.0,
+        )
+        wrongly_stabilized = (
+            cropped_active[0] - unit[0] * 60.0,
+            cropped_active[1] - unit[1] * 60.0,
+            cropped_active[0],
+            cropped_active[1],
+        )
+        observation = _PaddleObservation(
+            source_ids=full.source_ids,
+            reference_id=full.reference_id,
+            line=wrongly_stabilized,
+            reference_line=full.reference_line,
+            raw_line=(dry[0], dry[1], cropped_active[0], cropped_active[1]),
+        )
+        state = _PaddleEventState(
+            active_blade=1,
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+            last_directed_angle=30.0,
+            unwrapped_angle=30.0,
+            cycle_index=0,
+            stroke_length=60.0,
+            stroke_blade=1,
+            stroke_cycle_index=0,
+        )
+
+        self.assertIsNone(_update_directed_paddle_state(state, observation, 100, 4.0))
+
+        assert state.last_line is not None
+        for actual, expected in zip(state.last_line, full.line, strict=True):
+            self.assertAlmostEqual(actual, expected)
 
     def test_event_label_prefers_directed_phase_angle_over_acute_angle(self) -> None:
         event = PaddleEvent(
@@ -766,6 +842,15 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(
             _record_line(record, 100, 100, use_waterline=True),
             (0.0, 30.0, 100.0, 30.0),
+        )
+
+    def test_event_analysis_treats_short_waterline_as_infinite(self) -> None:
+        paddle = (200.0, 0.0, 200.0, 55.0)
+        short_waterline = (0.0, 50.0, 100.0, 50.0)
+
+        self.assertFalse(_blade_waterline_overlaps(paddle, short_waterline, 4.0)[1])
+        self.assertTrue(
+            _blade_transition_on_waterline(paddle, short_waterline, 1, 4.0)
         )
 
     def test_computes_degree_label_for_each_target_paddle(self) -> None:

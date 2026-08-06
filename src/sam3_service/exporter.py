@@ -47,8 +47,6 @@ PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
-PADDLE_STROKE_LENGTH_SAMPLE_COUNT = 7
-PADDLE_STROKE_LENGTH_RESTORE_RATIO = 0.98
 WATERLINE_BOAT_AXIS_MAX_ANGLE_DEGREES = 20.0
 EXPORT_END_GUARD_FRAMES = 2
 PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
@@ -135,6 +133,7 @@ class _PaddleObservation:
     reference_id: str
     line: Line
     reference_line: Line
+    raw_line: Line | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +164,6 @@ class _PaddleEventState:
     last_seen_ms: int = -1
     last_line: Line | None = None
     stable_lengths: list[float] = field(default_factory=list)
-    stroke_length_samples: list[float] = field(default_factory=list)
     stroke_length: float | None = None
     stroke_blade: int | None = None
     stroke_cycle_index: int | None = None
@@ -1341,10 +1339,11 @@ def _track_paddle_observations(
             observations, states, timestamp_ms, width, height
         )
         for observation, state in assignments:
+            raw_line = _orient_line_like(observation.line, state.last_line)
             line = _stabilize_paddle_line(state, observation.line)
             state.last_seen_ms = timestamp_ms
             state.last_line = line
-            stabilized = replace(observation, line=line)
+            stabilized = replace(observation, line=line, raw_line=raw_line)
             tracks.setdefault(state.physical_id, []).append(
                 _TimedPaddleObservation(
                     timestamp_ms=timestamp_ms,
@@ -1656,24 +1655,36 @@ def _update_directed_paddle_state(
         _clear_stroke_length(state)
         previous_depths = None
 
-    observed_line = _orient_line_like(observation.line, state.last_line)
-    if state.stroke_length is None:
-        _record_stroke_length_sample(state, observed_line)
-    line = _restore_immersed_paddle_length(state, observed_line)
-    depths = _endpoint_signed_depths(line, observation.reference_line)
-    state.last_seen_ms = timestamp_ms
-    state.last_line = line
+    previous_line = state.last_line
+    observed_line = _orient_line_like(observation.line, previous_line)
+    raw_line = (
+        _orient_line_like(observation.raw_line, observed_line)
+        if observation.raw_line
+        else observed_line
+    )
+    line = observed_line
 
     if state.active_blade is not None and state.travel_direction is not None:
         raw_angle = _directed_blade_angle(
-            line,
+            observed_line,
             observation.reference_line,
             state.active_blade,
             state.travel_direction,
         )
         if not _advance_directed_paddle_phase(state, raw_angle):
+            depths = _endpoint_signed_depths(line, observation.reference_line)
+            state.last_seen_ms = timestamp_ms
+            state.last_line = line
             state.endpoint_depths = depths
             return None
+        line = _inherit_stroke_phase_length(
+            state,
+            raw_line,
+            fallback=observed_line,
+        )
+    depths = _endpoint_signed_depths(line, observation.reference_line)
+    state.last_seen_ms = timestamp_ms
+    state.last_line = line
 
     confirmed = _confirm_pending_directed_event(
         state,
@@ -1728,6 +1739,14 @@ def _update_directed_paddle_state(
                 state.travel_direction,
             )
             _advance_directed_paddle_phase(state, raw_angle)
+            line = _inherit_stroke_phase_length(
+                state,
+                raw_line,
+                initial_length=_line_length(previous_line) if previous_line else None,
+                fallback=line,
+            )
+            depths = _endpoint_signed_depths(line, observation.reference_line)
+            state.last_line = line
         if _event_phase_allowed(state, kind):
             depth_delta = depths[blade] - previous_depths[blade]
             confidence = min(
@@ -1791,8 +1810,19 @@ def _blade_transition_on_waterline(
     blade: int,
     band_half_width: float,
 ) -> bool:
-    overlaps = _blade_waterline_overlaps(line, reference_line, band_half_width)
-    return overlaps[blade] or _line_intersection_within_segments(line, reference_line)
+    # Event analysis treats the fitted waterline as an infinite line. The finite
+    # boat-span segment remains attached to the event solely for export drawing.
+    depths = _endpoint_signed_depths(line, reference_line)
+    active_depth = depths[blade]
+    dry_depth = depths[1 - blade]
+    inner_depth = active_depth + (dry_depth - active_depth) * PADDLE_BLADE_ZONE_RATIO
+    overlap_distance = band_half_width * 2
+    blade_zone_overlaps = (
+        min(active_depth, inner_depth) <= overlap_distance
+        and max(active_depth, inner_depth) >= -overlap_distance
+    )
+    paddle_crosses = min(depths) <= 0 <= max(depths)
+    return blade_zone_overlaps or paddle_crosses
 
 
 def _directed_blade_angle(
@@ -1912,13 +1942,6 @@ def _confirm_pending_directed_event(
             rotation_direction=state.rotation_direction,
             travel_direction=state.travel_direction,
         )
-        if kind == "catch" and candidate.cycle_index == state.cycle_index:
-            state.stroke_length = _catch_stroke_length(state, candidate.line)
-            state.stroke_blade = candidate.blade
-            state.stroke_cycle_index = candidate.cycle_index
-            state.stroke_length_samples.clear()
-        elif kind == "exit":
-            _clear_stroke_length(state)
         return event
     return None
 
@@ -1941,28 +1964,6 @@ def _catch_phase_allowed(state: _PaddleEventState, blade: int = 0) -> bool:
     )
 
 
-def _record_stroke_length_sample(state: _PaddleEventState, line: Line) -> None:
-    length = _line_length(line)
-    if length < 2:
-        return
-    state.stroke_length_samples.append(length)
-    state.stroke_length_samples = state.stroke_length_samples[
-        -PADDLE_STROKE_LENGTH_SAMPLE_COUNT:
-    ]
-
-
-def _catch_stroke_length(state: _PaddleEventState, catch_line: Line) -> float:
-    catch_length = _line_length(catch_line)
-    samples = [*state.stroke_length_samples, catch_length]
-    samples = sorted(length for length in samples if length >= 2)
-    if not samples:
-        return catch_length
-    upper_quartile = samples[
-        min(len(samples) - 1, round((len(samples) - 1) * 0.75))
-    ]
-    return max(catch_length, upper_quartile)
-
-
 def _restore_immersed_paddle_length(
     state: _PaddleEventState,
     observed: Line,
@@ -1974,7 +1975,7 @@ def _restore_immersed_paddle_length(
         target_length is None
         or blade not in (0, 1)
         or observed_length < 2
-        or observed_length >= target_length * PADDLE_STROKE_LENGTH_RESTORE_RATIO
+        or observed_length >= target_length
     ):
         return observed
 
@@ -1994,11 +1995,53 @@ def _restore_immersed_paddle_length(
     return (dry[0], dry[1], restored_active[0], restored_active[1])
 
 
+def _inherit_stroke_phase_length(
+    state: _PaddleEventState,
+    observed: Line,
+    *,
+    initial_length: float | None = None,
+    fallback: Line | None = None,
+) -> Line:
+    """Keep paddle length non-decreasing within one directed 0-180 degree phase."""
+    fallback_line = observed if fallback is None else fallback
+    if (
+        state.active_blade not in (0, 1)
+        or state.unwrapped_angle is None
+        or state.cycle_index < 0
+    ):
+        return fallback_line
+
+    phase_angle = state.unwrapped_angle - state.cycle_index * 360
+    if phase_angle < 0 or phase_angle > 180:
+        if state.stroke_cycle_index == state.cycle_index:
+            _clear_stroke_length(state)
+        return fallback_line
+
+    observed_length = _line_length(observed)
+    if observed_length < 2:
+        return fallback_line
+
+    if (
+        state.stroke_cycle_index != state.cycle_index
+        or state.stroke_blade != state.active_blade
+        or state.stroke_length is None
+    ):
+        seed_length = observed_length
+        if initial_length is not None and math.isfinite(initial_length):
+            seed_length = max(seed_length, initial_length)
+        state.stroke_length = seed_length
+        state.stroke_blade = state.active_blade
+        state.stroke_cycle_index = state.cycle_index
+    elif observed_length > state.stroke_length:
+        state.stroke_length = observed_length
+
+    return _restore_immersed_paddle_length(state, observed)
+
+
 def _clear_stroke_length(state: _PaddleEventState) -> None:
     state.stroke_length = None
     state.stroke_blade = None
     state.stroke_cycle_index = None
-    state.stroke_length_samples.clear()
 
 
 def _stabilize_paddle_line(state: _PaddleEventState, observed: Line) -> Line:
