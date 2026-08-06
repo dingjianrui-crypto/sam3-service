@@ -65,6 +65,7 @@ class ExportOptions:
     include_spm: bool = False
     include_catch: bool = False
     include_exit: bool = False
+    include_event_paddle_length: bool = False
     event_hold_seconds: float = 1.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
@@ -814,6 +815,7 @@ def _normalize_export_options(
         include_spm=bool(requested.include_spm),
         include_catch=bool(requested.include_catch),
         include_exit=bool(requested.include_exit),
+        include_event_paddle_length=bool(requested.include_event_paddle_length),
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
@@ -2370,7 +2372,10 @@ def _draw_paddle_event_label(
         PADDLE_EVENT_PADDLE_COLOR,
         max(2, round(min(width, height) * 0.004)),
     )
-    text = _event_label_text(event)
+    text = _event_label_text(
+        event,
+        include_paddle_length=options.include_event_paddle_length,
+    )
     if not text:
         return
     if _draw_paddle_event_label_with_pillow(
@@ -2478,7 +2483,10 @@ def _draw_event_angle_marker(
     label_radius = radius + max(18, (options.angle_label_font_size or 32) * 0.65)
     label_x = vertex[0] + math.cos(middle_angle) * label_radius
     label_y = vertex[1] + math.sin(middle_angle) * label_radius
-    text = _event_label_text(event)
+    text = _event_label_text(
+        event,
+        include_paddle_length=options.include_event_paddle_length,
+    )
     if not _draw_paddle_event_label_with_pillow(
         image,
         width,
@@ -2504,11 +2512,16 @@ def _event_display_angle(event: PaddleEvent) -> float | None:
     return event.phase_angle if event.phase_angle is not None else event.degree
 
 
-def _event_label_text(event: PaddleEvent) -> str:
+def _event_label_text(
+    event: PaddleEvent,
+    *,
+    include_paddle_length: bool = False,
+) -> str:
     angle = _event_display_angle(event)
-    if angle is None:
-        return ""
-    return f"{round(angle) % 360}°"
+    parts = [f"{round(angle) % 360}°"] if angle is not None else []
+    if include_paddle_length:
+        parts.append(f"{round(_line_length(event.line))} px")
+    return " ".join(parts)
 
 
 def _paddle_event_angle_color(event: PaddleEvent) -> Color:
@@ -3040,10 +3053,12 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "g": ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
     "l": ("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
     "n": ("00000", "10110", "11001", "10001", "10001", "10001", "10001"),
+    "p": ("00000", "11110", "10001", "10001", "11110", "10000", "10000"),
     "r": ("00000", "10110", "11001", "10000", "10000", "10000", "10000"),
     "s": ("00000", "01111", "10000", "01110", "00001", "11110", "00000"),
     "t": ("00100", "00100", "11111", "00100", "00100", "00101", "00010"),
     "v": ("00000", "10001", "10001", "10001", "01010", "01010", "00100"),
+    "x": ("00000", "10001", "01010", "00100", "01010", "10001", "00000"),
     ":": ("000", "010", "010", "000", "010", "010", "000"),
     "-": ("000", "000", "000", "111", "000", "000", "000"),
     "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),

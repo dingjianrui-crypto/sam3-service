@@ -262,6 +262,22 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(_event_label_text(event), "315°")
 
+    def test_event_label_can_include_the_estimation_line_length(self) -> None:
+        event = PaddleEvent(
+            kind="exit",
+            timestamp_ms=100,
+            instance_id="paddle:physical:1",
+            line=(0, 0, 30, 40),
+            confidence=1.0,
+            phase_angle=135,
+        )
+
+        self.assertEqual(
+            _event_label_text(event, include_paddle_length=True),
+            "135° 50 px",
+        )
+        self.assertEqual(_event_label_text(event), "135°")
+
     def test_opposite_blade_is_ignored_and_next_360_cycle_resets_catch(self) -> None:
         state = _PaddleEventState(
             physical_id="paddle:physical:1",

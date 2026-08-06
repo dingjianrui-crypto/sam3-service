@@ -554,7 +554,9 @@ cycle model described here. Do not retain a two-phase opposite-blade exception.
 
 ### 18.4 Compatibility
 
-- No API query parameter changes are required.
+- Existing API query parameters retain their behavior. The optional
+  `include_event_paddle_length` parameter defaults to `false` and changes only
+  event-label rendering.
 - `include_catch`, `include_exit`, and `event_hold_seconds` keep their existing
   meaning.
 - The event analysis pass remains offline and deterministic for a fixed result

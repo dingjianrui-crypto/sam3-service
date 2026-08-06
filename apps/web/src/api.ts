@@ -83,6 +83,7 @@ export type ExportVideoOptions = {
   include_spm: boolean;
   include_catch: boolean;
   include_exit: boolean;
+  include_event_paddle_length: boolean;
   event_hold_seconds: number;
   metric_count: number;
   metric_center_offset_percent: number;
@@ -235,6 +236,7 @@ export async function exportJobVideo(
     include_spm: String(options.include_spm),
     include_catch: String(options.include_catch),
     include_exit: String(options.include_exit),
+    include_event_paddle_length: String(options.include_event_paddle_length),
     event_hold_seconds: String(options.event_hold_seconds),
     metric_count: String(options.metric_count),
     metric_center_offset_percent: String(options.metric_center_offset_percent)

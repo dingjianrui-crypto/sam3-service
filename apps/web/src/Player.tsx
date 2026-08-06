@@ -99,6 +99,8 @@ export function Player({ manifest }: Props) {
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exportCatchEnabled, setExportCatchEnabled] = useState(false);
   const [exportExitEnabled, setExportExitEnabled] = useState(false);
+  const [exportEventPaddleLengthEnabled, setExportEventPaddleLengthEnabled] =
+    useState(false);
   const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.5);
   const [exportProgress, setExportProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
@@ -459,6 +461,7 @@ export function Player({ manifest }: Props) {
           include_spm: exportSpmEnabled,
           include_catch: exportCatchEnabled,
           include_exit: exportExitEnabled,
+          include_event_paddle_length: exportEventPaddleLengthEnabled,
           event_hold_seconds: exportEventHoldSeconds,
           metric_count: exportMetricCount,
           metric_center_offset_percent: exportMetricCenterOffsetPercent,
@@ -485,6 +488,7 @@ export function Player({ manifest }: Props) {
     exportFontSize,
     exportAnglesEnabled,
     exportCatchEnabled,
+    exportEventPaddleLengthEnabled,
     exportEventHoldSeconds,
     exportExitEnabled,
     exportLabelPosition,
@@ -718,6 +722,17 @@ export function Player({ manifest }: Props) {
                 onChange={(event) => setExportExitEnabled(event.target.checked)}
               />
               Exit
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportEventPaddleLengthEnabled}
+                disabled={!exportCatchEnabled && !exportExitEnabled}
+                onChange={(event) =>
+                  setExportEventPaddleLengthEnabled(event.target.checked)
+                }
+              />
+              Event paddle length
             </label>
             <label className="event-hold-control">
               Event freeze
