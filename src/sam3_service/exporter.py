@@ -39,6 +39,8 @@ PADDLE_BLADE_ZONE_RATIO = 0.28
 PADDLE_FRAGMENT_ANGLE_DEGREES = 14.0
 PADDLE_FRAGMENT_MIN_PERPENDICULAR_PIXELS = 24.0
 PADDLE_FRAGMENT_PERPENDICULAR_FRAME_RATIO = 0.04
+PADDLE_REFLECTION_CLOSE_FRAME_RATIO = 0.25
+PADDLE_REFLECTION_MIN_CLOSE_PIXELS = 24.0
 PADDLE_DIRECTION_MIN_DELTAS = 5
 PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
@@ -1453,8 +1455,9 @@ def _consolidate_paddle_observations(
             cluster.append(target)
     observations: list[_PaddleObservation] = []
     for reference_id, (reference, clusters) in grouped.items():
+        reference_observations: list[_PaddleObservation] = []
         for cluster in clusters:
-            observations.append(
+            reference_observations.append(
                 _PaddleObservation(
                     source_ids=tuple(
                         sorted({_record_track_id(item.record) for item in cluster})
@@ -1464,7 +1467,47 @@ def _consolidate_paddle_observations(
                     reference_line=reference.line,
                 )
             )
+        observations.extend(
+            _filter_reflected_paddle_observations(
+                reference_observations,
+                width,
+                height,
+            )
+        )
     return observations
+
+
+def _filter_reflected_paddle_observations(
+    observations: list[_PaddleObservation],
+    width: int,
+    height: int,
+) -> list[_PaddleObservation]:
+    if len(observations) < 2:
+        return observations
+    close_limit = max(
+        PADDLE_REFLECTION_MIN_CLOSE_PIXELS,
+        min(width, height) * PADDLE_REFLECTION_CLOSE_FRAME_RATIO,
+    )
+    depths = {
+        observation: sum(
+            _endpoint_signed_depths(observation.line, observation.reference_line)
+        )
+        / 2
+        for observation in observations
+    }
+    close = [
+        observation
+        for observation in observations
+        if abs(depths[observation]) <= close_limit
+    ]
+    if len(close) < 2 or not any(depths[observation] < 0 for observation in close):
+        return observations
+    close_set = set(close)
+    return [
+        observation
+        for observation in observations
+        if observation not in close_set or depths[observation] <= 0
+    ]
 
 
 def _paddle_fragments_compatible(

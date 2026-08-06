@@ -482,6 +482,54 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(len(observations), 1)
         self.assertEqual(len(events), 1)
 
+    def test_below_boat_paddle_reflection_is_ignored_when_real_paddle_exists(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "track_id": "boat:track:1"},
+            line=(0.0, 70.0, 160.0, 70.0),
+            color=(255, 255, 255, 255),
+        )
+        real_paddle = Centerline(
+            record={"prompt_id": "paddle", "track_id": "paddle:real"},
+            line=(20.0, 20.0, 80.0, 60.0),
+            color=(255, 255, 255, 255),
+        )
+        reflected_paddle = Centerline(
+            record={"prompt_id": "paddle", "track_id": "paddle:reflection"},
+            line=(20.0, 80.0, 80.0, 120.0),
+            color=(255, 255, 255, 255),
+        )
+
+        observations = _consolidate_paddle_observations(
+            [real_paddle, reflected_paddle],
+            [reference],
+            160,
+            120,
+        )
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].source_ids, ("paddle:real",))
+
+    def test_single_below_boat_paddle_is_retained_without_reflection_pair(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "track_id": "boat:track:1"},
+            line=(0.0, 70.0, 160.0, 70.0),
+            color=(255, 255, 255, 255),
+        )
+        paddle = Centerline(
+            record={"prompt_id": "paddle", "track_id": "paddle:1"},
+            line=(20.0, 80.0, 80.0, 120.0),
+            color=(255, 255, 255, 255),
+        )
+
+        observations = _consolidate_paddle_observations(
+            [paddle],
+            [reference],
+            160,
+            120,
+        )
+
+        self.assertEqual(len(observations), 1)
+
     def test_paddle_water_depth_is_normalized_against_waterline(self) -> None:
         waterline = (0.0, 50.0, 100.0, 50.0)
 

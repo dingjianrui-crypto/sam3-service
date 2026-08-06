@@ -47,6 +47,8 @@ camera and does not attempt to infer unsupported camera-side depth.
    occluded by water, and use the reconstructed line for exit detection.
 10. Extend the robust central waterline fit to the detected boat's longitudinal
     bow-to-stern span without extrapolating it across unrelated image regions.
+11. Suppress a below-boat mirrored paddle candidate when a distinct above-boat
+    candidate is detected near the same boat.
 
 ## 4. Non-goals
 
@@ -149,12 +151,14 @@ independent operation.
 1. Load and scale all result records.
 2. Match every paddle observation to its nearest selected waterline.
 3. Consolidate nearby collinear fragments into one physical observation.
-4. Associate observations with persistent physical-paddle tracks.
-5. Stabilize line length and endpoint ordering.
-6. Extend the fitted waterline slope to the projected span of the matched boat
+4. When multiple candidates are near one boat, discard below-water candidates
+   if at least one above-water candidate exists.
+5. Associate observations with persistent physical-paddle tracks.
+6. Stabilize line length and endpoint ordering.
+7. Extend the fitted waterline slope to the projected span of the matched boat
    centerline.
-7. Estimate rotation direction from the temporal paddle-axis sequence.
-8. Derive travel direction and a confidence score.
+8. Estimate rotation direction from the temporal paddle-axis sequence.
+9. Derive travel direction and a confidence score.
 
 ### 7.2 Pass B: phase and event analysis
 
@@ -464,6 +468,11 @@ creates fresh catch and exit eligibility.
 
 - State is independent per physical paddle.
 - Each paddle is assigned to its nearest eligible boat/reference waterline.
+- If multiple distinct candidates are close to the same boat and at least one
+  candidate center is above its waterline, below-water candidates are treated
+  as reflections and excluded before tracking and direction estimation.
+- The reflection rule does not remove a lone below-water candidate and does not
+  collapse multiple genuine candidates whose centers are above the boat.
 - Rotation direction is estimated per boat direction segment using consensus
   across its paddles when possible.
 - Spatially separate crew paddles must not share active-blade or event state.
@@ -587,6 +596,8 @@ right-moving videos before being exposed as user-facing configuration.
 - Endpoint order swaps do not change active-blade identity.
 - A central fitted waterline extends to the projected bow-to-stern boat span.
 - A cropped immersed endpoint is reconstructed without moving the dry endpoint.
+- A below-boat mirrored candidate is removed when its above-boat counterpart is
+  present near the same reference.
 
 ### 20.2 Direction unit tests
 
@@ -652,6 +663,8 @@ The implementation is acceptable when all of the following hold:
     eligible for catch or exit.
 14. Partial underwater segmentation does not shorten the active paddle line
     used for exit detection during a confirmed stroke.
+15. A mirrored below-boat paddle does not create a second physical track or
+    contribute to rotation and event estimation when the real paddle is visible.
 
 ## 22. Diagnostics and Validation
 
