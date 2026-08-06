@@ -861,6 +861,41 @@ class ExporterTest(unittest.TestCase):
         self.assertIsNone(_waterline_transition_kind(5.0, 1.0, -4.0, 8.0))
         self.assertEqual(_waterline_transition_kind(1.0, -1.0, -2.0, 8.0), "exit")
 
+    def test_exit_skipping_the_full_band_uses_the_closest_observation(self) -> None:
+        cases = [
+            (135, 165, 100, 135),
+            (90, 158, 133, 158),
+        ]
+        for previous_angle, current_angle, expected_timestamp, expected_phase in cases:
+            with self.subTest(
+                previous_angle=previous_angle,
+                current_angle=current_angle,
+            ):
+                state = _PaddleEventState(
+                    physical_id="paddle:physical:1",
+                    rotation_direction="clockwise",
+                    travel_direction="right",
+                    direction_confidence=1.0,
+                    active_blade=1,
+                )
+                previous = _rotating_observation(previous_angle)
+                current = _rotating_observation(current_angle)
+
+                self.assertIsNone(
+                    _update_directed_paddle_state(state, previous, 100, 8.0)
+                )
+                event = _update_directed_paddle_state(state, current, 133, 8.0)
+
+                self.assertIsNotNone(event)
+                assert event is not None
+                self.assertEqual(event.kind, "exit")
+                self.assertEqual(event.timestamp_ms, expected_timestamp)
+                self.assertAlmostEqual(event.phase_angle or 0, expected_phase)
+                expected_line = previous.line if expected_timestamp == 100 else current.line
+                for actual, expected in zip(event.line, expected_line, strict=True):
+                    self.assertAlmostEqual(actual, expected)
+                self.assertEqual(state.candidates, {})
+
     def test_computes_degree_label_for_each_target_paddle(self) -> None:
         reference = Centerline(
             record={"prompt_id": "boat", "instance_id": "boat:1"},

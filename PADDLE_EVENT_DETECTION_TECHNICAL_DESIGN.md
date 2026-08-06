@@ -342,6 +342,13 @@ Start an exit candidate when all conditions hold:
 3. the active blade zone overlaps the infinite fitted waterline;
 4. no exit has already been emitted for the candidate's cycle.
 
+If two consecutive observations skip the complete one-sided band—from
+`depth > 0` directly to `depth < -band_upward_width`—the signed-depth sweep is
+itself valid infinite-waterline overlap evidence. Select the observation whose
+active endpoint has the smaller absolute depth as the exit frame. Its timestamp,
+paddle line, reference line, phase angle, and line length become the event
+geometry.
+
 The signed-depth state represents immersion across the complete underwater
 portion of the stroke. It avoids interpreting separation from a narrow
 waterline band while the blade is moving deeper as an exit.
@@ -380,6 +387,12 @@ it.
 A transition is confirmed by two consecutive compatible observations. The
 event is backdated to the timestamp and geometry of the first transition
 observation.
+
+A complete exit-band skip is already established by its previous/current
+observation pair. That pair counts as both confirmation samples, so the event is
+emitted while processing the current observation without requiring a third
+frame. Although the event is emitted on the current observation, its geometry
+comes from whichever of the two samples is closest to depth zero.
 
 Each pending candidate stores:
 
@@ -653,6 +666,8 @@ right-moving videos before being exposed as user-facing configuration.
 - Missing both events does not block either event in the next cycle.
 - A candidate confirming across a phase boundary keeps its first-frame cycle.
 - A single-frame waterline touch emits no event.
+- A complete exit-band skip emits immediately from two observations and uses
+  the sample closest to depth zero as its event geometry.
 - Paddle length never decreases within one `0°-180°` stroke phase; cropped
   observations anchor the inactive endpoint and extend the active endpoint.
 - Stroke length remains available after exit, then clears beyond `180°`, at the

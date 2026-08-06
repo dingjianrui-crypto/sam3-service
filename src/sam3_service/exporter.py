@@ -163,6 +163,7 @@ class _PaddleEventState:
     reference_id: str = ""
     last_seen_ms: int = -1
     last_line: Line | None = None
+    last_reference_line: Line | None = None
     stable_lengths: list[float] = field(default_factory=list)
     stroke_length: float | None = None
     stroke_blade: int | None = None
@@ -1641,6 +1642,13 @@ def _update_directed_paddle_state(
 ) -> PaddleEvent | None:
     previous_depths = state.endpoint_depths
     previous_seen_ms = state.last_seen_ms
+    previous_reference_line = state.last_reference_line
+    previous_cycle_index = state.cycle_index
+    previous_phase_angle = (
+        state.unwrapped_angle - state.cycle_index * 360
+        if state.unwrapped_angle is not None
+        else None
+    )
 
     if (
         previous_seen_ms >= 0
@@ -1652,8 +1660,11 @@ def _update_directed_paddle_state(
         state.last_directed_angle = None
         state.unwrapped_angle = None
         state.emitted_events.clear()
+        state.last_reference_line = None
         _clear_stroke_length(state)
         previous_depths = None
+        previous_reference_line = None
+        previous_phase_angle = None
 
     previous_line = state.last_line
     observed_line = _orient_line_like(observation.line, previous_line)
@@ -1675,6 +1686,7 @@ def _update_directed_paddle_state(
             depths = _endpoint_signed_depths(line, observation.reference_line)
             state.last_seen_ms = timestamp_ms
             state.last_line = line
+            state.last_reference_line = observation.reference_line
             state.endpoint_depths = depths
             return None
         line = _inherit_stroke_phase_length(
@@ -1685,6 +1697,7 @@ def _update_directed_paddle_state(
     depths = _endpoint_signed_depths(line, observation.reference_line)
     state.last_seen_ms = timestamp_ms
     state.last_line = line
+    state.last_reference_line = observation.reference_line
 
     confirmed = _confirm_pending_directed_event(
         state,
@@ -1704,7 +1717,7 @@ def _update_directed_paddle_state(
         state.endpoint_depths = depths
         return None
 
-    transitions: list[tuple[float, str, int]] = []
+    transitions: list[tuple[float, str, int, bool]] = []
     blades = range(2) if state.active_blade is None else (state.active_blade,)
     for blade in blades:
         depth_delta = depths[blade] - previous_depths[blade]
@@ -1716,17 +1729,22 @@ def _update_directed_paddle_state(
         )
         if kind is None:
             continue
-        if not _blade_transition_on_waterline(
+        skipped_exit_band = (
+            kind == "exit"
+            and previous_depths[blade] > 0
+            and depths[blade] < -band_upward_width
+        )
+        if not skipped_exit_band and not _blade_transition_on_waterline(
             line,
             observation.reference_line,
             blade,
             band_upward_width,
         ):
             continue
-        transitions.append((abs(depth_delta), kind, blade))
+        transitions.append((abs(depth_delta), kind, blade, skipped_exit_band))
 
     if transitions:
-        _, kind, blade = max(transitions)
+        _, kind, blade, skipped_exit_band = max(transitions)
         if state.active_blade is None:
             state.active_blade = blade
             if state.travel_direction is None:
@@ -1757,6 +1775,43 @@ def _update_directed_paddle_state(
                     + min(0.3, abs(depth_delta) / max(band_upward_width * 2, 1))
                 ),
             )
+            if skipped_exit_band and previous_line is not None:
+                use_previous = abs(previous_depths[blade]) <= abs(depths[blade])
+                selected_line = previous_line if use_previous else line
+                selected_reference = (
+                    previous_reference_line
+                    if use_previous and previous_reference_line is not None
+                    else observation.reference_line
+                )
+                selected_timestamp_ms = previous_seen_ms if use_previous else timestamp_ms
+                selected_phase_angle = previous_phase_angle if use_previous else None
+                selected_cycle_index = previous_cycle_index if use_previous else None
+                if selected_phase_angle is None and state.travel_direction is not None:
+                    selected_phase_angle = _directed_blade_angle(
+                        selected_line,
+                        selected_reference,
+                        blade,
+                        state.travel_direction,
+                    )
+                _start_directed_event_candidate(
+                    state,
+                    kind,
+                    blade,
+                    selected_timestamp_ms,
+                    selected_line,
+                    selected_reference,
+                    confidence,
+                    phase_angle=selected_phase_angle,
+                    cycle_index=selected_cycle_index,
+                )
+                confirmed_skip = _confirm_pending_directed_event(
+                    state,
+                    timestamp_ms,
+                    depths,
+                    band_upward_width,
+                )
+                state.endpoint_depths = depths
+                return confirmed_skip
             _start_directed_event_candidate(
                 state,
                 kind,
@@ -1888,20 +1943,27 @@ def _start_directed_event_candidate(
     line: Line,
     reference_line: Line,
     confidence: float,
+    *,
+    phase_angle: float | None = None,
+    cycle_index: int | None = None,
 ) -> None:
-    phase_angle = (
-        state.unwrapped_angle - state.cycle_index * 360
-        if state.unwrapped_angle is not None
-        else 0.0
+    candidate_phase_angle = (
+        phase_angle
+        if phase_angle is not None
+        else (
+            state.unwrapped_angle - state.cycle_index * 360
+            if state.unwrapped_angle is not None
+            else 0.0
+        )
     )
     state.candidates[kind] = _PaddleEventCandidate(
         kind=kind,
         blade=blade,
-        cycle_index=state.cycle_index,
+        cycle_index=state.cycle_index if cycle_index is None else cycle_index,
         timestamp_ms=timestamp_ms,
         line=line,
         reference_line=reference_line,
-        phase_angle=phase_angle,
+        phase_angle=candidate_phase_angle,
         confidence=confidence,
     )
 
