@@ -4,6 +4,7 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ from sam3_service.exporter import (
     _freeze_segments,
     _inherit_stroke_phase_length,
     _line_intersection,
+    _line_length,
     _load_frames_by_index,
     _metric_label_top,
     _maximum_target_count_in_selection,
@@ -47,6 +49,8 @@ from sam3_service.exporter import (
     _restore_immersed_paddle_length,
     _resolve_requested_track_ids,
     _resolved_export_frame_count,
+    _restore_bidirectional_phase_lines,
+    _restore_track_stroke_lengths,
     _selection_rect_at,
     _spm_label_top,
     _update_directed_paddle_state,
@@ -248,6 +252,81 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual(restored, (0.0, 0.0, 100.0, 0.0))
+
+    def test_stroke_length_restores_forward_to_90_and_backward_from_180(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 80.0, 0.0)),
+            (2, 90.0, (0.0, 0.0, 60.0, 0.0)),
+            (3, 135.0, (0.0, 0.0, 70.0, 0.0)),
+            (4, 180.0, (0.0, 0.0, 110.0, 0.0)),
+        ]
+
+        restored = _restore_bidirectional_phase_lines(samples, active_blade=1)
+
+        self.assertEqual(
+            [_line_length(restored[index]) for index in range(5)],
+            [100.0, 100.0, 110.0, 110.0, 110.0],
+        )
+        self.assertTrue(all(restored[index][:2] == (0.0, 0.0) for index in range(5)))
+
+    def test_track_is_bidirectionally_restored_before_event_detection(self) -> None:
+        angles = [0, 30, 45, 60, 90, 120, 135, 150, 165, 180]
+        observed_lengths = [60, 50, 45, 40, 30, 40, 45, 50, 55, 60]
+        track: list[_TimedPaddleObservation] = []
+        for index, (angle, observed_length) in enumerate(
+            zip(angles, observed_lengths, strict=True)
+        ):
+            full = _rotating_observation(angle)
+            inactive = full.line[:2]
+            active = full.line[2:]
+            unit = (
+                (active[0] - inactive[0]) / 60.0,
+                (active[1] - inactive[1]) / 60.0,
+            )
+            cropped = (
+                inactive[0],
+                inactive[1],
+                inactive[0] + unit[0] * observed_length,
+                inactive[1] + unit[1] * observed_length,
+            )
+            track.append(
+                _TimedPaddleObservation(
+                    index * 100,
+                    "paddle:physical:1",
+                    replace(full, line=cropped, raw_line=cropped),
+                )
+            )
+
+        restored = _restore_track_stroke_lengths(track, "right", 8.0)
+
+        self.assertTrue(
+            all(timed.observation.phase_length_restored for timed in restored)
+        )
+        for timed in restored:
+            self.assertAlmostEqual(_line_length(timed.observation.line), 60.0)
+            self.assertEqual(timed.observation.line[:2], timed.observation.raw_line[:2])
+
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+        )
+        events = [
+            event
+            for timed in restored
+            if (
+                event := _update_directed_paddle_state(
+                    state,
+                    timed.observation,
+                    timed.timestamp_ms,
+                    8.0,
+                )
+            )
+            is not None
+        ]
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
 
     def test_stroke_length_is_inherited_only_within_one_zero_to_180_phase(self) -> None:
         state = _PaddleEventState(

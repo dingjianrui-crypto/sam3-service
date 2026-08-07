@@ -355,21 +355,31 @@ waterline band while the blade is moving deeper as an exit.
 
 ### 11.4 Stroke-phase paddle-length reconstruction
 
-Within each directed `0°-180°` stroke phase, maintain a phase-local accepted
-paddle length:
+Restore every complete directed `0°-180°` stroke before catch and exit
+detection. Split the stroke at `90°` and build two independent length
+envelopes:
 
-1. maintain temporal endpoint ordering;
-2. retain the identified active immersed blade for the phase;
-3. initialize the accepted length from the first usable observation in the
-   phase, including the immediately preceding observation when the active blade
-   is first identified mid-phase;
-4. increase the accepted length when a longer valid line is observed, but never
-   decrease it within the same phase;
-5. when the observed line is shorter, anchor the inactive endpoint and extend
-   only the active endpoint along the current observed axis to the accepted
-   length;
-6. use the reconstructed line for signed-depth classification, catch/exit
-   detection, event angle, and event geometry.
+1. maintain temporal endpoint ordering and identify the active immersed blade;
+2. for `0°-90°`, traverse observations chronologically from the frame nearest
+   `0°`; when the observed length decreases, inherit the restored length from
+   the preceding observation;
+3. for `90°-180°`, traverse observations in reverse from the frame nearest
+   `180°`; when the observed length decreases in that traversal, inherit the
+   restored length from the previously visited, later-phase observation;
+4. if an observation lies exactly at `90°`, retain the larger result from the
+   two passes;
+5. for every inherited length, anchor the inactive endpoint and extend only the
+   active endpoint along the current observed axis;
+6. after both passes finish, process the reconstructed observations
+   chronologically for signed-depth classification, catch/exit detection,
+   event angle, and event geometry.
+
+The reverse `180°-90°` pass requires later observations, so event analysis is
+an offline preprocessing pass over each tracked stroke rather than a purely
+streaming length update. If the original cropped geometry contains no complete
+waterline transition, infer the active endpoint from the endpoint that is below
+its opposite endpoint during the directed `0°-180°` half. Do not guess when the
+two endpoints have equal evidence.
 
 Track association may retain a generically stabilized line for identity and
 angle continuity, but event reconstruction also retains the pre-stabilized,
@@ -377,10 +387,12 @@ consistently oriented line. The phase-local reconstruction operates on that raw
 line so generic stabilization cannot anchor the cropped active endpoint before
 the active-blade-aware rule runs.
 
-The accepted length remains inherited after exit until the directed angle moves
-beyond `180°`. It is not inherited into the recovery half of the revolution or
-the next `0°-180°` stroke phase. A continuity-breaking tracking gap also clears
-it.
+Length inheritance is isolated to its `0°-90°` or `90°-180°` half, its current
+`360°` cycle, and its continuous tracking segment. It is not inherited into the
+recovery half of the revolution, the next stroke cycle, or across a
+continuity-breaking tracking gap. The original chronological running-length
+rule remains only as a compatibility fallback when phase-preprocessed track
+observations are unavailable.
 
 ## 12. Candidate Confirmation and Timestamping
 

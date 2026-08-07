@@ -134,6 +134,7 @@ class _PaddleObservation:
     line: Line
     reference_line: Line
     raw_line: Line | None = None
+    phase_length_restored: bool = False
 
 
 @dataclass(frozen=True)
@@ -1265,6 +1266,11 @@ def _detect_paddle_events(
         )
         if rotation_direction is None or travel_direction is None:
             continue
+        observations = _restore_track_stroke_lengths(
+            observations,
+            travel_direction,
+            band_upward_width,
+        )
         state = _PaddleEventState(
             physical_id=physical_id,
             reference_id=reference_id,
@@ -1634,6 +1640,193 @@ def _assign_paddle_observations(
     return assigned
 
 
+def _restore_track_stroke_lengths(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+    band_upward_width: float,
+) -> list[_TimedPaddleObservation]:
+    """Restore each 0-180 stroke before chronological event detection.
+
+    The 0-90 half inherits length forward in time. The 90-180 half inherits
+    length backward from the observation nearest 180 degrees. A tracking gap
+    starts a new independent segment, and each 360-degree cycle is isolated.
+    """
+    if not observations:
+        return observations
+
+    restored = list(observations)
+    segment_start = 0
+    for index in range(1, len(observations) + 1):
+        at_end = index == len(observations)
+        has_gap = not at_end and (
+            observations[index].timestamp_ms - observations[index - 1].timestamp_ms
+            > PADDLE_EVENT_MAX_CONFIRM_GAP_MS
+        )
+        if not at_end and not has_gap:
+            continue
+        segment = restored[segment_start:index]
+        restored[segment_start:index] = _restore_track_segment_stroke_lengths(
+            segment,
+            travel_direction,
+            band_upward_width,
+        )
+        segment_start = index
+    return restored
+
+
+def _restore_track_segment_stroke_lengths(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+    band_upward_width: float,
+) -> list[_TimedPaddleObservation]:
+    active_blade = _infer_segment_active_blade(
+        observations,
+        travel_direction,
+        band_upward_width,
+    )
+    if active_blade not in (0, 1):
+        return observations
+
+    phase_state = _PaddleEventState(
+        active_blade=active_blade,
+        travel_direction=travel_direction,
+    )
+    phase_groups: dict[int, list[tuple[int, float, Line]]] = {}
+    for index, timed in enumerate(observations):
+        raw_line = timed.observation.raw_line or timed.observation.line
+        raw_angle = _directed_blade_angle(
+            raw_line,
+            timed.observation.reference_line,
+            active_blade,
+            travel_direction,
+        )
+        if not _advance_directed_paddle_phase(phase_state, raw_angle):
+            continue
+        if phase_state.unwrapped_angle is None:
+            continue
+        phase_angle = phase_state.unwrapped_angle - phase_state.cycle_index * 360
+        if 0 <= phase_angle <= 180:
+            phase_groups.setdefault(phase_state.cycle_index, []).append(
+                (index, phase_angle, raw_line)
+            )
+
+    restored_lines: dict[int, Line] = {}
+    for samples in phase_groups.values():
+        restored_lines.update(
+            _restore_bidirectional_phase_lines(samples, active_blade)
+        )
+
+    result = list(observations)
+    for index, line in restored_lines.items():
+        timed = observations[index]
+        result[index] = replace(
+            timed,
+            observation=replace(
+                timed.observation,
+                line=line,
+                raw_line=line,
+                phase_length_restored=True,
+            ),
+        )
+    return result
+
+
+def _infer_segment_active_blade(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+    band_upward_width: float,
+) -> int | None:
+    previous_depths: tuple[float, float] | None = None
+    for timed in observations:
+        line = timed.observation.raw_line or timed.observation.line
+        depths = _endpoint_signed_depths(line, timed.observation.reference_line)
+        if previous_depths is not None:
+            transitions: list[tuple[float, int]] = []
+            for blade in range(2):
+                delta = depths[blade] - previous_depths[blade]
+                if _waterline_transition_kind(
+                    previous_depths[blade],
+                    depths[blade],
+                    delta,
+                    band_upward_width,
+                ) is not None:
+                    transitions.append((abs(delta), blade))
+            if transitions:
+                return max(transitions)[1]
+        previous_depths = depths
+
+    # A fully cropped transition may never reach the waterline. In a partial
+    # stroke, the active endpoint is still identifiable as the lower endpoint
+    # during its directed 0-180 half. Avoid guessing when both endpoints have
+    # equal evidence (for example, a complete symmetric revolution).
+    scores: list[tuple[int, float]] = []
+    for blade in range(2):
+        count = 0
+        depth_advantage = 0.0
+        for timed in observations:
+            line = timed.observation.raw_line or timed.observation.line
+            phase_angle = _directed_blade_angle(
+                line,
+                timed.observation.reference_line,
+                blade,
+                travel_direction,
+            )
+            if not 0 <= phase_angle <= 180:
+                continue
+            depths = _endpoint_signed_depths(line, timed.observation.reference_line)
+            advantage = depths[blade] - depths[1 - blade]
+            if advantage <= 0:
+                continue
+            count += 1
+            depth_advantage += advantage
+        scores.append((count, depth_advantage))
+    if scores[0][0] == scores[1][0] and math.isclose(
+        scores[0][1],
+        scores[1][1],
+        abs_tol=1e-6,
+    ):
+        return None
+    return 0 if scores[0] > scores[1] else 1
+
+
+def _restore_bidirectional_phase_lines(
+    samples: list[tuple[int, float, Line]],
+    active_blade: int,
+) -> dict[int, Line]:
+    """Apply forward and reverse non-decreasing envelopes to one stroke."""
+    restored: dict[int, Line] = {}
+    accepted_length: float | None = None
+    for index, phase_angle, line in sorted(samples, key=lambda item: item[1]):
+        if phase_angle > 90:
+            continue
+        accepted_length = max(accepted_length or 0.0, _line_length(line))
+        restored[index] = _extend_paddle_active_endpoint(
+            line,
+            active_blade,
+            accepted_length,
+        )
+
+    accepted_length = None
+    for index, phase_angle, line in sorted(
+        samples,
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+        if phase_angle < 90:
+            continue
+        accepted_length = max(accepted_length or 0.0, _line_length(line))
+        reverse_restored = _extend_paddle_active_endpoint(
+            line,
+            active_blade,
+            accepted_length,
+        )
+        if index not in restored or _line_length(reverse_restored) > _line_length(
+            restored[index]
+        ):
+            restored[index] = reverse_restored
+    return restored
+
+
 def _update_directed_paddle_state(
     state: _PaddleEventState,
     observation: _PaddleObservation,
@@ -1689,10 +1882,14 @@ def _update_directed_paddle_state(
             state.last_reference_line = observation.reference_line
             state.endpoint_depths = depths
             return None
-        line = _inherit_stroke_phase_length(
-            state,
-            raw_line,
-            fallback=observed_line,
+        line = (
+            raw_line
+            if observation.phase_length_restored
+            else _inherit_stroke_phase_length(
+                state,
+                raw_line,
+                fallback=observed_line,
+            )
         )
     depths = _endpoint_signed_depths(line, observation.reference_line)
     state.last_seen_ms = timestamp_ms
@@ -1757,12 +1954,15 @@ def _update_directed_paddle_state(
                 state.travel_direction,
             )
             _advance_directed_paddle_phase(state, raw_angle)
-            line = _inherit_stroke_phase_length(
-                state,
-                raw_line,
-                initial_length=_line_length(previous_line) if previous_line else None,
-                fallback=line,
-            )
+            if observation.phase_length_restored:
+                line = raw_line
+            else:
+                line = _inherit_stroke_phase_length(
+                    state,
+                    raw_line,
+                    initial_length=_line_length(previous_line) if previous_line else None,
+                    fallback=line,
+                )
             depths = _endpoint_signed_depths(line, observation.reference_line)
             state.last_line = line
         if _event_phase_allowed(state, kind):
@@ -2043,10 +2243,26 @@ def _restore_immersed_paddle_length(
     ):
         return observed
 
+    return _extend_paddle_active_endpoint(observed, blade, target_length)
+
+
+def _extend_paddle_active_endpoint(
+    observed: Line,
+    active_blade: int,
+    target_length: float,
+) -> Line:
+    observed_length = _line_length(observed)
+    if (
+        active_blade not in (0, 1)
+        or observed_length < 2
+        or observed_length >= target_length
+    ):
+        return observed
+
     first = (observed[0], observed[1])
     second = (observed[2], observed[3])
-    active = first if blade == 0 else second
-    dry = second if blade == 0 else first
+    active = first if active_blade == 0 else second
+    dry = second if active_blade == 0 else first
     direction = _normalize((active[0] - dry[0], active[1] - dry[1]))
     if direction is None:
         return observed
@@ -2054,7 +2270,7 @@ def _restore_immersed_paddle_length(
         dry[0] + direction[0] * target_length,
         dry[1] + direction[1] * target_length,
     )
-    if blade == 0:
+    if active_blade == 0:
         return (restored_active[0], restored_active[1], dry[0], dry[1])
     return (dry[0], dry[1], restored_active[0], restored_active[1])
 
