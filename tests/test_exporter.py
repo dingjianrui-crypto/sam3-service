@@ -336,7 +336,7 @@ class ExporterTest(unittest.TestCase):
         for angle, timestamp_ms in zip(angles, timestamps, strict=True):
             observation = _rotating_observation(angle)
             line = observation.line
-            if angle >= 104:
+            if angle == 104:
                 inactive = line[:2]
                 active = line[2:]
                 unit = (
@@ -383,6 +383,36 @@ class ExporterTest(unittest.TestCase):
         self.assertAlmostEqual(events[0].phase_angle or 0, 36)
         self.assertGreater(events[1].phase_angle or 0, 120)
         self.assertAlmostEqual(state.stroke_length or 0, 60.0)
+
+    def test_runtime_length_envelope_resets_for_backward_restored_half(self) -> None:
+        state = _PaddleEventState(
+            active_blade=0,
+            cycle_index=0,
+            unwrapped_angle=80.0,
+        )
+
+        first_half = _inherit_stroke_phase_length(
+            state,
+            (0.0, 0.0, 100.0, 0.0),
+            phase_preprocessed=True,
+        )
+        state.unwrapped_angle = 110.0
+        second_half = _inherit_stroke_phase_length(
+            state,
+            (30.0, 0.0, 100.0, 0.0),
+            phase_preprocessed=True,
+        )
+        state.unwrapped_angle = 130.0
+        cropped_second_half = _inherit_stroke_phase_length(
+            state,
+            (40.0, 0.0, 100.0, 0.0),
+        )
+
+        self.assertAlmostEqual(_line_length(first_half), 100.0)
+        self.assertAlmostEqual(_line_length(second_half), 70.0)
+        self.assertAlmostEqual(_line_length(cropped_second_half), 70.0)
+        self.assertEqual(state.stroke_phase_half, 1)
+        self.assertEqual(state.stroke_length, 70.0)
 
     def test_stroke_length_is_inherited_only_within_one_zero_to_180_phase(self) -> None:
         state = _PaddleEventState(

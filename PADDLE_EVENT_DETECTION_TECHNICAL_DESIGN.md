@@ -393,10 +393,12 @@ active and inactive endpoints.
 Length inheritance is isolated to its `0°-90°` or `90°-180°` half, its current
 `360°` cycle, and its continuous tracking segment. It is not inherited into the
 recovery half of the revolution, the next stroke cycle, or across a
-continuity-breaking tracking gap. Each phase-preprocessed line seeds or updates
-the chronological runtime stroke-length envelope. This preserves the restored
-maximum when a later slot observation was not eligible for preprocessing and
-also provides a compatibility fallback for unprocessed observations.
+continuity-breaking tracking gap. Each phase-preprocessed line replaces the
+chronological runtime target with its already restored length. In particular,
+the `90°-180°` target may decrease chronologically because it was constructed
+in reverse; a preceding near-`90°` maximum must not extend a later recovering
+paddle and delay its exit. An observation unavailable to preprocessing inherits
+from the latest target as a compatibility fallback.
 
 ## 12. Candidate Confirmation and Timestamping
 

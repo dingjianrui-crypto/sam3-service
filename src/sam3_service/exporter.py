@@ -172,6 +172,7 @@ class _PaddleEventState:
     stroke_length: float | None = None
     stroke_blade: int | None = None
     stroke_cycle_index: int | None = None
+    stroke_phase_half: int | None = None
     rotation_direction: str | None = None
     travel_direction: str | None = None
     direction_confidence: float = 0.0
@@ -2074,6 +2075,7 @@ def _update_directed_paddle_state(
             state,
             raw_line,
             fallback=observed_line,
+            phase_preprocessed=observation.phase_length_restored,
         )
     depths = _endpoint_signed_depths(line, observation.reference_line)
     state.last_seen_ms = timestamp_ms
@@ -2143,6 +2145,7 @@ def _update_directed_paddle_state(
                 raw_line,
                 initial_length=_line_length(previous_line) if previous_line else None,
                 fallback=line,
+                phase_preprocessed=observation.phase_length_restored,
             )
             depths = _endpoint_signed_depths(line, observation.reference_line)
             state.last_line = line
@@ -2462,6 +2465,7 @@ def _inherit_stroke_phase_length(
     *,
     initial_length: float | None = None,
     fallback: Line | None = None,
+    phase_preprocessed: bool = False,
 ) -> Line:
     """Keep paddle length non-decreasing within one directed 0-180 degree phase."""
     fallback_line = observed if fallback is None else fallback
@@ -2482,6 +2486,14 @@ def _inherit_stroke_phase_length(
     if observed_length < 2:
         return fallback_line
 
+    phase_half = 0 if phase_angle <= 90 else 1
+    if phase_preprocessed:
+        state.stroke_length = observed_length
+        state.stroke_blade = state.active_blade
+        state.stroke_cycle_index = state.cycle_index
+        state.stroke_phase_half = phase_half
+        return observed
+
     if (
         state.stroke_cycle_index != state.cycle_index
         or state.stroke_blade != state.active_blade
@@ -2493,6 +2505,9 @@ def _inherit_stroke_phase_length(
         state.stroke_length = seed_length
         state.stroke_blade = state.active_blade
         state.stroke_cycle_index = state.cycle_index
+        state.stroke_phase_half = phase_half
+    elif state.stroke_phase_half is None:
+        state.stroke_phase_half = phase_half
     elif observed_length > state.stroke_length:
         state.stroke_length = observed_length
 
@@ -2503,6 +2518,7 @@ def _clear_stroke_length(state: _PaddleEventState) -> None:
     state.stroke_length = None
     state.stroke_blade = None
     state.stroke_cycle_index = None
+    state.stroke_phase_half = None
 
 
 def _stabilize_paddle_line(state: _PaddleEventState, observed: Line) -> Line:
