@@ -41,6 +41,8 @@ PADDLE_FRAGMENT_MIN_PERPENDICULAR_PIXELS = 24.0
 PADDLE_FRAGMENT_PERPENDICULAR_FRAME_RATIO = 0.04
 PADDLE_REFLECTION_CLOSE_FRAME_RATIO = 0.25
 PADDLE_REFLECTION_MIN_CLOSE_PIXELS = 24.0
+PADDLE_EVENT_SLOT_MAX_SPACING_RATIO = 0.4
+PADDLE_EVENT_SLOT_MIN_GATE_PIXELS = 24.0
 PADDLE_DIRECTION_MIN_DELTAS = 5
 PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
@@ -1267,6 +1269,7 @@ def _detect_paddle_events(
         tracks,
         directions,
         options.event_paddle_index,
+        options.target_slot_count,
     )
     detected: list[PaddleEvent] = []
     band_upward_width = _event_band_upward_width(scale_x, scale_y)
@@ -1392,66 +1395,164 @@ def _select_event_paddle_tracks(
     tracks: dict[str, list[_TimedPaddleObservation]],
     directions: dict[str, tuple[str | None, str | None, float]],
     event_paddle_index: int | None,
+    target_slot_count: int = 0,
 ) -> dict[str, list[_TimedPaddleObservation]]:
     if event_paddle_index is None:
         return tracks
 
-    grouped: dict[str, list[tuple[str, list[_TimedPaddleObservation]]]] = {}
-    for physical_id, observations in tracks.items():
-        if observations:
-            grouped.setdefault(_dominant_reference_id(observations), []).append(
-                (physical_id, observations)
-            )
+    observations_by_reference: dict[
+        str, dict[int, list[_TimedPaddleObservation]]
+    ] = {}
+    for observations in tracks.values():
+        for timed in observations:
+            reference_id = timed.observation.reference_id
+            observations_by_reference.setdefault(reference_id, {}).setdefault(
+                timed.timestamp_ms, []
+            ).append(timed)
 
+    slot_count = max(event_paddle_index, target_slot_count)
     selected: dict[str, list[_TimedPaddleObservation]] = {}
-    for reference_id, candidates in grouped.items():
+    for reference_id, observations_by_timestamp in observations_by_reference.items():
         _, travel_direction, _ = directions.get(reference_id, (None, None, 0.0))
         if travel_direction not in {"left", "right"}:
             continue
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                -_track_forward_position(item[1], travel_direction),
-                item[0],
-            ),
+        anchors = _event_paddle_slot_anchors(
+            observations_by_timestamp,
+            travel_direction,
+            slot_count,
         )
         selected_index = event_paddle_index - 1
-        if selected_index < len(ranked):
-            physical_id, observations = ranked[selected_index]
-            selected[physical_id] = observations
+        if selected_index >= len(anchors):
+            continue
+        slot_id = f"paddle:slot:{reference_id}:{event_paddle_index}"
+        slot_observations: list[_TimedPaddleObservation] = []
+        for timestamp_ms, candidates in sorted(observations_by_timestamp.items()):
+            assigned = _assign_event_paddle_slots(
+                candidates,
+                anchors,
+                travel_direction,
+            )
+            timed = assigned.get(selected_index)
+            if timed is None:
+                continue
+            raw_line = timed.observation.raw_line or timed.observation.line
+            slot_observations.append(
+                replace(
+                    timed,
+                    physical_id=slot_id,
+                    observation=replace(
+                        timed.observation,
+                        line=raw_line,
+                        raw_line=raw_line,
+                        phase_length_restored=False,
+                    ),
+                )
+            )
+        if slot_observations:
+            selected[slot_id] = slot_observations
     return selected
+
+
+def _event_paddle_slot_anchors(
+    observations_by_timestamp: dict[int, list[_TimedPaddleObservation]],
+    travel_direction: str,
+    slot_count: int,
+) -> list[float]:
+    ordered_positions = [
+        sorted(
+            (
+                _observation_forward_position(timed.observation, travel_direction)
+                for timed in candidates
+            ),
+            reverse=True,
+        )
+        for candidates in observations_by_timestamp.values()
+    ]
+    maximum_count = min(
+        slot_count,
+        max((len(positions) for positions in ordered_positions), default=0),
+    )
+    if maximum_count <= 0:
+        return []
+    complete_frames = [
+        positions for positions in ordered_positions if len(positions) >= maximum_count
+    ]
+    return [
+        _median([positions[index] for positions in complete_frames])
+        for index in range(maximum_count)
+    ]
+
+
+def _assign_event_paddle_slots(
+    candidates: list[_TimedPaddleObservation],
+    anchors: list[float],
+    travel_direction: str,
+) -> dict[int, _TimedPaddleObservation]:
+    assigned: dict[int, tuple[float, _TimedPaddleObservation]] = {}
+    for timed in candidates:
+        position = _observation_forward_position(
+            timed.observation,
+            travel_direction,
+        )
+        slot_index = min(
+            range(len(anchors)),
+            key=lambda index: abs(position - anchors[index]),
+        )
+        distance = abs(position - anchors[slot_index])
+        neighbor_distances = [
+            abs(anchors[slot_index] - anchors[neighbor_index])
+            for neighbor_index in (slot_index - 1, slot_index + 1)
+            if 0 <= neighbor_index < len(anchors)
+        ]
+        if neighbor_distances and distance > max(
+            PADDLE_EVENT_SLOT_MIN_GATE_PIXELS,
+            min(neighbor_distances) * PADDLE_EVENT_SLOT_MAX_SPACING_RATIO,
+        ):
+            continue
+        previous = assigned.get(slot_index)
+        if previous is None or distance < previous[0]:
+            assigned[slot_index] = (distance, timed)
+    return {slot_index: item[1] for slot_index, item in assigned.items()}
+
+
+def _observation_forward_position(
+    observation: _PaddleObservation,
+    travel_direction: str,
+) -> float:
+    reference_line = observation.reference_line
+    forward = _normalize(
+        (
+            reference_line[2] - reference_line[0],
+            reference_line[3] - reference_line[1],
+        )
+    )
+    if forward is None:
+        return -math.inf
+    if (travel_direction == "right" and forward[0] < 0) or (
+        travel_direction == "left" and forward[0] > 0
+    ):
+        forward = (-forward[0], -forward[1])
+    line = observation.raw_line or observation.line
+    paddle_center = _line_center(line)
+    reference_center = _line_center(reference_line)
+    return _dot(
+        (
+            paddle_center[0] - reference_center[0],
+            paddle_center[1] - reference_center[1],
+        ),
+        forward,
+    )
 
 
 def _track_forward_position(
     observations: list[_TimedPaddleObservation],
     travel_direction: str,
 ) -> float:
-    positions: list[float] = []
-    for timed in observations:
-        reference_line = timed.observation.reference_line
-        forward = _normalize(
-            (
-                reference_line[2] - reference_line[0],
-                reference_line[3] - reference_line[1],
-            )
-        )
-        if forward is None:
-            continue
-        if (travel_direction == "right" and forward[0] < 0) or (
-            travel_direction == "left" and forward[0] > 0
-        ):
-            forward = (-forward[0], -forward[1])
-        paddle_center = _line_center(timed.observation.line)
-        reference_center = _line_center(reference_line)
-        positions.append(
-            _dot(
-                (
-                    paddle_center[0] - reference_center[0],
-                    paddle_center[1] - reference_center[1],
-                ),
-                forward,
-            )
-        )
+    positions = [
+        _observation_forward_position(timed.observation, travel_direction)
+        for timed in observations
+    ]
+    positions = [position for position in positions if math.isfinite(position)]
     return _median(positions) if positions else -math.inf
 
 

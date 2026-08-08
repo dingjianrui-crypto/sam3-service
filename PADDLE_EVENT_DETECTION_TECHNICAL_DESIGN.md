@@ -524,13 +524,17 @@ creates fresh catch and exit eligibility.
 - Rotation direction is estimated per boat direction segment using consensus
   across its paddles when possible.
 - An optional one-based event-paddle index is applied only after direction
-  estimation. Rank physical tracks once per reference boat by the median paddle
-  center projection along the direction-normalized boat axis, from front to
-  back. Index `1` is the leading paddle. Keep the selected physical track fixed
-  for the export instead of re-ranking individual frames.
+  estimation. Derive stable paddle-line slot anchors per reference boat from
+  center projections along the direction-normalized boat axis, ordered from
+  front to back. Index `1` is the leading slot.
+- Assign each frame's centerlines to their nearest anchors within a distance
+  gate. This lets successive physical-track fragments feed the same event slot
+  without allowing a rear or between-slot candidate to move forward when the
+  selected centerline is temporarily absent.
 - `ALL` leaves every eligible physical track in event analysis. If a requested
-  index is unavailable for a reference boat, do not substitute another track.
-  Angle and SPM metric slots remain independent of event-paddle selection.
+  slot is unavailable for a reference boat or frame, do not substitute another
+  paddle. Angle and SPM metric slots remain independent of event-paddle
+  selection.
 - Spatially separate crew paddles must not share active-blade or event state.
 - Existing post-analysis temporal/spatial deduplication remains a safeguard for
   fragmented detections, not the primary uniqueness mechanism.

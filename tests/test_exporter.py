@@ -590,9 +590,56 @@ class ExporterTest(unittest.TestCase):
             2,
         )
 
-        self.assertEqual(tuple(rightward), ("paddle:right",))
-        self.assertEqual(tuple(leftward), ("paddle:left",))
-        self.assertEqual(tuple(second_rightward), ("paddle:middle",))
+        self.assertEqual(
+            next(iter(rightward.values()))[0].observation.source_ids,
+            ("paddle:right",),
+        )
+        self.assertEqual(
+            next(iter(leftward.values()))[0].observation.source_ids,
+            ("paddle:left",),
+        )
+        self.assertEqual(
+            next(iter(second_rightward.values()))[0].observation.source_ids,
+            ("paddle:middle",),
+        )
+
+    def test_event_paddle_slot_stitches_fragments_without_collapsing_a_gap(self) -> None:
+        def timed(
+            timestamp_ms: int,
+            physical_id: str,
+            center_x: float,
+        ) -> _TimedPaddleObservation:
+            observation = _PaddleObservation(
+                source_ids=(physical_id,),
+                reference_id="boat:1",
+                line=(center_x - 5, 20, center_x + 5, 40),
+                reference_line=(0, 50, 100, 50),
+            )
+            return _TimedPaddleObservation(timestamp_ms, physical_id, observation)
+
+        tracks = {
+            "front:fragment:1": [timed(0, "front:fragment:1", 80)],
+            "front:fragment:2": [timed(200, "front:fragment:2", 82)],
+            "rear": [
+                timed(0, "rear", 20),
+                timed(100, "rear", 20),
+                timed(200, "rear", 20),
+            ],
+        }
+
+        selected = _select_event_paddle_tracks(
+            tracks,
+            {"boat:1": ("clockwise", "right", 1.0)},
+            1,
+            2,
+        )
+
+        observations = next(iter(selected.values()))
+        self.assertEqual([item.timestamp_ms for item in observations], [0, 200])
+        self.assertEqual(
+            [item.observation.source_ids for item in observations],
+            [("front:fragment:1",), ("front:fragment:2",)],
+        )
 
     def test_all_event_paddles_preserves_every_track(self) -> None:
         tracks = {
@@ -650,7 +697,8 @@ class ExporterTest(unittest.TestCase):
             )
 
         self.assertEqual([event.kind for event in events], ["catch", "exit"])
-        self.assertEqual({event.instance_id for event in events}, {"paddle:front"})
+        self.assertEqual(len({event.instance_id for event in events}), 1)
+        self.assertTrue(events[0].instance_id.endswith(":1"))
 
     def test_gap_does_not_synthesize_a_waterline_transition(self) -> None:
         state = _PaddleEventState(
