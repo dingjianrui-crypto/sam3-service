@@ -385,14 +385,18 @@ Track association may retain a generically stabilized line for identity and
 angle continuity, but event reconstruction also retains the pre-stabilized,
 consistently oriented line. The phase-local reconstruction operates on that raw
 line so generic stabilization cannot anchor the cropped active endpoint before
-the active-blade-aware rule runs.
+the active-blade-aware rule runs. Normalize every raw centerline's endpoint
+ordering against the preceding centerline before active-blade inference and
+phase classification; a new physical fragment must not reverse the logical
+active and inactive endpoints.
 
 Length inheritance is isolated to its `0°-90°` or `90°-180°` half, its current
 `360°` cycle, and its continuous tracking segment. It is not inherited into the
 recovery half of the revolution, the next stroke cycle, or across a
-continuity-breaking tracking gap. The original chronological running-length
-rule remains only as a compatibility fallback when phase-preprocessed track
-observations are unavailable.
+continuity-breaking tracking gap. Each phase-preprocessed line seeds or updates
+the chronological runtime stroke-length envelope. This preserves the restored
+maximum when a later slot observation was not eligible for preprocessing and
+also provides a compatibility fallback for unprocessed observations.
 
 ## 12. Candidate Confirmation and Timestamping
 

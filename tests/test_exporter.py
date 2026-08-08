@@ -329,6 +329,61 @@ class ExporterTest(unittest.TestCase):
         ]
         self.assertEqual([event.kind for event in events], ["catch", "exit"])
 
+    def test_reversed_cropped_fragment_inherits_pre_restored_stroke_length(self) -> None:
+        angles = [0, 36, 46, 58, 104, 116, 135, 150, 165]
+        timestamps = [333, 400, 433, 467, 600, 633, 667, 700, 733]
+        track: list[_TimedPaddleObservation] = []
+        for angle, timestamp_ms in zip(angles, timestamps, strict=True):
+            observation = _rotating_observation(angle)
+            line = observation.line
+            if angle >= 104:
+                inactive = line[:2]
+                active = line[2:]
+                unit = (
+                    (active[0] - inactive[0]) / 60.0,
+                    (active[1] - inactive[1]) / 60.0,
+                )
+                cropped_active = (
+                    inactive[0] + unit[0] * 30.0,
+                    inactive[1] + unit[1] * 30.0,
+                )
+                line = (*cropped_active, *inactive)
+            track.append(
+                _TimedPaddleObservation(
+                    timestamp_ms,
+                    "paddle:slot:boat:1:1",
+                    replace(observation, line=line, raw_line=line),
+                )
+            )
+
+        restored = _restore_track_stroke_lengths(track, "right", 8.0)
+
+        self.assertTrue(restored[4].observation.phase_length_restored)
+        state = _PaddleEventState(
+            physical_id="paddle:slot:boat:1:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+        )
+        events = [
+            event
+            for timed in restored
+            if (
+                event := _update_directed_paddle_state(
+                    state,
+                    timed.observation,
+                    timed.timestamp_ms,
+                    8.0,
+                )
+            )
+            is not None
+        ]
+
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
+        self.assertAlmostEqual(events[0].phase_angle or 0, 36)
+        self.assertGreater(events[1].phase_angle or 0, 120)
+        self.assertAlmostEqual(state.stroke_length or 0, 60.0)
+
     def test_stroke_length_is_inherited_only_within_one_zero_to_180_phase(self) -> None:
         state = _PaddleEventState(
             active_blade=0,

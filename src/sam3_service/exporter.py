@@ -1859,8 +1859,17 @@ def _restore_track_segment_stroke_lengths(
     travel_direction: str,
     band_upward_width: float,
 ) -> list[_TimedPaddleObservation]:
+    oriented_lines: list[Line] = []
+    previous_line: Line | None = None
+    for timed in observations:
+        raw_line = timed.observation.raw_line or timed.observation.line
+        oriented_line = _orient_line_like(raw_line, previous_line)
+        oriented_lines.append(oriented_line)
+        previous_line = oriented_line
+
     active_blade = _infer_segment_active_blade(
         observations,
+        oriented_lines,
         travel_direction,
         band_upward_width,
     )
@@ -1873,7 +1882,7 @@ def _restore_track_segment_stroke_lengths(
     )
     phase_groups: dict[int, list[tuple[int, float, Line]]] = {}
     for index, timed in enumerate(observations):
-        raw_line = timed.observation.raw_line or timed.observation.line
+        raw_line = oriented_lines[index]
         raw_angle = _directed_blade_angle(
             raw_line,
             timed.observation.reference_line,
@@ -1913,12 +1922,12 @@ def _restore_track_segment_stroke_lengths(
 
 def _infer_segment_active_blade(
     observations: list[_TimedPaddleObservation],
+    oriented_lines: list[Line],
     travel_direction: str,
     band_upward_width: float,
 ) -> int | None:
     previous_depths: tuple[float, float] | None = None
-    for timed in observations:
-        line = timed.observation.raw_line or timed.observation.line
+    for timed, line in zip(observations, oriented_lines, strict=True):
         depths = _endpoint_signed_depths(line, timed.observation.reference_line)
         if previous_depths is not None:
             transitions: list[tuple[float, int]] = []
@@ -1943,8 +1952,7 @@ def _infer_segment_active_blade(
     for blade in range(2):
         count = 0
         depth_advantage = 0.0
-        for timed in observations:
-            line = timed.observation.raw_line or timed.observation.line
+        for timed, line in zip(observations, oriented_lines, strict=True):
             phase_angle = _directed_blade_angle(
                 line,
                 timed.observation.reference_line,
@@ -2062,14 +2070,10 @@ def _update_directed_paddle_state(
             state.last_reference_line = observation.reference_line
             state.endpoint_depths = depths
             return None
-        line = (
-            raw_line
-            if observation.phase_length_restored
-            else _inherit_stroke_phase_length(
-                state,
-                raw_line,
-                fallback=observed_line,
-            )
+        line = _inherit_stroke_phase_length(
+            state,
+            raw_line,
+            fallback=observed_line,
         )
     depths = _endpoint_signed_depths(line, observation.reference_line)
     state.last_seen_ms = timestamp_ms
@@ -2134,15 +2138,12 @@ def _update_directed_paddle_state(
                 state.travel_direction,
             )
             _advance_directed_paddle_phase(state, raw_angle)
-            if observation.phase_length_restored:
-                line = raw_line
-            else:
-                line = _inherit_stroke_phase_length(
-                    state,
-                    raw_line,
-                    initial_length=_line_length(previous_line) if previous_line else None,
-                    fallback=line,
-                )
+            line = _inherit_stroke_phase_length(
+                state,
+                raw_line,
+                initial_length=_line_length(previous_line) if previous_line else None,
+                fallback=line,
+            )
             depths = _endpoint_signed_depths(line, observation.reference_line)
             state.last_line = line
         if _event_phase_allowed(state, kind):
