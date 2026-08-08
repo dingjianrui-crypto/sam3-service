@@ -86,6 +86,7 @@ export type ExportVideoOptions = {
   include_event_paddle_length: boolean;
   event_hold_seconds: number;
   metric_count: number;
+  event_paddle_index?: number;
   metric_center_offset_percent: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
@@ -241,6 +242,9 @@ export async function exportJobVideo(
     metric_count: String(options.metric_count),
     metric_center_offset_percent: String(options.metric_center_offset_percent)
   });
+  if (options.event_paddle_index != null) {
+    params.set("event_paddle_index", String(options.event_paddle_index));
+  }
   if (options.reference_prompt_id) {
     params.set("reference_prompt_id", options.reference_prompt_id);
   }

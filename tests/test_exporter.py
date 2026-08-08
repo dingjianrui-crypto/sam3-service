@@ -52,6 +52,7 @@ from sam3_service.exporter import (
     _restore_bidirectional_phase_lines,
     _restore_track_stroke_lengths,
     _selection_rect_at,
+    _select_event_paddle_tracks,
     _spm_label_top,
     _update_directed_paddle_state,
     _update_paddle_event_state,
@@ -556,6 +557,100 @@ class ExporterTest(unittest.TestCase):
                         ("exit", 800, travel_direction),
                     ],
                 )
+
+    def test_event_paddle_index_ranks_tracks_from_front_in_travel_direction(self) -> None:
+        def track(physical_id: str, center_x: float) -> list[_TimedPaddleObservation]:
+            observation = _PaddleObservation(
+                source_ids=(physical_id,),
+                reference_id="boat:1",
+                line=(center_x - 5, 20, center_x + 5, 40),
+                reference_line=(0, 50, 100, 50),
+            )
+            return [_TimedPaddleObservation(0, physical_id, observation)]
+
+        tracks = {
+            "paddle:left": track("paddle:left", 20),
+            "paddle:middle": track("paddle:middle", 50),
+            "paddle:right": track("paddle:right", 80),
+        }
+
+        rightward = _select_event_paddle_tracks(
+            tracks,
+            {"boat:1": ("clockwise", "right", 1.0)},
+            1,
+        )
+        leftward = _select_event_paddle_tracks(
+            tracks,
+            {"boat:1": ("anticlockwise", "left", 1.0)},
+            1,
+        )
+        second_rightward = _select_event_paddle_tracks(
+            tracks,
+            {"boat:1": ("clockwise", "right", 1.0)},
+            2,
+        )
+
+        self.assertEqual(tuple(rightward), ("paddle:right",))
+        self.assertEqual(tuple(leftward), ("paddle:left",))
+        self.assertEqual(tuple(second_rightward), ("paddle:middle",))
+
+    def test_all_event_paddles_preserves_every_track(self) -> None:
+        tracks = {
+            "paddle:1": _axis_track([0, 30]),
+            "paddle:2": _axis_track([0, 30]),
+        }
+
+        self.assertIs(
+            _select_event_paddle_tracks(tracks, {}, None),
+            tracks,
+        )
+
+    def test_event_detection_uses_only_the_selected_directional_paddle(self) -> None:
+        def shifted_track(physical_id: str, offset_x: float) -> list[_TimedPaddleObservation]:
+            shifted: list[_TimedPaddleObservation] = []
+            for timed in _axis_track([0, 15, 30, 45, 60, 90, 120, 135, 150, 165]):
+                line = timed.observation.line
+                observation = replace(
+                    timed.observation,
+                    source_ids=(physical_id,),
+                    line=(
+                        line[0] + offset_x,
+                        line[1],
+                        line[2] + offset_x,
+                        line[3],
+                    ),
+                )
+                shifted.append(
+                    replace(timed, physical_id=physical_id, observation=observation)
+                )
+            return shifted
+
+        tracks = {
+            "paddle:rear": shifted_track("paddle:rear", -20),
+            "paddle:front": shifted_track("paddle:front", 20),
+        }
+        with patch(
+            "sam3_service.exporter._track_paddle_observations",
+            return_value=tracks,
+        ):
+            events = _detect_paddle_events(
+                {},
+                ExportOptions(
+                    include_catch=True,
+                    include_exit=True,
+                    reference_prompt_id="boat",
+                    target_prompt_ids=("paddle",),
+                    target_slot_count=2,
+                    event_paddle_index=1,
+                ),
+                100,
+                100,
+                1.0,
+                1.0,
+            )
+
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
+        self.assertEqual({event.instance_id for event in events}, {"paddle:front"})
 
     def test_gap_does_not_synthesize_a_waterline_transition(self) -> None:
         state = _PaddleEventState(

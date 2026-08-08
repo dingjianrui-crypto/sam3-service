@@ -74,6 +74,7 @@ class ExportOptions:
     selection_rect: SelectionRect | None = None
     selection_keyframes: tuple[SelectionKeyframe, ...] = ()
     target_slot_count: int = 0
+    event_paddle_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -828,6 +829,12 @@ def _normalize_export_options(
             sorted(requested.selection_keyframes, key=lambda keyframe: keyframe[0])
         ),
         target_slot_count=max(0, requested.target_slot_count),
+        event_paddle_index=(
+            requested.event_paddle_index
+            if requested.event_paddle_index is not None
+            and requested.event_paddle_index > 0
+            else None
+        ),
     )
 
 
@@ -1256,9 +1263,14 @@ def _detect_paddle_events(
         for reference_id, deltas in evidence_by_reference.items()
     }
 
+    event_tracks = _select_event_paddle_tracks(
+        tracks,
+        directions,
+        options.event_paddle_index,
+    )
     detected: list[PaddleEvent] = []
     band_upward_width = _event_band_upward_width(scale_x, scale_y)
-    ordered_tracks = sorted(tracks.items())
+    ordered_tracks = sorted(event_tracks.items())
     for index, (physical_id, observations) in enumerate(ordered_tracks):
         reference_id = _dominant_reference_id(observations)
         rotation_direction, travel_direction, confidence = directions.get(
@@ -1374,6 +1386,73 @@ def _dominant_reference_id(observations: list[_TimedPaddleObservation]) -> str:
         reference_id = timed.observation.reference_id
         counts[reference_id] = counts.get(reference_id, 0) + 1
     return max(counts, key=counts.get) if counts else ""
+
+
+def _select_event_paddle_tracks(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+    directions: dict[str, tuple[str | None, str | None, float]],
+    event_paddle_index: int | None,
+) -> dict[str, list[_TimedPaddleObservation]]:
+    if event_paddle_index is None:
+        return tracks
+
+    grouped: dict[str, list[tuple[str, list[_TimedPaddleObservation]]]] = {}
+    for physical_id, observations in tracks.items():
+        if observations:
+            grouped.setdefault(_dominant_reference_id(observations), []).append(
+                (physical_id, observations)
+            )
+
+    selected: dict[str, list[_TimedPaddleObservation]] = {}
+    for reference_id, candidates in grouped.items():
+        _, travel_direction, _ = directions.get(reference_id, (None, None, 0.0))
+        if travel_direction not in {"left", "right"}:
+            continue
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -_track_forward_position(item[1], travel_direction),
+                item[0],
+            ),
+        )
+        selected_index = event_paddle_index - 1
+        if selected_index < len(ranked):
+            physical_id, observations = ranked[selected_index]
+            selected[physical_id] = observations
+    return selected
+
+
+def _track_forward_position(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+) -> float:
+    positions: list[float] = []
+    for timed in observations:
+        reference_line = timed.observation.reference_line
+        forward = _normalize(
+            (
+                reference_line[2] - reference_line[0],
+                reference_line[3] - reference_line[1],
+            )
+        )
+        if forward is None:
+            continue
+        if (travel_direction == "right" and forward[0] < 0) or (
+            travel_direction == "left" and forward[0] > 0
+        ):
+            forward = (-forward[0], -forward[1])
+        paddle_center = _line_center(timed.observation.line)
+        reference_center = _line_center(reference_line)
+        positions.append(
+            _dot(
+                (
+                    paddle_center[0] - reference_center[0],
+                    paddle_center[1] - reference_center[1],
+                ),
+                forward,
+            )
+        )
+    return _median(positions) if positions else -math.inf
 
 
 def _paddle_rotation_deltas(

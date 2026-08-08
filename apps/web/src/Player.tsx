@@ -95,6 +95,9 @@ export function Player({ manifest }: Props) {
   );
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportMetricCount, setExportMetricCount] = useState(1);
+  const [exportEventPaddleIndex, setExportEventPaddleIndex] = useState<number | "all">(
+    "all"
+  );
   const [exportAnglesEnabled, setExportAnglesEnabled] = useState(true);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exportCatchEnabled, setExportCatchEnabled] = useState(false);
@@ -464,6 +467,8 @@ export function Player({ manifest }: Props) {
           include_event_paddle_length: exportEventPaddleLengthEnabled,
           event_hold_seconds: exportEventHoldSeconds,
           metric_count: exportMetricCount,
+          event_paddle_index:
+            exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
           metric_center_offset_percent: exportMetricCenterOffsetPercent,
           reference_prompt_id: angleReferencePromptId,
           target_prompt_ids: [...angleTargetPromptIds],
@@ -490,6 +495,7 @@ export function Player({ manifest }: Props) {
     exportCatchEnabled,
     exportEventPaddleLengthEnabled,
     exportEventHoldSeconds,
+    exportEventPaddleIndex,
     exportExitEnabled,
     exportLabelPosition,
     exportMetricCount,
@@ -694,22 +700,6 @@ export function Player({ manifest }: Props) {
             <label className="checkbox">
               <input
                 type="checkbox"
-                checked={exportAnglesEnabled}
-                onChange={(event) => setExportAnglesEnabled(event.target.checked)}
-              />
-              Include angles
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={exportSpmEnabled}
-                onChange={(event) => setExportSpmEnabled(event.target.checked)}
-              />
-              Include SPM
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
                 checked={exportCatchEnabled}
                 onChange={(event) => setExportCatchEnabled(event.target.checked)}
               />
@@ -734,6 +724,27 @@ export function Player({ manifest }: Props) {
               />
               Event paddle length
             </label>
+            <label>
+              Event paddle
+              <select
+                value={exportEventPaddleIndex}
+                disabled={!exportCatchEnabled && !exportExitEnabled}
+                onChange={(event) =>
+                  setExportEventPaddleIndex(
+                    event.target.value === "all" ? "all" : Number(event.target.value)
+                  )
+                }
+              >
+                <option value="all">ALL</option>
+                {Array.from({ length: exportMetricCount }, (_, index) => index + 1).map(
+                  (index) => (
+                    <option key={index} value={index}>
+                      {index}
+                    </option>
+                  )
+                )}
+              </select>
+            </label>
             <label className="event-hold-control">
               Event freeze
               <input
@@ -754,6 +765,14 @@ export function Player({ manifest }: Props) {
             </label>
           </div>
           <div className="angle-controls">
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportAnglesEnabled}
+                onChange={(event) => setExportAnglesEnabled(event.target.checked)}
+              />
+              Include angles
+            </label>
             <label>
               Angle reference
               <select
@@ -795,6 +814,14 @@ export function Player({ manifest }: Props) {
             </div>
           </div>
           <div className="export-controls">
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportSpmEnabled}
+                onChange={(event) => setExportSpmEnabled(event.target.checked)}
+              />
+              Include SPM
+            </label>
             <label>
               Degree position
               <select
@@ -831,8 +858,12 @@ export function Player({ manifest }: Props) {
                 value={exportMetricCount}
                 onChange={(event) => {
                   const value = Number(event.target.value);
-                  setExportMetricCount(
-                    Number.isFinite(value) ? clamp(Math.round(value), 1, 4) : 1
+                  const nextMetricCount = Number.isFinite(value)
+                    ? clamp(Math.round(value), 1, 4)
+                    : 1;
+                  setExportMetricCount(nextMetricCount);
+                  setExportEventPaddleIndex((current) =>
+                    current === "all" || current <= nextMetricCount ? current : "all"
                   );
                 }}
               />

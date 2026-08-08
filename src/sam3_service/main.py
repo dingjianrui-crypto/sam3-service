@@ -427,6 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_hold_seconds: float = Query(default=1.5, ge=0.1, le=10),
         export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
+        event_paddle_index: int | None = Query(default=None, ge=1, le=4),
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
@@ -465,6 +466,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=400,
             )
         parsed_selection_keyframes = _parse_selection_keyframes(selection_keyframes)
+        if (
+            event_paddle_index is not None
+            and metric_count is not None
+            and event_paddle_index > metric_count
+        ):
+            raise ServiceError(
+                "INVALID_EVENT_PADDLE_INDEX",
+                "Event paddle index cannot exceed metric count.",
+                status_code=400,
+            )
         task_id = export_task_id or uuid.uuid4().hex
 
         def update_export_progress(stage: str, percent: float, message: str) -> None:
@@ -503,6 +514,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     include_event_paddle_length=include_event_paddle_length,
                     event_hold_seconds=event_hold_seconds,
                     target_slot_count=metric_count or 0,
+                    event_paddle_index=event_paddle_index,
                     metric_center_offset_percent=metric_center_offset_percent,
                     reference_prompt_id=reference_prompt_id,
                     target_prompt_ids=tuple(

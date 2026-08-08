@@ -933,7 +933,7 @@ h2 {
 
 .angle-controls {
   display: grid;
-  grid-template-columns: minmax(190px, auto) minmax(220px, 1fr);
+  grid-template-columns: auto minmax(190px, auto) minmax(220px, 1fr);
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -954,7 +954,7 @@ h2 {
 
 .export-controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(110px, 1fr)) auto;
+  grid-template-columns: auto repeat(4, minmax(110px, 1fr)) auto;
   gap: 10px;
   align-items: end;
 }
@@ -963,6 +963,11 @@ h2 {
   min-width: 0;
   display: grid;
   gap: 6px;
+}
+
+.export-controls > label.checkbox {
+  display: flex;
+  align-self: center;
 }
 
 .export-controls input[type="number"] {

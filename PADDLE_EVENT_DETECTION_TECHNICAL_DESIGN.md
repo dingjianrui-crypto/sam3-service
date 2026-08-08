@@ -523,6 +523,14 @@ creates fresh catch and exit eligibility.
   collapse multiple genuine candidates whose centers are above the boat.
 - Rotation direction is estimated per boat direction segment using consensus
   across its paddles when possible.
+- An optional one-based event-paddle index is applied only after direction
+  estimation. Rank physical tracks once per reference boat by the median paddle
+  center projection along the direction-normalized boat axis, from front to
+  back. Index `1` is the leading paddle. Keep the selected physical track fixed
+  for the export instead of re-ranking individual frames.
+- `ALL` leaves every eligible physical track in event analysis. If a requested
+  index is unavailable for a reference boat, do not substitute another track.
+  Angle and SPM metric slots remain independent of event-paddle selection.
 - Spatially separate crew paddles must not share active-blade or event state.
 - Existing post-analysis temporal/spatial deduplication remains a safeguard for
   fragmented detections, not the primary uniqueness mechanism.
@@ -531,8 +539,9 @@ creates fresh catch and exit eligibility.
 
 ## 16. Event Output
 
-The public export request remains unchanged. Internally, extend event metadata
-to include diagnostics while retaining current rendering fields:
+The public export request accepts optional `event_paddle_index` in addition to
+the existing event switches. Internally, event metadata retains these rendering
+and diagnostic fields:
 
 ```text
 PaddleEvent
