@@ -2168,15 +2168,17 @@ def _update_directed_paddle_state(
                     else observation.reference_line
                 )
                 selected_timestamp_ms = previous_seen_ms if use_previous else timestamp_ms
-                selected_phase_angle = previous_phase_angle if use_previous else None
-                selected_cycle_index = previous_cycle_index if use_previous else None
-                if selected_phase_angle is None and state.travel_direction is not None:
-                    selected_phase_angle = _directed_blade_angle(
+                selected_phase_angle = (
+                    _directed_blade_angle(
                         selected_line,
                         selected_reference,
                         blade,
                         state.travel_direction,
                     )
+                    if state.travel_direction is not None
+                    else previous_phase_angle if use_previous else None
+                )
+                selected_cycle_index = previous_cycle_index if use_previous else None
                 _start_directed_event_candidate(
                     state,
                     kind,
@@ -2299,6 +2301,7 @@ def _advance_directed_paddle_phase(
     state: _PaddleEventState,
     raw_angle: float,
 ) -> bool:
+    raw_angle %= 360
     if state.last_directed_angle is None or state.unwrapped_angle is None:
         state.last_directed_angle = raw_angle
         state.unwrapped_angle = raw_angle
@@ -2309,10 +2312,17 @@ def _advance_directed_paddle_phase(
     if delta < -PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES:
         state.phase_confident = False
         return False
+    if delta < 0:
+        state.phase_confident = True
+        return True
+    previous_raw_angle = state.last_directed_angle
     state.last_directed_angle = raw_angle
-    state.unwrapped_angle += max(0.0, delta)
+    state.unwrapped_angle += delta
     previous_cycle = state.cycle_index
     state.cycle_index = math.floor(state.unwrapped_angle / 360)
+    if previous_raw_angle > 270 and raw_angle < 90:
+        state.cycle_index = previous_cycle + 1
+        state.unwrapped_angle = state.cycle_index * 360 + raw_angle
     if state.cycle_index != previous_cycle:
         _clear_stroke_length(state)
     state.phase_confident = True
@@ -2335,8 +2345,13 @@ def _start_directed_event_candidate(
         phase_angle
         if phase_angle is not None
         else (
-            state.unwrapped_angle - state.cycle_index * 360
-            if state.unwrapped_angle is not None
+            _directed_blade_angle(
+                line,
+                reference_line,
+                blade,
+                state.travel_direction,
+            )
+            if state.travel_direction is not None
             else 0.0
         )
     )

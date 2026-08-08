@@ -170,6 +170,38 @@ class ExporterTest(unittest.TestCase):
                 angle,
             )
 
+    def test_ignored_backtracking_does_not_accumulate_phase_drift(self) -> None:
+        state = _PaddleEventState()
+
+        for angle in [340, 345, 342, 343, 346, 355, 2, 10]:
+            self.assertTrue(_advance_directed_paddle_phase(state, angle))
+
+        self.assertEqual(state.cycle_index, 1)
+        self.assertAlmostEqual(state.unwrapped_angle or 0, 370)
+        self.assertAlmostEqual(state.last_directed_angle or 0, 10)
+
+    def test_event_angle_uses_geometry_after_ignored_backtracking(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+        )
+        events = []
+        for index, angle in enumerate([0, 10, 7, 8, 12, 30, 45]):
+            event = _update_directed_paddle_state(
+                state,
+                _rotating_observation(angle),
+                index * 100,
+                8.0,
+            )
+            if event is not None:
+                events.append(event)
+
+        self.assertEqual([event.kind for event in events], ["catch"])
+        self.assertAlmostEqual(events[0].phase_angle or 0, 30)
+        self.assertAlmostEqual(events[0].degree or 0, 30)
+
     def test_directed_detector_backdates_catch_and_exit(self) -> None:
         state = _PaddleEventState(
             physical_id="paddle:physical:1",

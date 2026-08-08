@@ -280,9 +280,12 @@ The reset does not inspect the preceding cycle. It therefore occurs when:
 - only exit was detected; or
 - neither event was detected.
 
-Backward phase movement caused by small jitter is ignored. A sustained true
-rotation reversal creates a new direction segment rather than decrementing the
-cycle index.
+Backward phase movement caused by small jitter is ignored without moving the
+accepted raw-angle baseline backward. Forward recovery up to the preceding peak
+therefore does not increment the unwrapped phase a second time. At a genuine
+raw-angle wrap from near `360°` to near `0°`, re-anchor the unwrapped angle to
+the new raw angle and cycle index. A sustained true rotation reversal creates a
+new direction segment rather than decrementing the cycle index.
 
 ## 11. Waterline-transition Geometry
 
@@ -569,7 +572,10 @@ PaddleEvent
   confidence
 ```
 
-The freeze frame displays `phase_angle` in the full directed `[0°, 360°)` range.
+The freeze frame displays the event frame's directed geometric `phase_angle` in
+the full `[0°, 360°)` range. The monotonic unwrapped phase is retained for cycle
+and event ordering only; accumulated progression must not replace the displayed
+geometry.
 Catch angle arcs and labels are red; exit angle arcs and labels are green. The
 legacy acute `degree` remains available for compatibility and non-event angle
 metrics.
