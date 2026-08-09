@@ -49,7 +49,6 @@ PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
-PADDLE_LENGTH_OUTLIER_MIN_SAMPLES = 5
 PADDLE_LENGTH_OUTLIER_RATIO = 0.12
 PADDLE_LENGTH_OUTLIER_MIN_PIXELS = 12.0
 PADDLE_MASK_AXIS_CORRIDOR_RATIO = 0.07
@@ -2097,26 +2096,28 @@ def _restore_bidirectional_phase_lines(
         )
 
     backward_samples = [sample for sample in samples if sample[1] >= 90]
-    temporal_length = _robust_backward_paddle_length(backward_samples)
     accepted_length = None
     for index, phase_angle, line in sorted(
         backward_samples,
         key=lambda item: item[1],
         reverse=True,
     ):
+        # Observations nearest 180 degrees are least affected by immersion and
+        # seed the reverse pass. Only an excessive increase over an already
+        # accepted later observation is suspicious enough to refine.
         if (
             backward_length_refiner is not None
-            and temporal_length is not None
-            and _line_length(line) > temporal_length + max(
+            and accepted_length is not None
+            and _line_length(line) > accepted_length + max(
                 PADDLE_LENGTH_OUTLIER_MIN_PIXELS,
-                temporal_length * PADDLE_LENGTH_OUTLIER_RATIO,
+                accepted_length * PADDLE_LENGTH_OUTLIER_RATIO,
             )
         ):
             line = backward_length_refiner(
                 index,
                 line,
                 active_blade,
-                temporal_length,
+                accepted_length,
             )
         accepted_length = max(accepted_length or 0.0, _line_length(line))
         reverse_restored = _extend_paddle_active_endpoint(
@@ -2129,30 +2130,6 @@ def _restore_bidirectional_phase_lines(
         ):
             restored[index] = reverse_restored
     return restored
-
-
-def _robust_backward_paddle_length(
-    samples: list[tuple[int, float, Line]],
-) -> float | None:
-    """Estimate the stable physical length without trusting isolated long masks."""
-    if len(samples) < PADDLE_LENGTH_OUTLIER_MIN_SAMPLES:
-        return None
-    lengths = [_line_length(line) for _, _, line in samples]
-    center = _median(lengths)
-    deviations = [abs(length - center) for length in lengths]
-    mad = _median(deviations)
-    upper_limit = center + max(
-        PADDLE_LENGTH_OUTLIER_MIN_PIXELS,
-        3.0 * mad,
-        center * PADDLE_LENGTH_OUTLIER_RATIO,
-    )
-    stable = [length for length in lengths if length <= upper_limit]
-    if len(stable) < max(3, len(lengths) // 2):
-        return center
-    stable.sort()
-    # Favor the upper portion of the stable distribution: shorter observations
-    # can be cropped, while the high isolated values have already been removed.
-    return stable[min(len(stable) - 1, round((len(stable) - 1) * 0.75))]
 
 
 def _backward_mask_length_refiner(

@@ -335,6 +335,36 @@ class ExporterTest(unittest.TestCase):
         self.assertLess(refined[0][1], 160.0)
         self.assertTrue(all(_line_length(line) <= 148.0 for line in restored.values()))
 
+    def test_backward_restore_trusts_consistent_full_length_near_180(self) -> None:
+        samples = [
+            (0, 140.0, (0.0, 0.0, 142.2, 0.0)),
+            (1, 150.0, (0.0, 0.0, 183.5, 0.0)),
+            (2, 161.0, (0.0, 0.0, 210.9, 0.0)),
+            (3, 175.0, (0.0, 0.0, 208.8, 0.0)),
+        ]
+        refined: list[int] = []
+
+        def refine(
+            index: int,
+            line: tuple[float, float, float, float],
+            blade: int,
+            expected: float,
+        ) -> tuple[float, float, float, float]:
+            refined.append(index)
+            return _set_paddle_active_endpoint_length(line, blade, expected)
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            backward_length_refiner=refine,
+        )
+
+        self.assertEqual(refined, [])
+        self.assertEqual(
+            [round(_line_length(restored[index]), 1) for index in range(4)],
+            [210.9, 210.9, 210.9, 208.8],
+        )
+
     def test_appearance_refinement_crops_bright_mask_extension(self) -> None:
         width, height = 100, 40
         rgb = bytearray([220] * width * height * 3)
