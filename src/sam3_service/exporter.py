@@ -465,6 +465,15 @@ def export_centerline_video(
             )
             if freeze_moment is not None:
                 assert event_image is not None
+                _draw_event_companion_angles(
+                    event_image,
+                    width,
+                    height,
+                    scaled_records,
+                    colors,
+                    export_options,
+                    freeze_moment.events,
+                )
                 for event in freeze_moment.events:
                     _draw_paddle_event_label(
                         event_image, width, height, event, export_options
@@ -1090,6 +1099,91 @@ def _draw_frame_overlay(
         _draw_spm_label(image, width, height, estimate, export_options)
     for event in paddle_events:
         _draw_paddle_event_label(image, width, height, event, export_options)
+
+
+def _draw_event_companion_angles(
+    image: bytearray,
+    width: int,
+    height: int,
+    records: list[dict[str, Any]],
+    colors: dict[str, Color],
+    options: ExportOptions,
+    events: tuple[PaddleEvent, ...],
+) -> None:
+    """Draw non-event paddle angles on a held event frame."""
+    if (
+        options.target_slot_count <= 1
+        or options.event_paddle_index is None
+        or not events
+    ):
+        return
+    centerlines: list[Centerline] = []
+    for record in records:
+        use_waterline = (
+            options.reference_line_mode == "waterline"
+            and record.get("prompt_id") == options.reference_prompt_id
+        )
+        line = _record_line(record, width, height, use_waterline=use_waterline)
+        if line is None:
+            continue
+        centerlines.append(
+            Centerline(
+                record=record,
+                line=line,
+                color=colors.get(record.get("prompt_id", ""), (53, 194, 255, 255)),
+            )
+        )
+    event = events[0]
+    slots = _event_companion_degree_slots(centerlines, options, event)
+    if not any(slot.degree is not None and slot.line is not None for slot in slots):
+        return
+    line_width = max(3, round(min(width, height) * 0.006))
+    for entry in _degree_label_entries(slots):
+        if entry.label.degree is None or entry.label.line is None:
+            continue
+        _draw_line(
+            image,
+            width,
+            height,
+            entry.label.line,
+            entry.label.color,
+            line_width,
+        )
+        _draw_target_degree_marker(image, width, height, entry)
+    selected_index = options.event_paddle_index - 1
+    _draw_degree_label_block(
+        image,
+        width,
+        height,
+        slots,
+        options,
+        text_color_overrides={selected_index: _paddle_event_angle_color(event)},
+    )
+
+
+def _event_companion_degree_slots(
+    centerlines: list[Centerline],
+    options: ExportOptions,
+    event: PaddleEvent,
+) -> list[DegreeLabel]:
+    """Return directional metric slots with the event paddle left for event drawing."""
+    if options.target_slot_count <= 1 or options.event_paddle_index is None:
+        return []
+    labels = _degree_labels(centerlines, options)
+    if event.travel_direction == "right":
+        labels.reverse()
+    slots = _degree_slots(labels, options)
+    selected_index = options.event_paddle_index - 1
+    if 0 <= selected_index < len(slots):
+        selected = slots[selected_index]
+        display_angle = _event_display_angle(event)
+        slots[selected_index] = replace(
+            selected,
+            degree=round(display_angle) % 360 if display_angle is not None else None,
+            line=None,
+            color=_paddle_event_angle_color(event),
+        )
+    return slots
 
 
 def _record_line(
@@ -3292,13 +3386,21 @@ def _draw_event_angle_marker(
         reference_vector = (-reference_vector[0], -reference_vector[1])
     elif event.phase_angle is None and _dot(reference_vector, paddle_vector) < 0:
         paddle_vector = (-paddle_vector[0], -paddle_vector[1])
-    start_angle = math.atan2(reference_vector[1], reference_vector[0])
     if event.phase_angle is not None and event.travel_direction in {"left", "right"}:
-        phase_radians = math.radians(event.phase_angle % 360)
-        delta = phase_radians if event.travel_direction == "right" else -phase_radians
+        display_angle = _event_display_angle(event)
+        assert display_angle is not None
+        if event.kind == "exit" and 0 <= event.phase_angle <= 180:
+            reference_vector = (-reference_vector[0], -reference_vector[1])
+            display_radians = math.radians(display_angle)
+            delta = -display_radians if event.travel_direction == "right" else display_radians
+        else:
+            phase_radians = math.radians(event.phase_angle % 360)
+            delta = phase_radians if event.travel_direction == "right" else -phase_radians
     else:
         end_angle = math.atan2(paddle_vector[1], paddle_vector[0])
+        start_angle = math.atan2(reference_vector[1], reference_vector[0])
         delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
+    start_angle = math.atan2(reference_vector[1], reference_vector[0])
     radius = max(24.0, min(width, height) * 0.065)
     line_width = max(2, round(min(width, height) * 0.004))
     for vector, color in (
@@ -3368,7 +3470,11 @@ def _draw_event_angle_marker(
 
 
 def _event_display_angle(event: PaddleEvent) -> float | None:
-    return event.phase_angle if event.phase_angle is not None else event.degree
+    if event.phase_angle is None:
+        return event.degree
+    if event.kind == "exit" and 0 <= event.phase_angle <= 180:
+        return 180 - event.phase_angle
+    return event.phase_angle
 
 
 def _event_label_text(
@@ -3453,13 +3559,32 @@ def _draw_degree_label_block(
     height: int,
     labels: list[DegreeLabel],
     options: ExportOptions,
+    *,
+    text_color_overrides: dict[int, Color] | None = None,
 ) -> None:
-    if _draw_degree_label_block_with_pillow(image, width, height, labels, options):
+    if _draw_degree_label_block_with_pillow(
+        image,
+        width,
+        height,
+        labels,
+        options,
+        text_color_overrides=text_color_overrides,
+    ):
         return
-    _draw_degree_label_block_bitmap(image, width, height, labels, options)
+    _draw_degree_label_block_bitmap(
+        image,
+        width,
+        height,
+        labels,
+        options,
+        text_color_overrides=text_color_overrides,
+    )
 
 
-def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
+def _degree_label_entries(
+    labels: list[DegreeLabel],
+    text_color_overrides: dict[int, Color] | None = None,
+) -> list[DegreeLabelEntry]:
     highlight_index = _highlighted_degree_index(labels)
     entries: list[DegreeLabelEntry] = []
     show_index = len(labels) > 1
@@ -3474,6 +3599,8 @@ def _degree_label_entries(labels: list[DegreeLabel]) -> list[DegreeLabelEntry]:
                 if highlight_index is not None and index - 1 == highlight_index
                 else (255, 242, 168, 255)
             )
+        if text_color_overrides is not None and index - 1 in text_color_overrides:
+            text_color = text_color_overrides[index - 1]
         entries.append(
             DegreeLabelEntry(
                 text=f"{index}: {text}" if show_index and text else text,
@@ -3506,6 +3633,8 @@ def _draw_degree_label_block_with_pillow(
     height: int,
     labels: list[DegreeLabel],
     options: ExportOptions,
+    *,
+    text_color_overrides: dict[int, Color] | None = None,
 ) -> bool:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -3524,7 +3653,7 @@ def _draw_degree_label_block_with_pillow(
     except OSError:
         return False
 
-    entries = _degree_label_entries(labels)
+    entries = _degree_label_entries(labels, text_color_overrides)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     stroke_width = max(1, round(font_size * 0.05))
@@ -3599,8 +3728,10 @@ def _draw_degree_label_block_bitmap(
     height: int,
     labels: list[DegreeLabel],
     options: ExportOptions,
+    *,
+    text_color_overrides: dict[int, Color] | None = None,
 ) -> None:
-    entries = _degree_label_entries(labels)
+    entries = _degree_label_entries(labels, text_color_overrides)
     font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
     scale = max(2, round(font_size / 7))
     gap = max(1, round(scale * 0.75))

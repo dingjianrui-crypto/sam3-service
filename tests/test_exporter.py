@@ -33,6 +33,7 @@ from sam3_service.exporter import (
     _estimate_paddle_direction,
     _event_phase_allowed,
     _event_label_text,
+    _event_companion_degree_slots,
     _freeze_audio_filter,
     _freeze_moments,
     _freeze_segments,
@@ -231,7 +232,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(events[0].travel_direction, "right")
         self.assertAlmostEqual(events[0].phase_angle or 0, 30)
         self.assertEqual(_event_label_text(events[0]), "30°")
-        self.assertEqual(_event_label_text(events[1]), "150°")
+        self.assertEqual(_event_label_text(events[1]), "30°")
         self.assertEqual(_paddle_event_angle_color(events[0]), (255, 82, 96, 255))
         self.assertEqual(_paddle_event_angle_color(events[1]), (46, 204, 113, 255))
 
@@ -657,9 +658,22 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             _event_label_text(event, include_paddle_length=True),
-            "135° 50 px",
+            "45° 50 px",
         )
-        self.assertEqual(_event_label_text(event), "135°")
+        self.assertEqual(_event_label_text(event), "45°")
+
+    def test_exit_event_label_uses_complementary_acute_angle(self) -> None:
+        event = PaddleEvent(
+            kind="exit",
+            timestamp_ms=100,
+            instance_id="paddle:physical:1",
+            line=(0, 0, 30, 40),
+            confidence=1.0,
+            phase_angle=151,
+            degree=29,
+        )
+
+        self.assertEqual(_event_label_text(event), "29°")
 
     def test_opposite_blade_is_ignored_and_next_360_cycle_resets_catch(self) -> None:
         state = _PaddleEventState(
@@ -1648,6 +1662,62 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual([slot.degree for slot in slots], [42])
+
+    def test_event_companion_angles_follow_directional_slots_and_skip_selected(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "instance_id": "boat:1"},
+            line=(0.0, 50.0, 100.0, 50.0),
+            color=(255, 181, 71, 255),
+        )
+        targets = [
+            Centerline(
+                record={"prompt_id": "paddle", "instance_id": f"paddle:{index}"},
+                line=(center_x - 10.0, 30.0, center_x + 10.0, 30.0 + rise),
+                color=(53, 194, 255, 255),
+            )
+            for index, (center_x, rise) in enumerate(
+                [(20.0, 12.0), (50.0, 20.0), (80.0, 35.0)],
+                start=1,
+            )
+        ]
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+            target_slot_count=3,
+            event_paddle_index=2,
+        )
+
+        rightward = _event_companion_degree_slots(
+            [reference, *targets],
+            options,
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=0,
+                instance_id="slot:2",
+                line=targets[1].line,
+                confidence=1.0,
+                phase_angle=45,
+                travel_direction="right",
+            ),
+        )
+        leftward = _event_companion_degree_slots(
+            [reference, *targets],
+            options,
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=0,
+                instance_id="slot:2",
+                line=targets[1].line,
+                confidence=1.0,
+                phase_angle=45,
+                travel_direction="left",
+            ),
+        )
+
+        self.assertEqual([slot.degree for slot in rightward], [60, 45, 31])
+        self.assertEqual([slot.degree for slot in leftward], [31, 45, 60])
+        self.assertIsNone(rightward[1].line)
+        self.assertIsNone(leftward[1].line)
 
     def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
         line = _record_line(
