@@ -18,6 +18,7 @@ from sam3_service.exporter import (
     _PaddleEventState,
     _TimedPaddleObservation,
     _advance_directed_paddle_phase,
+    _appearance_refined_paddle_length,
     _blade_transition_on_waterline,
     _blade_waterline_overlaps,
     _catch_phase_allowed,
@@ -53,6 +54,7 @@ from sam3_service.exporter import (
     _restore_track_stroke_lengths,
     _selection_rect_at,
     _select_event_paddle_tracks,
+    _set_paddle_active_endpoint_length,
     _spm_label_top,
     _update_directed_paddle_state,
     _update_paddle_event_state,
@@ -302,6 +304,83 @@ class ExporterTest(unittest.TestCase):
             [100.0, 100.0, 110.0, 110.0, 110.0],
         )
         self.assertTrue(all(restored[index][:2] == (0.0, 0.0) for index in range(5)))
+
+    def test_backward_restore_refines_isolated_long_mask_before_reverse_max(self) -> None:
+        samples = [
+            (0, 90.0, (0.0, 0.0, 145.0, 0.0)),
+            (1, 110.0, (0.0, 0.0, 146.0, 0.0)),
+            (2, 130.0, (0.0, 0.0, 185.0, 0.0)),
+            (3, 150.0, (0.0, 0.0, 144.0, 0.0)),
+            (4, 165.0, (0.0, 0.0, 148.0, 0.0)),
+            (5, 180.0, (0.0, 0.0, 147.0, 0.0)),
+        ]
+        refined: list[tuple[int, float]] = []
+
+        def refine(
+            index: int,
+            line: tuple[float, float, float, float],
+            blade: int,
+            expected: float,
+        ) -> tuple[float, float, float, float]:
+            refined.append((index, expected))
+            return _set_paddle_active_endpoint_length(line, blade, expected)
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            backward_length_refiner=refine,
+        )
+
+        self.assertEqual([index for index, _ in refined], [2])
+        self.assertLess(refined[0][1], 160.0)
+        self.assertTrue(all(_line_length(line) <= 148.0 for line in restored.values()))
+
+    def test_appearance_refinement_crops_bright_mask_extension(self) -> None:
+        width, height = 100, 40
+        rgb = bytearray([220] * width * height * 3)
+        mask_points = {
+            (x, y)
+            for x in range(10, 91)
+            for y in range(17, 24)
+        }
+        for x in range(10, 61):
+            for y in range(19, 22):
+                offset = (y * width + x) * 3
+                rgb[offset : offset + 3] = bytes((25, 25, 25))
+        counts: list[int] = []
+        current = 0
+        run = 0
+        for x in range(width):
+            for y in range(height):
+                value = int((x, y) in mask_points)
+                if value == current:
+                    run += 1
+                else:
+                    counts.append(run)
+                    run = 1
+                    current = value
+        counts.append(run)
+        records = [
+            {
+                "centerline_segmentation": {
+                    "type": "rle",
+                    "size": [height, width],
+                    "counts": counts,
+                }
+            }
+        ]
+
+        length = _appearance_refined_paddle_length(
+            records,
+            bytes(rgb),
+            width,
+            height,
+            (10.0, 20.0, 90.0, 20.0),
+            active_blade=1,
+        )
+
+        self.assertIsNotNone(length)
+        self.assertAlmostEqual(length or 0.0, 50.0, delta=2.0)
 
     def test_track_is_bidirectionally_restored_before_event_detection(self) -> None:
         angles = [0, 30, 45, 60, 90, 120, 135, 150, 165, 180]

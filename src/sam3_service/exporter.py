@@ -49,6 +49,14 @@ PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
+PADDLE_LENGTH_OUTLIER_MIN_SAMPLES = 5
+PADDLE_LENGTH_OUTLIER_RATIO = 0.12
+PADDLE_LENGTH_OUTLIER_MIN_PIXELS = 12.0
+PADDLE_MASK_AXIS_CORRIDOR_RATIO = 0.07
+PADDLE_MASK_AXIS_CORRIDOR_MIN_PIXELS = 5.0
+PADDLE_MASK_AXIS_CORRIDOR_MAX_PIXELS = 14.0
+PADDLE_MASK_MIN_REFINED_PIXELS = 24
+PADDLE_MASK_REFINED_LENGTH_TOLERANCE_RATIO = 0.10
 WATERLINE_BOAT_AXIS_MAX_ANGLE_DEGREES = 20.0
 EXPORT_END_GUARD_FRAMES = 2
 PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
@@ -337,6 +345,7 @@ def export_centerline_video(
     events: list[PaddleEvent] = []
     if export_options.include_catch or export_options.include_exit:
         _report_progress(progress, "analyzing_events", 5, "Analyzing paddle events")
+        source_frame_loader = _cached_rgb_video_frame_loader(video_path, width, height)
         events = _detect_paddle_events(
             frames,
             export_options,
@@ -345,6 +354,7 @@ def export_centerline_video(
             scale_x,
             scale_y,
             progress,
+            source_frame_loader=source_frame_loader,
         )
     freeze_moments = _freeze_moments(
         events,
@@ -592,6 +602,56 @@ def _decode_rgba_video_frames(
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def _cached_rgb_video_frame_loader(
+    video_path: Path,
+    width: int,
+    height: int,
+) -> Callable[[int], bytes | None]:
+    """Return an on-demand, bounded cache of source frames used for mask refinement."""
+    cache: dict[int, bytes | None] = {}
+    order: list[int] = []
+
+    def load(timestamp_ms: int) -> bytes | None:
+        if timestamp_ms in cache:
+            return cache[timestamp_ms]
+        command = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{timestamp_ms / 1000:.6f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={width}:{height}",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            expected_size = width * height * 3
+            frame = result.stdout if len(result.stdout) == expected_size else None
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            frame = None
+        cache[timestamp_ms] = frame
+        order.append(timestamp_ms)
+        if len(order) > 32:
+            cache.pop(order.pop(0), None)
+        return frame
+
+    return load
 
 
 def _report_progress(
@@ -1243,6 +1303,7 @@ def _detect_paddle_events(
     scale_x: float,
     scale_y: float,
     progress: Callable[[str, float, str], None] | None = None,
+    source_frame_loader: Callable[[int], bytes | None] | None = None,
 ) -> list[PaddleEvent]:
     tracks = _track_paddle_observations(
         frames,
@@ -1274,6 +1335,16 @@ def _detect_paddle_events(
     )
     detected: list[PaddleEvent] = []
     band_upward_width = _event_band_upward_width(scale_x, scale_y)
+    mask_length_refiner = (
+        _backward_mask_length_refiner(
+            frames,
+            source_frame_loader,
+            width,
+            height,
+        )
+        if source_frame_loader is not None
+        else None
+    )
     ordered_tracks = sorted(event_tracks.items())
     for index, (physical_id, observations) in enumerate(ordered_tracks):
         reference_id = _dominant_reference_id(observations)
@@ -1286,6 +1357,7 @@ def _detect_paddle_events(
             observations,
             travel_direction,
             band_upward_width,
+            backward_length_refiner=mask_length_refiner,
         )
         state = _PaddleEventState(
             physical_id=physical_id,
@@ -1825,6 +1897,10 @@ def _restore_track_stroke_lengths(
     observations: list[_TimedPaddleObservation],
     travel_direction: str,
     band_upward_width: float,
+    backward_length_refiner: Callable[
+        [_TimedPaddleObservation, Line, int, float], Line
+    ]
+    | None = None,
 ) -> list[_TimedPaddleObservation]:
     """Restore each 0-180 stroke before chronological event detection.
 
@@ -1850,6 +1926,7 @@ def _restore_track_stroke_lengths(
             segment,
             travel_direction,
             band_upward_width,
+            backward_length_refiner,
         )
         segment_start = index
     return restored
@@ -1859,6 +1936,10 @@ def _restore_track_segment_stroke_lengths(
     observations: list[_TimedPaddleObservation],
     travel_direction: str,
     band_upward_width: float,
+    backward_length_refiner: Callable[
+        [_TimedPaddleObservation, Line, int, float], Line
+    ]
+    | None = None,
 ) -> list[_TimedPaddleObservation]:
     oriented_lines: list[Line] = []
     previous_line: Line | None = None
@@ -1901,9 +1982,28 @@ def _restore_track_segment_stroke_lengths(
             )
 
     restored_lines: dict[int, Line] = {}
+    indexed_refiner: Callable[[int, Line, int, float], Line] | None = None
+    if backward_length_refiner is not None:
+        def indexed_refiner(
+            sample_index: int,
+            sample_line: Line,
+            blade: int,
+            expected_length: float,
+        ) -> Line:
+            return backward_length_refiner(
+                observations[sample_index],
+                sample_line,
+                blade,
+                expected_length,
+            )
+
     for samples in phase_groups.values():
         restored_lines.update(
-            _restore_bidirectional_phase_lines(samples, active_blade)
+            _restore_bidirectional_phase_lines(
+                samples,
+                active_blade,
+                backward_length_refiner=indexed_refiner,
+            )
         )
 
     result = list(observations)
@@ -1981,6 +2081,7 @@ def _infer_segment_active_blade(
 def _restore_bidirectional_phase_lines(
     samples: list[tuple[int, float, Line]],
     active_blade: int,
+    backward_length_refiner: Callable[[int, Line, int, float], Line] | None = None,
 ) -> dict[int, Line]:
     """Apply forward and reverse non-decreasing envelopes to one stroke."""
     restored: dict[int, Line] = {}
@@ -1995,14 +2096,28 @@ def _restore_bidirectional_phase_lines(
             accepted_length,
         )
 
+    backward_samples = [sample for sample in samples if sample[1] >= 90]
+    temporal_length = _robust_backward_paddle_length(backward_samples)
     accepted_length = None
     for index, phase_angle, line in sorted(
-        samples,
+        backward_samples,
         key=lambda item: item[1],
         reverse=True,
     ):
-        if phase_angle < 90:
-            continue
+        if (
+            backward_length_refiner is not None
+            and temporal_length is not None
+            and _line_length(line) > temporal_length + max(
+                PADDLE_LENGTH_OUTLIER_MIN_PIXELS,
+                temporal_length * PADDLE_LENGTH_OUTLIER_RATIO,
+            )
+        ):
+            line = backward_length_refiner(
+                index,
+                line,
+                active_blade,
+                temporal_length,
+            )
         accepted_length = max(accepted_length or 0.0, _line_length(line))
         reverse_restored = _extend_paddle_active_endpoint(
             line,
@@ -2014,6 +2129,213 @@ def _restore_bidirectional_phase_lines(
         ):
             restored[index] = reverse_restored
     return restored
+
+
+def _robust_backward_paddle_length(
+    samples: list[tuple[int, float, Line]],
+) -> float | None:
+    """Estimate the stable physical length without trusting isolated long masks."""
+    if len(samples) < PADDLE_LENGTH_OUTLIER_MIN_SAMPLES:
+        return None
+    lengths = [_line_length(line) for _, _, line in samples]
+    center = _median(lengths)
+    deviations = [abs(length - center) for length in lengths]
+    mad = _median(deviations)
+    upper_limit = center + max(
+        PADDLE_LENGTH_OUTLIER_MIN_PIXELS,
+        3.0 * mad,
+        center * PADDLE_LENGTH_OUTLIER_RATIO,
+    )
+    stable = [length for length in lengths if length <= upper_limit]
+    if len(stable) < max(3, len(lengths) // 2):
+        return center
+    stable.sort()
+    # Favor the upper portion of the stable distribution: shorter observations
+    # can be cropped, while the high isolated values have already been removed.
+    return stable[min(len(stable) - 1, round((len(stable) - 1) * 0.75))]
+
+
+def _backward_mask_length_refiner(
+    frames: dict[int, list[dict[str, Any]]],
+    source_frame_loader: Callable[[int], bytes | None],
+    width: int,
+    height: int,
+) -> Callable[[_TimedPaddleObservation, Line, int, float], Line]:
+    """Build a conservative geometry/appearance/temporal outlier refiner."""
+
+    def refine(
+        timed: _TimedPaddleObservation,
+        line: Line,
+        active_blade: int,
+        temporal_length: float,
+    ) -> Line:
+        temporal_line = _set_paddle_active_endpoint_length(
+            line,
+            active_blade,
+            temporal_length,
+        )
+        rgb = source_frame_loader(timed.timestamp_ms)
+        if rgb is None:
+            return temporal_line
+        source_ids = set(timed.observation.source_ids)
+        records = [
+            record
+            for record in frames.get(timed.timestamp_ms, [])
+            if _record_track_id(record) in source_ids
+        ]
+        supported_length = _appearance_refined_paddle_length(
+            records,
+            rgb,
+            width,
+            height,
+            line,
+            active_blade,
+        )
+        if supported_length is None:
+            return temporal_line
+        tolerance = max(
+            PADDLE_LENGTH_OUTLIER_MIN_PIXELS / 2,
+            temporal_length * PADDLE_MASK_REFINED_LENGTH_TOLERANCE_RATIO,
+        )
+        if supported_length > temporal_length + tolerance:
+            # Dark water, the athlete, or the boat can survive the appearance
+            # crop. Do not allow that ambiguous support to seed the reverse max.
+            return temporal_line
+        return _set_paddle_active_endpoint_length(
+            line,
+            active_blade,
+            max(temporal_length, supported_length),
+        )
+
+    return refine
+
+
+def _appearance_refined_paddle_length(
+    records: list[dict[str, Any]],
+    rgb: bytes,
+    width: int,
+    height: int,
+    line: Line,
+    active_blade: int,
+) -> float | None:
+    """Crop bright water from mask pixels and measure support along the paddle axis."""
+    if len(rgb) != width * height * 3 or active_blade not in (0, 1):
+        return None
+    mask_points: set[tuple[int, int]] = set()
+    for record in records:
+        segmentation = record.get("centerline_segmentation")
+        if not isinstance(segmentation, dict):
+            continue
+        mask_points.update(_scaled_rle_foreground_points(segmentation, width, height))
+    if len(mask_points) < PADDLE_MASK_MIN_REFINED_PIXELS:
+        return None
+
+    active = (line[0], line[1]) if active_blade == 0 else (line[2], line[3])
+    inactive = (line[2], line[3]) if active_blade == 0 else (line[0], line[1])
+    axis = _normalize((active[0] - inactive[0], active[1] - inactive[1]))
+    observed_length = _line_length(line)
+    if axis is None or observed_length < 1:
+        return None
+    perpendicular = (-axis[1], axis[0])
+    corridor = _clamp(
+        observed_length * PADDLE_MASK_AXIS_CORRIDOR_RATIO,
+        PADDLE_MASK_AXIS_CORRIDOR_MIN_PIXELS,
+        PADDLE_MASK_AXIS_CORRIDOR_MAX_PIXELS,
+    )
+    candidates: list[tuple[float, float]] = []
+    for x, y in mask_points:
+        delta = (x - inactive[0], y - inactive[1])
+        projection = _dot(delta, axis)
+        if projection < -corridor or projection > observed_length + corridor:
+            continue
+        if abs(_dot(delta, perpendicular)) > corridor:
+            continue
+        offset = (y * width + x) * 3
+        red, green, blue = rgb[offset : offset + 3]
+        luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        candidates.append((projection, luma))
+    if len(candidates) < PADDLE_MASK_MIN_REFINED_PIXELS:
+        return None
+
+    lumas = sorted(luma for _, luma in candidates)
+    dark = _ordered_fraction(lumas, 0.25)
+    light = _ordered_fraction(lumas, 0.75)
+    if light - dark < 20:
+        return None
+    # The lower appearance mode is the black/colored paddle; the higher mode is
+    # predominantly water and splash. A per-mask threshold adapts to exposure.
+    threshold = min(170.0, dark + (light - dark) * 0.52)
+    projections = sorted(
+        projection for projection, luma in candidates if luma <= threshold
+    )
+    if len(projections) < PADDLE_MASK_MIN_REFINED_PIXELS:
+        return None
+    low = _ordered_fraction(projections, 0.02)
+    high = _ordered_fraction(projections, 0.98)
+    if high - low < observed_length * 0.35:
+        return None
+    return max(0.0, high)
+
+
+def _scaled_rle_foreground_points(
+    segmentation: dict[str, Any],
+    width: int,
+    height: int,
+) -> set[tuple[int, int]]:
+    if segmentation.get("type") != "rle":
+        return set()
+    size = segmentation.get("size")
+    counts = segmentation.get("counts")
+    if (
+        not isinstance(size, list | tuple)
+        or len(size) != 2
+        or not isinstance(counts, list | tuple)
+    ):
+        return set()
+    try:
+        mask_height, mask_width = int(size[0]), int(size[1])
+    except (TypeError, ValueError):
+        return set()
+    if mask_width <= 0 or mask_height <= 0:
+        return set()
+    points: set[tuple[int, int]] = set()
+    position = 0
+    foreground = False
+    mask_area = mask_width * mask_height
+    for raw_count in counts:
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            return set()
+        if count < 0:
+            return set()
+        run_end = min(position + count, mask_area)
+        if foreground:
+            for flat_index in range(position, run_end):
+                source_x = flat_index // mask_height
+                source_y = flat_index % mask_height
+                if source_x >= mask_width:
+                    break
+                x = min(width - 1, int((source_x + 0.5) * width / mask_width))
+                y = min(height - 1, int((source_y + 0.5) * height / mask_height))
+                points.add((x, y))
+        position += count
+        foreground = not foreground
+        if position >= mask_area:
+            break
+    return points
+
+
+def _ordered_fraction(ordered: list[float], fraction: float) -> float:
+    if not ordered:
+        return 0.0
+    position = _clamp(fraction, 0.0, 1.0) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
 def _update_directed_paddle_state(
@@ -2472,6 +2794,31 @@ def _extend_paddle_active_endpoint(
     if active_blade == 0:
         return (restored_active[0], restored_active[1], dry[0], dry[1])
     return (dry[0], dry[1], restored_active[0], restored_active[1])
+
+
+def _set_paddle_active_endpoint_length(
+    observed: Line,
+    active_blade: int,
+    target_length: float,
+) -> Line:
+    """Set length from the inactive endpoint, allowing an outlier to be shortened."""
+    observed_length = _line_length(observed)
+    if active_blade not in (0, 1) or observed_length < 2 or target_length < 2:
+        return observed
+    first = (observed[0], observed[1])
+    second = (observed[2], observed[3])
+    active = first if active_blade == 0 else second
+    inactive = second if active_blade == 0 else first
+    direction = _normalize((active[0] - inactive[0], active[1] - inactive[1]))
+    if direction is None:
+        return observed
+    restored_active = (
+        inactive[0] + direction[0] * target_length,
+        inactive[1] + direction[1] * target_length,
+    )
+    if active_blade == 0:
+        return (*restored_active, *inactive)
+    return (*inactive, *restored_active)
 
 
 def _inherit_stroke_phase_length(
