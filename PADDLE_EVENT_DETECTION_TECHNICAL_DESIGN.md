@@ -430,19 +430,33 @@ passed to catch/exit event analysis. This prevents an immersed, cropped paddle
 at the start of the forward pass from creating a false catch and an immersed,
 cropped paddle at the end of the reverse pass from creating a false exit.
 
-CNN completeness is eligibility evidence, not proof that the fitted length is
-genuine. Every accepted increase remains subject to geometry, source-pixel
-appearance, and reverse/forward-local temporal outlier refinement. If the
-checkpoint, PyTorch runtime, source mask, or prediction is unavailable, the
-status is unknown and cannot seed a restoration envelope. If no verified seed
-exists for a phase edge, catch/exit detection fails closed for those frames;
-the rest of video export remains available.
+CNN completeness is authoritative for phase-length candidate eligibility. A
+positively complete observation may seed or increase its phase-local envelope
+directly, regardless of how much its fitted length differs from the preceding
+accepted length. There is no separate large-change trigger, source-pixel
+appearance rejection, or temporal-tolerance rejection. The monotonic envelope
+itself remains: a shorter complete observation does not reduce an accepted
+length, while a cropped or unknown observation can only inherit an already
+verified length.
+
+If the checkpoint, PyTorch runtime, source mask, or prediction is unavailable,
+the status is unknown and cannot seed a restoration envelope. If no verified
+seed exists for a phase edge, catch/exit detection fails closed for those
+frames; the rest of video export remains available.
 
 ## 12. Candidate Confirmation and Timestamping
 
 A transition is confirmed by two consecutive compatible observations. The
 event is backdated to the timestamp and geometry of the first transition
 observation.
+
+For a catch crossing pair, compare the absolute active-endpoint depth of the
+preceding and current observations. Store whichever observation is closer to
+the fitted waterline as the candidate geometry and timestamp. The following
+compatible observation is still required for confirmation. This allows a dry
+observation immediately above the upper band to represent the physical catch
+more accurately than the next observation after the restored endpoint has
+moved substantially underwater.
 
 A complete exit-band skip is already established by its previous/current
 observation pair. That pair counts as both confirmation samples, so the event is

@@ -18,7 +18,6 @@ from sam3_service.exporter import (
     _PaddleEventState,
     _TimedPaddleObservation,
     _advance_directed_paddle_phase,
-    _appearance_refined_paddle_length,
     _blade_transition_on_waterline,
     _blade_waterline_overlaps,
     _catch_phase_allowed,
@@ -57,7 +56,6 @@ from sam3_service.exporter import (
     _restore_track_stroke_lengths,
     _selection_rect_at,
     _select_event_paddle_tracks,
-    _set_paddle_active_endpoint_length,
     _spm_label_top,
     _update_directed_paddle_state,
     _update_paddle_event_state,
@@ -308,7 +306,7 @@ class ExporterTest(unittest.TestCase):
         )
         self.assertTrue(all(restored[index][:2] == (0.0, 0.0) for index in range(5)))
 
-    def test_backward_restore_refines_isolated_long_mask_before_reverse_max(self) -> None:
+    def test_cnn_complete_reverse_candidate_can_increase_phase_envelope(self) -> None:
         samples = [
             (0, 90.0, (0.0, 0.0, 145.0, 0.0)),
             (1, 110.0, (0.0, 0.0, 146.0, 0.0)),
@@ -317,52 +315,31 @@ class ExporterTest(unittest.TestCase):
             (4, 165.0, (0.0, 0.0, 148.0, 0.0)),
             (5, 180.0, (0.0, 0.0, 147.0, 0.0)),
         ]
-        refined: list[tuple[int, float]] = []
-
-        def refine(
-            index: int,
-            line: tuple[float, float, float, float],
-            blade: int,
-            expected: float,
-        ) -> tuple[float, float, float, float]:
-            refined.append((index, expected))
-            return _set_paddle_active_endpoint_length(line, blade, expected)
 
         restored = _restore_bidirectional_phase_lines(
             samples,
             active_blade=1,
-            backward_length_refiner=refine,
+            candidate_validator=lambda _index, _line, _blade: True,
         )
 
-        self.assertEqual([index for index, _ in refined], [2])
-        self.assertLess(refined[0][1], 160.0)
-        self.assertTrue(all(_line_length(line) <= 148.0 for line in restored.values()))
+        self.assertEqual(
+            [_line_length(restored[index]) for index in range(6)],
+            [185.0, 185.0, 185.0, 148.0, 148.0, 147.0],
+        )
 
-    def test_backward_restore_trusts_consistent_full_length_near_180(self) -> None:
+    def test_reverse_envelope_inherits_complete_length_toward_90(self) -> None:
         samples = [
             (0, 140.0, (0.0, 0.0, 142.2, 0.0)),
             (1, 150.0, (0.0, 0.0, 183.5, 0.0)),
             (2, 161.0, (0.0, 0.0, 210.9, 0.0)),
             (3, 175.0, (0.0, 0.0, 208.8, 0.0)),
         ]
-        refined: list[int] = []
-
-        def refine(
-            index: int,
-            line: tuple[float, float, float, float],
-            blade: int,
-            expected: float,
-        ) -> tuple[float, float, float, float]:
-            refined.append(index)
-            return _set_paddle_active_endpoint_length(line, blade, expected)
-
         restored = _restore_bidirectional_phase_lines(
             samples,
             active_blade=1,
-            backward_length_refiner=refine,
+            candidate_validator=lambda _index, _line, _blade: True,
         )
 
-        self.assertEqual(refined, [])
         self.assertEqual(
             [round(_line_length(restored[index]), 1) for index in range(4)],
             [210.9, 210.9, 210.9, 208.8],
@@ -440,31 +417,19 @@ class ExporterTest(unittest.TestCase):
             any(timed.observation.phase_length_verified for timed in restored)
         )
 
-    def test_complete_forward_candidate_still_uses_length_refinement(self) -> None:
+    def test_cnn_complete_forward_candidate_directly_increases_length(self) -> None:
         samples = [
             (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
             (1, 45.0, (0.0, 0.0, 180.0, 0.0)),
         ]
-        refined_indices: list[int] = []
-
-        def refine(
-            index: int,
-            line: tuple[float, float, float, float],
-            blade: int,
-            expected: float,
-        ) -> tuple[float, float, float, float]:
-            refined_indices.append(index)
-            return _set_paddle_active_endpoint_length(line, blade, expected + 20.0)
 
         restored = _restore_bidirectional_phase_lines(
             samples,
             active_blade=1,
-            backward_length_refiner=refine,
             candidate_validator=lambda _index, _line, _blade: True,
         )
 
-        self.assertEqual(refined_indices, [1])
-        self.assertEqual(_line_length(restored[1]), 120.0)
+        self.assertEqual(_line_length(restored[1]), 180.0)
 
     def test_completeness_predictions_use_checkpoint_threshold(self) -> None:
         class Predictor:
@@ -526,53 +491,6 @@ class ExporterTest(unittest.TestCase):
 
         self.assertTrue(validator(timed, observation.line, 0))
         self.assertFalse(validator(timed, observation.line, 1))
-
-    def test_appearance_refinement_crops_bright_mask_extension(self) -> None:
-        width, height = 100, 40
-        rgb = bytearray([220] * width * height * 3)
-        mask_points = {
-            (x, y)
-            for x in range(10, 91)
-            for y in range(17, 24)
-        }
-        for x in range(10, 61):
-            for y in range(19, 22):
-                offset = (y * width + x) * 3
-                rgb[offset : offset + 3] = bytes((25, 25, 25))
-        counts: list[int] = []
-        current = 0
-        run = 0
-        for x in range(width):
-            for y in range(height):
-                value = int((x, y) in mask_points)
-                if value == current:
-                    run += 1
-                else:
-                    counts.append(run)
-                    run = 1
-                    current = value
-        counts.append(run)
-        records = [
-            {
-                "centerline_segmentation": {
-                    "type": "rle",
-                    "size": [height, width],
-                    "counts": counts,
-                }
-            }
-        ]
-
-        length = _appearance_refined_paddle_length(
-            records,
-            bytes(rgb),
-            width,
-            height,
-            (10.0, 20.0, 90.0, 20.0),
-            active_blade=1,
-        )
-
-        self.assertIsNotNone(length)
-        self.assertAlmostEqual(length or 0.0, 50.0, delta=2.0)
 
     def test_track_is_bidirectionally_restored_before_event_detection(self) -> None:
         angles = [0, 30, 45, 60, 90, 120, 135, 150, 165, 180]
@@ -1494,6 +1412,46 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(_waterline_transition_kind(-9.0, -7.0, 2.0, 8.0), "catch")
         self.assertIsNone(_waterline_transition_kind(5.0, 1.0, -4.0, 8.0))
         self.assertEqual(_waterline_transition_kind(1.0, -1.0, -2.0, 8.0), "exit")
+
+    def test_catch_crossing_uses_the_observation_closest_to_waterline(self) -> None:
+        reference = (0.0, 0.0, 100.0, 0.0)
+
+        def observation(active: tuple[float, float]) -> _PaddleObservation:
+            return _PaddleObservation(
+                source_ids=("paddle:1",),
+                reference_id="boat:1",
+                line=(50.0, -100.0, *active),
+                reference_line=reference,
+            )
+
+        previous = observation((70.0, -9.0))
+        crossing = observation((55.0, 32.0))
+        confirmation = observation((52.0, 35.0))
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+            active_blade=1,
+        )
+
+        self.assertIsNone(
+            _update_directed_paddle_state(state, previous, 100, 8.0)
+        )
+        self.assertIsNone(
+            _update_directed_paddle_state(state, crossing, 200, 8.0)
+        )
+        event = _update_directed_paddle_state(
+            state,
+            confirmation,
+            300,
+            8.0,
+        )
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual((event.kind, event.timestamp_ms), ("catch", 100))
+        self.assertEqual(event.line, previous.line)
 
     def test_exit_skipping_the_full_band_uses_the_closest_observation(self) -> None:
         cases = [
