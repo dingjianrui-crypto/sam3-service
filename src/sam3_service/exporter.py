@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 from .errors import ServiceError
 from .media import probe_video
+from .paddle_completeness import build_paddle_completeness_predictor
 
 Color = tuple[int, int, int, int]
 Line = tuple[float, float, float, float]
@@ -145,6 +146,7 @@ class _PaddleObservation:
     reference_line: Line
     raw_line: Line | None = None
     phase_length_restored: bool = False
+    phase_length_verified: bool = True
 
 
 @dataclass(frozen=True)
@@ -1426,6 +1428,16 @@ def _detect_paddle_events(
         options.event_paddle_index,
         options.target_slot_count,
     )
+    completeness_by_source = _predict_event_paddle_completeness(
+        frames,
+        event_tracks,
+    )
+    candidate_validator = _paddle_candidate_validator(
+        frames,
+        completeness_by_source,
+        width,
+        height,
+    )
     detected: list[PaddleEvent] = []
     band_upward_width = _event_band_upward_width(scale_x, scale_y)
     mask_length_refiner = (
@@ -1451,6 +1463,7 @@ def _detect_paddle_events(
             travel_direction,
             band_upward_width,
             backward_length_refiner=mask_length_refiner,
+            candidate_validator=candidate_validator,
         )
         state = _PaddleEventState(
             physical_id=physical_id,
@@ -1460,6 +1473,8 @@ def _detect_paddle_events(
             direction_confidence=confidence,
         )
         for timed in observations:
+            if not timed.observation.phase_length_verified:
+                continue
             event = _update_directed_paddle_state(
                 state,
                 timed.observation,
@@ -1481,6 +1496,89 @@ def _detect_paddle_events(
         if (event.kind == "catch" and options.include_catch)
         or (event.kind == "exit" and options.include_exit)
     ]
+
+
+def _predict_event_paddle_completeness(
+    frames: dict[int, list[dict[str, Any]]],
+    event_tracks: dict[str, list[_TimedPaddleObservation]],
+) -> dict[tuple[int, str], bool]:
+    """Batch CNN mask classification for source records used by event tracks."""
+    predictor = build_paddle_completeness_predictor()
+    if predictor is None:
+        return {}
+    required = {
+        (timed.timestamp_ms, source_id)
+        for observations in event_tracks.values()
+        for timed in observations
+        for source_id in timed.observation.source_ids
+    }
+    keys: list[tuple[int, str]] = []
+    records: list[dict[str, Any]] = []
+    for timestamp_ms, source_id in sorted(required):
+        record = next(
+            (
+                candidate
+                for candidate in frames.get(timestamp_ms, [])
+                if _record_track_id(candidate) == source_id
+            ),
+            None,
+        )
+        if record is None:
+            continue
+        keys.append((timestamp_ms, source_id))
+        records.append(record)
+    try:
+        probabilities = predictor.predict_records(records)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {}
+    return {
+        key: probability < predictor.threshold
+        for key, probability in zip(keys, probabilities, strict=True)
+        if probability is not None
+    }
+
+
+def _paddle_candidate_validator(
+    frames: dict[int, list[dict[str, Any]]],
+    completeness_by_source: dict[tuple[int, str], bool],
+    width: int,
+    height: int,
+) -> Callable[[_TimedPaddleObservation, Line, int], bool | None]:
+    """Use the mask contributing the active endpoint for candidate eligibility."""
+
+    def validate(
+        timed: _TimedPaddleObservation,
+        line: Line,
+        active_blade: int,
+    ) -> bool | None:
+        if active_blade not in (0, 1):
+            return None
+        source_ids = set(timed.observation.source_ids)
+        records = [
+            record
+            for record in frames.get(timed.timestamp_ms, [])
+            if _record_track_id(record) in source_ids
+        ]
+        active = (line[0], line[1]) if active_blade == 0 else (line[2], line[3])
+        ranked: list[tuple[float, str]] = []
+        for record in records:
+            source_id = _record_track_id(record)
+            if (timed.timestamp_ms, source_id) not in completeness_by_source:
+                continue
+            source_line = _record_line(record, width, height)
+            if source_line is None:
+                continue
+            endpoint_distance = min(
+                math.dist(active, (source_line[0], source_line[1])),
+                math.dist(active, (source_line[2], source_line[3])),
+            )
+            ranked.append((endpoint_distance, source_id))
+        if not ranked:
+            return None
+        source_id = min(ranked)[1]
+        return completeness_by_source.get((timed.timestamp_ms, source_id))
+
+    return validate
 
 
 def _track_paddle_observations(
@@ -1994,6 +2092,10 @@ def _restore_track_stroke_lengths(
         [_TimedPaddleObservation, Line, int, float], Line
     ]
     | None = None,
+    candidate_validator: Callable[
+        [_TimedPaddleObservation, Line, int], bool | None
+    ]
+    | None = None,
 ) -> list[_TimedPaddleObservation]:
     """Restore each 0-180 stroke before chronological event detection.
 
@@ -2020,6 +2122,7 @@ def _restore_track_stroke_lengths(
             travel_direction,
             band_upward_width,
             backward_length_refiner,
+            candidate_validator,
         )
         segment_start = index
     return restored
@@ -2031,6 +2134,10 @@ def _restore_track_segment_stroke_lengths(
     band_upward_width: float,
     backward_length_refiner: Callable[
         [_TimedPaddleObservation, Line, int, float], Line
+    ]
+    | None = None,
+    candidate_validator: Callable[
+        [_TimedPaddleObservation, Line, int], bool | None
     ]
     | None = None,
 ) -> list[_TimedPaddleObservation]:
@@ -2049,7 +2156,18 @@ def _restore_track_segment_stroke_lengths(
         band_upward_width,
     )
     if active_blade not in (0, 1):
-        return observations
+        if candidate_validator is None:
+            return observations
+        return [
+            replace(
+                timed,
+                observation=replace(
+                    timed.observation,
+                    phase_length_verified=False,
+                ),
+            )
+            for timed in observations
+        ]
 
     phase_state = _PaddleEventState(
         active_blade=active_blade,
@@ -2090,25 +2208,48 @@ def _restore_track_segment_stroke_lengths(
                 expected_length,
             )
 
+    indexed_validator: Callable[[int, Line, int], bool | None] | None = None
+    if candidate_validator is not None:
+        def indexed_validator(
+            sample_index: int,
+            sample_line: Line,
+            blade: int,
+        ) -> bool | None:
+            return candidate_validator(
+                observations[sample_index],
+                sample_line,
+                blade,
+            )
+
+    verified_indices: set[int] = set()
     for samples in phase_groups.values():
         restored_lines.update(
             _restore_bidirectional_phase_lines(
                 samples,
                 active_blade,
                 backward_length_refiner=indexed_refiner,
+                candidate_validator=indexed_validator,
+                verified_indices=verified_indices,
             )
         )
 
     result = list(observations)
-    for index, line in restored_lines.items():
+    for index, timed in enumerate(observations):
+        line = restored_lines.get(index)
+        phase_length_verified = (
+            index in verified_indices if candidate_validator is not None else True
+        )
+        if line is None and timed.observation.phase_length_verified == phase_length_verified:
+            continue
         timed = observations[index]
         result[index] = replace(
             timed,
             observation=replace(
                 timed.observation,
-                line=line,
-                raw_line=line,
-                phase_length_restored=True,
+                line=line if line is not None else timed.observation.line,
+                raw_line=line if line is not None else timed.observation.raw_line,
+                phase_length_restored=line is not None,
+                phase_length_verified=phase_length_verified,
             ),
         )
     return result
@@ -2175,18 +2316,65 @@ def _restore_bidirectional_phase_lines(
     samples: list[tuple[int, float, Line]],
     active_blade: int,
     backward_length_refiner: Callable[[int, Line, int, float], Line] | None = None,
+    candidate_validator: Callable[[int, Line, int], bool | None] | None = None,
+    verified_indices: set[int] | None = None,
 ) -> dict[int, Line]:
     """Apply forward and reverse non-decreasing envelopes to one stroke."""
     restored: dict[int, Line] = {}
+    restored_verified: dict[int, bool] = {}
+
+    def retain(index: int, line: Line, verified: bool) -> None:
+        existing = restored.get(index)
+        existing_verified = restored_verified.get(index, False)
+        if (
+            existing is None
+            or (verified and not existing_verified)
+            or (verified == existing_verified and _line_length(line) > _line_length(existing))
+        ):
+            restored[index] = line
+            restored_verified[index] = verified
+
     accepted_length: float | None = None
     for index, phase_angle, line in sorted(samples, key=lambda item: item[1]):
         if phase_angle > 90:
             continue
+        is_complete = (
+            candidate_validator(index, line, active_blade)
+            if candidate_validator is not None
+            else None
+        )
+        if candidate_validator is not None and is_complete is not True:
+            if accepted_length is not None:
+                line = _set_paddle_active_endpoint_length(
+                    line,
+                    active_blade,
+                    accepted_length,
+                )
+            retain(index, line, accepted_length is not None)
+            continue
+        if (
+            backward_length_refiner is not None
+            and accepted_length is not None
+            and _line_length(line) > accepted_length + max(
+                PADDLE_LENGTH_OUTLIER_MIN_PIXELS,
+                accepted_length * PADDLE_LENGTH_OUTLIER_RATIO,
+            )
+        ):
+            line = backward_length_refiner(
+                index,
+                line,
+                active_blade,
+                accepted_length,
+            )
         accepted_length = max(accepted_length or 0.0, _line_length(line))
-        restored[index] = _extend_paddle_active_endpoint(
-            line,
-            active_blade,
-            accepted_length,
+        retain(
+            index,
+            _extend_paddle_active_endpoint(
+                line,
+                active_blade,
+                accepted_length,
+            ),
+            True,
         )
 
     backward_samples = [sample for sample in samples if sample[1] >= 90]
@@ -2196,6 +2384,20 @@ def _restore_bidirectional_phase_lines(
         key=lambda item: item[1],
         reverse=True,
     ):
+        is_complete = (
+            candidate_validator(index, line, active_blade)
+            if candidate_validator is not None
+            else None
+        )
+        if candidate_validator is not None and is_complete is not True:
+            if accepted_length is not None:
+                line = _set_paddle_active_endpoint_length(
+                    line,
+                    active_blade,
+                    accepted_length,
+                )
+            retain(index, line, accepted_length is not None)
+            continue
         # Observations nearest 180 degrees are least affected by immersion and
         # seed the reverse pass. Only an excessive increase over an already
         # accepted later observation is suspicious enough to refine.
@@ -2219,10 +2421,11 @@ def _restore_bidirectional_phase_lines(
             active_blade,
             accepted_length,
         )
-        if index not in restored or _line_length(reverse_restored) > _line_length(
-            restored[index]
-        ):
-            restored[index] = reverse_restored
+        retain(index, reverse_restored, True)
+    if verified_indices is not None:
+        verified_indices.update(
+            index for index, verified in restored_verified.items() if verified
+        )
     return restored
 
 

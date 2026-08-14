@@ -46,6 +46,8 @@ from sam3_service.exporter import (
     _paddle_water_depth_ratio,
     _paddle_rotation_deltas,
     _paddle_event_angle_color,
+    _paddle_candidate_validator,
+    _predict_event_paddle_completeness,
     _record_line,
     _record_selected_for_export,
     _restore_immersed_paddle_length,
@@ -365,6 +367,165 @@ class ExporterTest(unittest.TestCase):
             [round(_line_length(restored[index]), 1) for index in range(4)],
             [210.9, 210.9, 210.9, 208.8],
         )
+
+    def test_cnn_cropped_masks_cannot_seed_forward_or_backward_length(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 180.0, 0.0)),
+            (2, 90.0, (0.0, 0.0, 80.0, 0.0)),
+            (3, 135.0, (0.0, 0.0, 170.0, 0.0)),
+            (4, 180.0, (0.0, 0.0, 120.0, 0.0)),
+        ]
+
+        verified_indices: set[int] = set()
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda index, _line, _blade: index not in {1, 3},
+            verified_indices=verified_indices,
+        )
+
+        self.assertEqual(
+            [round(_line_length(restored[index]), 1) for index in range(5)],
+            [100.0, 100.0, 120.0, 120.0, 120.0],
+        )
+        self.assertEqual(verified_indices, set(range(5)))
+
+    def test_unknown_cnn_status_cannot_seed_restoration(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 130.0, 0.0)),
+        ]
+        verified_indices: set[int] = set()
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda _index, _line, _blade: None,
+            verified_indices=verified_indices,
+        )
+
+        self.assertEqual(_line_length(restored[1]), 130.0)
+        self.assertEqual(verified_indices, set())
+
+    def test_cropped_phase_edges_require_a_complete_seed(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 80.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 90.0, 0.0)),
+            (2, 90.0, (0.0, 0.0, 120.0, 0.0)),
+            (3, 135.0, (0.0, 0.0, 90.0, 0.0)),
+            (4, 180.0, (0.0, 0.0, 80.0, 0.0)),
+        ]
+        verified_indices: set[int] = set()
+
+        _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda index, _line, _blade: index == 2,
+            verified_indices=verified_indices,
+        )
+
+        self.assertEqual(verified_indices, {2})
+
+    def test_track_without_complete_cnn_seed_is_ineligible_for_events(self) -> None:
+        restored = _restore_track_stroke_lengths(
+            _axis_track([0, 15, 30, 45, 60, 90, 120, 150, 165]),
+            "right",
+            8.0,
+            candidate_validator=lambda _timed, _line, _blade: None,
+        )
+
+        self.assertTrue(restored)
+        self.assertFalse(
+            any(timed.observation.phase_length_verified for timed in restored)
+        )
+
+    def test_complete_forward_candidate_still_uses_length_refinement(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 180.0, 0.0)),
+        ]
+        refined_indices: list[int] = []
+
+        def refine(
+            index: int,
+            line: tuple[float, float, float, float],
+            blade: int,
+            expected: float,
+        ) -> tuple[float, float, float, float]:
+            refined_indices.append(index)
+            return _set_paddle_active_endpoint_length(line, blade, expected + 20.0)
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            backward_length_refiner=refine,
+            candidate_validator=lambda _index, _line, _blade: True,
+        )
+
+        self.assertEqual(refined_indices, [1])
+        self.assertEqual(_line_length(restored[1]), 120.0)
+
+    def test_completeness_predictions_use_checkpoint_threshold(self) -> None:
+        class Predictor:
+            threshold = 0.5
+
+            def predict_records(self, records: list[dict]) -> list[float]:
+                return [record["probability"] for record in records]
+
+        frames = {
+            100: [
+                {"track_id": "paddle:1", "probability": 0.2},
+                {"track_id": "paddle:2", "probability": 0.8},
+            ]
+        }
+        observation = _PaddleObservation(
+            source_ids=("paddle:1", "paddle:2"),
+            reference_id="boat:1",
+            line=(0.0, 0.0, 10.0, 10.0),
+            reference_line=(0.0, 20.0, 100.0, 20.0),
+        )
+        tracks = {
+            "slot:1": [_TimedPaddleObservation(100, "slot:1", observation)]
+        }
+
+        with patch(
+            "sam3_service.exporter.build_paddle_completeness_predictor",
+            return_value=Predictor(),
+        ):
+            statuses = _predict_event_paddle_completeness(frames, tracks)
+
+        self.assertEqual(statuses, {(100, "paddle:1"): True, (100, "paddle:2"): False})
+
+    def test_active_endpoint_source_mask_controls_candidate_status(self) -> None:
+        frames = {
+            100: [
+                {
+                    "track_id": "paddle:left",
+                    "centerline_line_xyxy": [0, 0, 40, 0],
+                },
+                {
+                    "track_id": "paddle:right",
+                    "centerline_line_xyxy": [40, 0, 100, 0],
+                },
+            ]
+        }
+        observation = _PaddleObservation(
+            source_ids=("paddle:left", "paddle:right"),
+            reference_id="boat:1",
+            line=(0.0, 0.0, 100.0, 0.0),
+            reference_line=(0.0, 20.0, 100.0, 20.0),
+        )
+        timed = _TimedPaddleObservation(100, "slot:1", observation)
+        validator = _paddle_candidate_validator(
+            frames,
+            {(100, "paddle:left"): True, (100, "paddle:right"): False},
+            100,
+            100,
+        )
+
+        self.assertTrue(validator(timed, observation.line, 0))
+        self.assertFalse(validator(timed, observation.line, 1))
 
     def test_appearance_refinement_crops_bright_mask_extension(self) -> None:
         width, height = 100, 40
@@ -772,20 +933,28 @@ class ExporterTest(unittest.TestCase):
                         },
                     ]
 
-                events = _detect_paddle_events(
-                    frames,
-                    ExportOptions(
-                        include_catch=True,
-                        include_exit=True,
-                        reference_prompt_id="boat",
-                        reference_line_mode="waterline",
-                        target_prompt_ids=("paddle",),
-                    ),
-                    100,
-                    100,
-                    1.0,
-                    1.0,
-                )
+                completeness = {
+                    (timestamp_ms, "paddle:track:1"): True
+                    for timestamp_ms in frames
+                }
+                with patch(
+                    "sam3_service.exporter._predict_event_paddle_completeness",
+                    return_value=completeness,
+                ):
+                    events = _detect_paddle_events(
+                        frames,
+                        ExportOptions(
+                            include_catch=True,
+                            include_exit=True,
+                            reference_prompt_id="boat",
+                            reference_line_mode="waterline",
+                            target_prompt_ids=("paddle",),
+                        ),
+                        100,
+                        100,
+                        1.0,
+                        1.0,
+                    )
 
                 self.assertEqual(
                     [
@@ -919,6 +1088,9 @@ class ExporterTest(unittest.TestCase):
         with patch(
             "sam3_service.exporter._track_paddle_observations",
             return_value=tracks,
+        ), patch(
+            "sam3_service.exporter._paddle_candidate_validator",
+            return_value=lambda _timed, _line, _blade: True,
         ):
             events = _detect_paddle_events(
                 {},

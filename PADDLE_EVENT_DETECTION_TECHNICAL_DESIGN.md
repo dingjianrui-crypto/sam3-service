@@ -403,6 +403,41 @@ in reverse; a preceding near-`90°` maximum must not extend a later recovering
 paddle and delay its exit. An observation unavailable to preprocessing inherits
 from the latest target as a compatibility fallback.
 
+### 11.5 CNN completeness candidate gate
+
+Before either phase-local envelope accepts a mask as a physical-length
+candidate, classify the individual source segmentation with the optional
+mask-only paddle completeness CNN:
+
+1. decode the source RLE mask at its native dimensions;
+2. center a square crop on the foreground extent, using the detection box with
+   the training padding percentage (`15%` by default);
+3. zero-pad crop regions outside the source frame;
+4. resize to `256 × 256` with nearest-neighbor interpolation and convert to a
+   binary `float32` tensor shaped `[1, 1, 256, 256]`;
+5. interpret sigmoid output as `P(cropped)` and use the checkpoint's saved
+   decision threshold;
+6. for a consolidated multi-mask observation, use the classified source mask
+   whose fitted endpoint contributes the active endpoint of the merged line.
+
+In the chronological `0°-90°` pass, only a positively CNN-complete mask can
+seed or increase the forward length. In the reverse `180°-90°` pass, only a
+positively CNN-complete mask can seed or increase the reverse length. A cropped
+or unclassified mask inherits an already accepted phase-local length from the
+inactive endpoint. Before the pass has accepted such a seed, its raw line may
+be retained for continuity or drawing, but it is marked unverified and is not
+passed to catch/exit event analysis. This prevents an immersed, cropped paddle
+at the start of the forward pass from creating a false catch and an immersed,
+cropped paddle at the end of the reverse pass from creating a false exit.
+
+CNN completeness is eligibility evidence, not proof that the fitted length is
+genuine. Every accepted increase remains subject to geometry, source-pixel
+appearance, and reverse/forward-local temporal outlier refinement. If the
+checkpoint, PyTorch runtime, source mask, or prediction is unavailable, the
+status is unknown and cannot seed a restoration envelope. If no verified seed
+exists for a phase edge, catch/exit detection fails closed for those frames;
+the rest of video export remains available.
+
 ## 12. Candidate Confirmation and Timestamping
 
 A transition is confirmed by two consecutive compatible observations. The
