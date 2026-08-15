@@ -49,6 +49,7 @@ PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
+PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE = 0.15
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
 WATERLINE_BOAT_AXIS_MAX_ANGLE_DEGREES = 20.0
 EXPORT_END_GUARD_FRAMES = 2
@@ -2225,7 +2226,7 @@ def _restore_bidirectional_phase_lines(
     candidate_validator: Callable[[int, Line, int], bool | None] | None = None,
     verified_indices: set[int] | None = None,
 ) -> dict[int, Line]:
-    """Apply CNN-gated forward and reverse length envelopes to one stroke."""
+    """Restore both stroke halves against fixed CNN-confirmed phase anchors."""
     restored: dict[int, Line] = {}
     restored_verified: dict[int, bool] = {}
 
@@ -2235,70 +2236,86 @@ def _restore_bidirectional_phase_lines(
         if (
             existing is None
             or (verified and not existing_verified)
-            or (verified == existing_verified and _line_length(line) > _line_length(existing))
+            or (
+                verified == existing_verified
+                and _line_length(line) > _line_length(existing)
+            )
         ):
             restored[index] = line
             restored_verified[index] = verified
 
-    accepted_length: float | None = None
-    for index, phase_angle, line in sorted(samples, key=lambda item: item[1]):
-        if phase_angle > 90:
-            continue
-        is_complete = (
-            candidate_validator(index, line, active_blade)
-            if candidate_validator is not None
-            else None
-        )
-        if candidate_validator is not None and is_complete is not True:
-            if accepted_length is not None:
-                line = _set_paddle_active_endpoint_length(
-                    line,
-                    active_blade,
-                    accepted_length,
-                )
-            retain(index, line, accepted_length is not None)
-            continue
-        accepted_length = max(accepted_length or 0.0, _line_length(line))
-        retain(
-            index,
-            _extend_paddle_active_endpoint(
-                line,
-                active_blade,
-                accepted_length,
-            ),
-            True,
+    def is_complete(index: int, line: Line) -> bool:
+        return (
+            candidate_validator is None
+            or candidate_validator(index, line, active_blade) is True
         )
 
-    backward_samples = [sample for sample in samples if sample[1] >= 90]
-    accepted_length = None
-    for index, phase_angle, line in sorted(
-        backward_samples,
-        key=lambda item: item[1],
-        reverse=True,
-    ):
-        is_complete = (
-            candidate_validator(index, line, active_blade)
-            if candidate_validator is not None
-            else None
-        )
-        if candidate_validator is not None and is_complete is not True:
-            if accepted_length is not None:
-                line = _set_paddle_active_endpoint_length(
+    def relative_difference(first: float, second: float) -> float:
+        return abs(first - second) / max(first, 1e-6)
+
+    def restore_half(ordered: list[tuple[int, float, Line]]) -> None:
+        complete_samples = [
+            sample for sample in ordered if is_complete(sample[0], sample[2])
+        ]
+        seed: tuple[
+            tuple[int, float, Line],
+            tuple[int, float, Line],
+        ] | None = None
+        for candidates in zip(
+            complete_samples,
+            complete_samples[1:],
+        ):
+            first_length = _line_length(candidates[0][2])
+            second_length = _line_length(candidates[1][2])
+            if (
+                relative_difference(first_length, second_length)
+                <= PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE
+            ):
+                seed = candidates
+                break
+
+        if seed is None:
+            for index, _phase_angle, line in ordered:
+                retain(index, line, False)
+            return
+
+        phase_anchor = (
+            _line_length(seed[0][2]) + _line_length(seed[1][2])
+        ) / len(seed)
+        previous_genuine_length = phase_anchor
+        for index, _phase_angle, line in ordered:
+            current_length = _line_length(line)
+            candidate_is_genuine = is_complete(index, line) and (
+                relative_difference(phase_anchor, current_length)
+                <= PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE
+            )
+            if candidate_is_genuine:
+                previous_genuine_length = current_length
+                retain(index, line, True)
+                continue
+            retain(
+                index,
+                _set_paddle_active_endpoint_length(
                     line,
                     active_blade,
-                    accepted_length,
-                )
-            retain(index, line, accepted_length is not None)
-            continue
-        # Observations nearest 180 degrees seed the reverse pass. Every
-        # positively CNN-complete observation may increase its phase envelope.
-        accepted_length = max(accepted_length or 0.0, _line_length(line))
-        reverse_restored = _extend_paddle_active_endpoint(
-            line,
-            active_blade,
-            accepted_length,
+                    previous_genuine_length,
+                ),
+                True,
+            )
+
+    restore_half(
+        sorted(
+            (sample for sample in samples if sample[1] <= 90),
+            key=lambda item: item[1],
         )
-        retain(index, reverse_restored, True)
+    )
+    restore_half(
+        sorted(
+            (sample for sample in samples if sample[1] >= 90),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    )
     if verified_indices is not None:
         verified_indices.update(
             index for index, verified in restored_verified.items() if verified

@@ -292,9 +292,9 @@ class ExporterTest(unittest.TestCase):
     def test_stroke_length_restores_forward_to_90_and_backward_from_180(self) -> None:
         samples = [
             (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
-            (1, 45.0, (0.0, 0.0, 80.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 98.0, 0.0)),
             (2, 90.0, (0.0, 0.0, 60.0, 0.0)),
-            (3, 135.0, (0.0, 0.0, 70.0, 0.0)),
+            (3, 135.0, (0.0, 0.0, 108.0, 0.0)),
             (4, 180.0, (0.0, 0.0, 110.0, 0.0)),
         ]
 
@@ -302,11 +302,11 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [_line_length(restored[index]) for index in range(5)],
-            [100.0, 100.0, 110.0, 110.0, 110.0],
+            [100.0, 98.0, 108.0, 108.0, 110.0],
         )
         self.assertTrue(all(restored[index][:2] == (0.0, 0.0) for index in range(5)))
 
-    def test_cnn_complete_reverse_candidate_can_increase_phase_envelope(self) -> None:
+    def test_fixed_reverse_anchor_rejects_cnn_complete_length_inflation(self) -> None:
         samples = [
             (0, 90.0, (0.0, 0.0, 145.0, 0.0)),
             (1, 110.0, (0.0, 0.0, 146.0, 0.0)),
@@ -324,10 +324,10 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [_line_length(restored[index]) for index in range(6)],
-            [185.0, 185.0, 185.0, 148.0, 148.0, 147.0],
+            [145.0, 146.0, 144.0, 144.0, 148.0, 147.0],
         )
 
-    def test_reverse_envelope_inherits_complete_length_toward_90(self) -> None:
+    def test_reverse_anchor_keeps_only_lengths_within_relative_tolerance(self) -> None:
         samples = [
             (0, 140.0, (0.0, 0.0, 142.2, 0.0)),
             (1, 150.0, (0.0, 0.0, 183.5, 0.0)),
@@ -342,14 +342,35 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [round(_line_length(restored[index]), 1) for index in range(4)],
-            [210.9, 210.9, 210.9, 208.8],
+            [183.5, 183.5, 210.9, 208.8],
+        )
+
+    def test_fixed_reverse_anchor_rejects_gradual_length_drift(self) -> None:
+        samples = [
+            (0, 130.0, (0.0, 0.0, 105.0, 0.0)),
+            (1, 140.0, (0.0, 0.0, 115.0, 0.0)),
+            (2, 150.0, (0.0, 0.0, 125.0, 0.0)),
+            (3, 160.0, (0.0, 0.0, 135.0, 0.0)),
+            (4, 170.0, (0.0, 0.0, 145.0, 0.0)),
+            (5, 180.0, (0.0, 0.0, 147.0, 0.0)),
+        ]
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda _index, _line, _blade: True,
+        )
+
+        self.assertEqual(
+            [_line_length(restored[index]) for index in range(6)],
+            [125.0, 125.0, 125.0, 135.0, 145.0, 147.0],
         )
 
     def test_cnn_cropped_masks_cannot_seed_forward_or_backward_length(self) -> None:
         samples = [
             (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
             (1, 45.0, (0.0, 0.0, 180.0, 0.0)),
-            (2, 90.0, (0.0, 0.0, 80.0, 0.0)),
+            (2, 90.0, (0.0, 0.0, 105.0, 0.0)),
             (3, 135.0, (0.0, 0.0, 170.0, 0.0)),
             (4, 180.0, (0.0, 0.0, 120.0, 0.0)),
         ]
@@ -364,7 +385,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [round(_line_length(restored[index]), 1) for index in range(5)],
-            [100.0, 100.0, 120.0, 120.0, 120.0],
+            [100.0, 100.0, 105.0, 120.0, 120.0],
         )
         self.assertEqual(verified_indices, set(range(5)))
 
@@ -385,6 +406,24 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(_line_length(restored[1]), 130.0)
         self.assertEqual(verified_indices, set())
 
+    def test_disagreeing_complete_candidates_cannot_seed_restoration(self) -> None:
+        samples = [
+            (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
+            (1, 45.0, (0.0, 0.0, 130.0, 0.0)),
+        ]
+        verified_indices: set[int] = set()
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda _index, _line, _blade: True,
+            verified_indices=verified_indices,
+        )
+
+        self.assertEqual(_line_length(restored[0]), 100.0)
+        self.assertEqual(_line_length(restored[1]), 130.0)
+        self.assertEqual(verified_indices, set())
+
     def test_cropped_phase_edges_require_a_complete_seed(self) -> None:
         samples = [
             (0, 0.0, (0.0, 0.0, 80.0, 0.0)),
@@ -402,7 +441,7 @@ class ExporterTest(unittest.TestCase):
             verified_indices=verified_indices,
         )
 
-        self.assertEqual(verified_indices, {2})
+        self.assertEqual(verified_indices, set())
 
     def test_track_without_complete_cnn_seed_is_ineligible_for_events(self) -> None:
         restored = _restore_track_stroke_lengths(
@@ -417,10 +456,11 @@ class ExporterTest(unittest.TestCase):
             any(timed.observation.phase_length_verified for timed in restored)
         )
 
-    def test_cnn_complete_forward_candidate_directly_increases_length(self) -> None:
+    def test_fixed_forward_anchor_rejects_cnn_complete_length_inflation(self) -> None:
         samples = [
             (0, 0.0, (0.0, 0.0, 100.0, 0.0)),
-            (1, 45.0, (0.0, 0.0, 180.0, 0.0)),
+            (1, 20.0, (0.0, 0.0, 105.0, 0.0)),
+            (2, 45.0, (0.0, 0.0, 180.0, 0.0)),
         ]
 
         restored = _restore_bidirectional_phase_lines(
@@ -429,7 +469,7 @@ class ExporterTest(unittest.TestCase):
             candidate_validator=lambda _index, _line, _blade: True,
         )
 
-        self.assertEqual(_line_length(restored[1]), 180.0)
+        self.assertEqual(_line_length(restored[2]), 105.0)
 
     def test_completeness_predictions_use_checkpoint_threshold(self) -> None:
         class Predictor:
@@ -494,7 +534,7 @@ class ExporterTest(unittest.TestCase):
 
     def test_track_is_bidirectionally_restored_before_event_detection(self) -> None:
         angles = [0, 30, 45, 60, 90, 120, 135, 150, 165, 180]
-        observed_lengths = [60, 50, 45, 40, 30, 40, 45, 50, 55, 60]
+        observed_lengths = [60, 58, 45, 40, 30, 40, 45, 50, 58, 60]
         track: list[_TimedPaddleObservation] = []
         for index, (angle, observed_length) in enumerate(
             zip(angles, observed_lengths, strict=True)
@@ -520,13 +560,21 @@ class ExporterTest(unittest.TestCase):
                 )
             )
 
-        restored = _restore_track_stroke_lengths(track, "right", 8.0)
+        restored = _restore_track_stroke_lengths(
+            track,
+            "right",
+            8.0,
+            candidate_validator=lambda _timed, line, _blade: _line_length(line) >= 55,
+        )
 
         self.assertTrue(
             all(timed.observation.phase_length_restored for timed in restored)
         )
+        self.assertEqual(
+            [round(_line_length(timed.observation.line)) for timed in restored],
+            [60, 58, 58, 58, 58, 58, 58, 58, 58, 60],
+        )
         for timed in restored:
-            self.assertAlmostEqual(_line_length(timed.observation.line), 60.0)
             self.assertEqual(timed.observation.line[:2], timed.observation.raw_line[:2])
 
         state = _PaddleEventState(

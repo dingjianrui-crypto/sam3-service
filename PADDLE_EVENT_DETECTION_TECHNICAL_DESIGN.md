@@ -360,20 +360,24 @@ waterline band while the blade is moving deeper as an exit.
 
 Restore every complete directed `0°-180°` stroke before catch and exit
 detection. Split the stroke at `90°` and build two independent length
-envelopes:
+anchors:
 
 1. maintain temporal endpoint ordering and identify the active immersed blade;
-2. for `0°-90°`, traverse observations chronologically from the frame nearest
-   `0°`; when the observed length decreases, inherit the restored length from
-   the preceding observation;
+2. for `0°-90°`, traverse observations from the frame nearest `0°`; the first
+   pair of CNN-complete lengths that agree within `15%` establishes a fixed
+   forward anchor;
 3. for `90°-180°`, traverse observations in reverse from the frame nearest
-   `180°`; when the observed length decreases in that traversal, inherit the
-   restored length from the previously visited, later-phase observation;
-4. if an observation lies exactly at `90°`, retain the larger result from the
+   `180°`; the first agreeing CNN-complete pair establishes an independent
+   fixed reverse anchor;
+4. accept a later CNN-complete length only when its relative difference from
+   the fixed half-phase anchor is at most `15%`;
+5. a cropped, unknown, or out-of-tolerance observation inherits the preceding
+   genuine length in traversal order and does not update the fixed anchor;
+6. if an observation lies exactly at `90°`, retain the larger result from the
    two passes;
-5. for every inherited length, anchor the inactive endpoint and extend only the
+7. for every inherited length, anchor the inactive endpoint and adjust only the
    active endpoint along the current observed axis;
-6. after both passes finish, process the reconstructed observations
+8. after both passes finish, process the reconstructed observations
    chronologically for signed-depth classification, catch/exit detection,
    event angle, and event geometry.
 
@@ -399,13 +403,13 @@ recovery half of the revolution, the next stroke cycle, or across a
 continuity-breaking tracking gap. Each phase-preprocessed line replaces the
 chronological runtime target with its already restored length. In particular,
 the `90°-180°` target may decrease chronologically because it was constructed
-in reverse; a preceding near-`90°` maximum must not extend a later recovering
+in reverse; an invalid near-`90°` measurement must not extend a later recovering
 paddle and delay its exit. An observation unavailable to preprocessing inherits
 from the latest target as a compatibility fallback.
 
 ### 11.5 CNN completeness candidate gate
 
-Before either phase-local envelope accepts a mask as a physical-length
+Before either phase-local anchor accepts a mask as a physical-length
 candidate, classify the individual source segmentation with the optional
 mask-only paddle completeness CNN:
 
@@ -420,15 +424,17 @@ mask-only paddle completeness CNN:
 6. for a consolidated multi-mask observation, use the classified source mask
    whose fitted endpoint contributes the active endpoint of the merged line.
 
-In the chronological `0°-90°` pass, only a positively CNN-complete mask can
-seed or increase the forward length. In the reverse `180°-90°` pass, only a
-positively CNN-complete mask can seed or increase the reverse length. A cropped
-or unclassified mask inherits an already accepted phase-local length from the
-inactive endpoint. Before the pass has accepted such a seed, its raw line may
-be retained for continuity or drawing, but it is marked unverified and is not
-passed to catch/exit event analysis. This prevents an immersed, cropped paddle
-at the start of the forward pass from creating a false catch and an immersed,
-cropped paddle at the end of the reverse pass from creating a false exit.
+In each half-phase, only positively CNN-complete masks participate in anchor
+seeding. Two complete candidates must agree within `15%`; their mean becomes
+the fixed phase anchor. A later complete candidate is genuine only when
+`abs(current_length - phase_anchor) / phase_anchor <= 0.15`. A cropped,
+unclassified, or out-of-tolerance mask inherits the preceding genuine length
+in traversal order. Before the pass has established a confirmed seed, its raw
+line may be retained for continuity or drawing, but it is marked unverified and
+is not passed to catch/exit event analysis. This prevents an immersed, cropped
+paddle at the start of the forward pass from creating a false catch and an
+immersed, cropped paddle at the end of the reverse pass from creating a false
+exit.
 
 Unverified observations still maintain physical endpoint orientation and raw
 directed-phase continuity. They update the most recent oriented centerline and
@@ -439,14 +445,12 @@ resets active-blade and endpoint identity. This separates an unavailable event
 length from a broken physical track and prevents a skipped recovery half from
 flipping endpoint parity at the next verified frame.
 
-CNN completeness is authoritative for phase-length candidate eligibility. A
-positively complete observation may seed or increase its phase-local envelope
-directly, regardless of how much its fitted length differs from the preceding
-accepted length. There is no separate large-change trigger, source-pixel
-appearance rejection, or temporal-tolerance rejection. The monotonic envelope
-itself remains: a shorter complete observation does not reduce an accepted
-length, while a cropped or unknown observation can only inherit an already
-verified length.
+CNN completeness is necessary but not sufficient for phase-length candidate
+eligibility. Fixed-anchor relative difference rejects both abrupt inflation and
+gradual drift even when the CNN marks every contributing mask complete. This is
+a phase-local physical-consistency check, not a temporal comparison with the
+immediately preceding frame. Source-pixel appearance rejection remains outside
+the current implementation.
 
 If the checkpoint, PyTorch runtime, source mask, or prediction is unavailable,
 the status is unknown and cannot seed a restoration envelope. If no verified
