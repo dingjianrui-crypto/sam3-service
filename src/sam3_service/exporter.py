@@ -167,6 +167,10 @@ class _PaddleEventState:
     physical_id: str = ""
     source_ids: set[str] = field(default_factory=set)
     reference_id: str = ""
+    # All selected observations maintain physical endpoint continuity. The
+    # legacy last_seen/line/depth fields below contain event-eligible evidence.
+    last_observation_ms: int = -1
+    last_orientation_line: Line | None = None
     last_seen_ms: int = -1
     last_line: Line | None = None
     last_reference_line: Line | None = None
@@ -1402,13 +1406,12 @@ def _detect_paddle_events(
             direction_confidence=confidence,
         )
         for timed in observations:
-            if not timed.observation.phase_length_verified:
-                continue
             event = _update_directed_paddle_state(
                 state,
                 timed.observation,
                 timed.timestamp_ms,
                 band_upward_width,
+                event_eligible=timed.observation.phase_length_verified,
             )
             if event is not None:
                 detected.append(event)
@@ -2303,14 +2306,50 @@ def _restore_bidirectional_phase_lines(
     return restored
 
 
+def _reset_directed_paddle_tracking_state(state: _PaddleEventState) -> None:
+    """Discard state that cannot safely cross a real observation gap."""
+    state.candidates.clear()
+    state.phase_confident = False
+    state.active_blade = None
+    state.last_directed_angle = None
+    state.unwrapped_angle = None
+    state.emitted_events.clear()
+    state.last_observation_ms = -1
+    state.last_orientation_line = None
+    state.last_seen_ms = -1
+    state.last_line = None
+    state.last_reference_line = None
+    state.endpoint_depths = None
+    _clear_stroke_length(state)
+
+
+def _invalidate_directed_event_evidence(state: _PaddleEventState) -> None:
+    """Break event confirmation without discarding physical orientation."""
+    state.candidates.clear()
+    state.last_seen_ms = -1
+    state.last_line = None
+    state.last_reference_line = None
+    state.endpoint_depths = None
+
+
 def _update_directed_paddle_state(
     state: _PaddleEventState,
     observation: _PaddleObservation,
     timestamp_ms: int,
     band_upward_width: float,
+    *,
+    event_eligible: bool = True,
 ) -> PaddleEvent | None:
+    if (
+        state.last_observation_ms >= 0
+        and timestamp_ms - state.last_observation_ms
+        > PADDLE_EVENT_MAX_CONFIRM_GAP_MS
+    ):
+        _reset_directed_paddle_tracking_state(state)
+
     previous_depths = state.endpoint_depths
     previous_seen_ms = state.last_seen_ms
+    previous_line = state.last_line
     previous_reference_line = state.last_reference_line
     previous_cycle_index = state.cycle_index
     previous_phase_angle = (
@@ -2319,31 +2358,19 @@ def _update_directed_paddle_state(
         else None
     )
 
-    if (
-        previous_seen_ms >= 0
-        and timestamp_ms - previous_seen_ms > PADDLE_EVENT_MAX_CONFIRM_GAP_MS
-    ):
-        state.candidates.clear()
-        state.phase_confident = False
-        state.active_blade = None
-        state.last_directed_angle = None
-        state.unwrapped_angle = None
-        state.emitted_events.clear()
-        state.last_reference_line = None
-        _clear_stroke_length(state)
-        previous_depths = None
-        previous_reference_line = None
-        previous_phase_angle = None
-
-    previous_line = state.last_line
-    observed_line = _orient_line_like(observation.line, previous_line)
+    observed_line = _orient_line_like(
+        observation.line,
+        state.last_orientation_line or state.last_line,
+    )
     raw_line = (
         _orient_line_like(observation.raw_line, observed_line)
         if observation.raw_line
         else observed_line
     )
-    line = observed_line
+    state.last_observation_ms = timestamp_ms
+    state.last_orientation_line = observed_line
 
+    phase_advanced = True
     if state.active_blade is not None and state.travel_direction is not None:
         raw_angle = _directed_blade_angle(
             observed_line,
@@ -2351,7 +2378,16 @@ def _update_directed_paddle_state(
             state.active_blade,
             state.travel_direction,
         )
-        if not _advance_directed_paddle_phase(state, raw_angle):
+        phase_advanced = _advance_directed_paddle_phase(state, raw_angle)
+
+    if not event_eligible:
+        _invalidate_directed_event_evidence(state)
+        return None
+
+    line = observed_line
+
+    if state.active_blade is not None and state.travel_direction is not None:
+        if not phase_advanced:
             depths = _endpoint_signed_depths(line, observation.reference_line)
             state.last_seen_ms = timestamp_ms
             state.last_line = line

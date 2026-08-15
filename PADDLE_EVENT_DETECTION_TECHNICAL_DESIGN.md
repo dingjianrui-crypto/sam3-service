@@ -430,6 +430,15 @@ passed to catch/exit event analysis. This prevents an immersed, cropped paddle
 at the start of the forward pass from creating a false catch and an immersed,
 cropped paddle at the end of the reverse pass from creating a false exit.
 
+Unverified observations still maintain physical endpoint orientation and raw
+directed-phase continuity. They update the most recent oriented centerline and
+advance an already identified blade through its recovery phase, but they clear
+pending depth-transition evidence and cannot start, confirm, or emit an event.
+Only a genuine absence of paddle observations beyond the continuity timeout
+resets active-blade and endpoint identity. This separates an unavailable event
+length from a broken physical track and prevents a skipped recovery half from
+flipping endpoint parity at the next verified frame.
+
 CNN completeness is authoritative for phase-length candidate eligibility. A
 positively complete observation may seed or increase its phase-local envelope
 directly, regardless of how much its fitted length differs from the preceding

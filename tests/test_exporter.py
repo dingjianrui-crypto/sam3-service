@@ -1053,6 +1053,119 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(state.emitted_events, set())
         self.assertIsNone(state.stroke_length)
 
+    def test_unverified_recovery_preserves_endpoint_and_phase_continuity(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+            active_blade=1,
+        )
+
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state,
+                _rotating_observation(176),
+                0,
+                8.0,
+            )
+        )
+        for timestamp_ms, angle in [
+            (100, 196),
+            (200, 236),
+            (300, 296),
+            (367, 356),
+        ]:
+            self.assertIsNone(
+                _update_directed_paddle_state(
+                    state,
+                    _rotating_observation(angle),
+                    timestamp_ms,
+                    8.0,
+                    event_eligible=False,
+                )
+            )
+
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state,
+                _rotating_observation(3),
+                400,
+                8.0,
+            )
+        )
+
+        self.assertEqual(state.active_blade, 1)
+        self.assertEqual(state.cycle_index, 1)
+        self.assertAlmostEqual(state.last_directed_angle or 0.0, 3.0)
+        self.assertAlmostEqual(state.unwrapped_angle or 0.0, 363.0)
+        self.assertEqual(state.candidates, {})
+
+    def test_unverified_recovery_cannot_emit_but_next_cycle_can(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+        )
+        events: list[PaddleEvent] = []
+        sequence = [
+            *[(angle, True) for angle in [0, 30, 45, 60, 90, 120, 135, 150, 165]],
+            *[(angle, False) for angle in [180, 210, 240, 270, 300, 330, 350]],
+            *[(angle, True) for angle in [0, 30, 45, 60, 90, 120, 135, 150, 165]],
+        ]
+        for index, (angle, event_eligible) in enumerate(sequence):
+            event = _update_directed_paddle_state(
+                state,
+                _rotating_observation(angle),
+                index * 100,
+                8.0,
+                event_eligible=event_eligible,
+            )
+            if event is not None:
+                events.append(event)
+
+        self.assertEqual(
+            [(event.kind, event.cycle_index) for event in events],
+            [("catch", 0), ("exit", 0), ("catch", 1), ("exit", 1)],
+        )
+
+    def test_unverified_observation_cannot_confirm_pending_event(self) -> None:
+        state = _PaddleEventState(
+            physical_id="paddle:physical:1",
+            rotation_direction="clockwise",
+            travel_direction="right",
+            direction_confidence=1.0,
+            active_blade=1,
+        )
+
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state, _rotating_observation(0), 0, 8.0
+            )
+        )
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state, _rotating_observation(30), 100, 8.0
+            )
+        )
+        self.assertIn("catch", state.candidates)
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state,
+                _rotating_observation(45),
+                200,
+                8.0,
+                event_eligible=False,
+            )
+        )
+        self.assertEqual(state.candidates, {})
+        self.assertIsNone(
+            _update_directed_paddle_state(
+                state, _rotating_observation(60), 300, 8.0
+            )
+        )
+
     def test_collinear_exit_fragments_are_one_observation_and_one_event(self) -> None:
         reference = Centerline(
             record={"prompt_id": "boat", "track_id": "boat:track:1"},
