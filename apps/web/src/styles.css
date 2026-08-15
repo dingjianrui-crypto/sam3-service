@@ -94,11 +94,16 @@ header h1 {
 main {
   min-height: calc(100vh - 82px);
   display: grid;
-  grid-template-columns: 350px minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 350px) minmax(0, 1fr) minmax(300px, 350px);
 }
 
-aside {
+.upload-panel {
   border-right: 1px solid #17283b;
+  background: rgba(8, 19, 33, 0.82);
+}
+
+.recent-jobs-panel {
+  border-left: 1px solid #17283b;
   background: rgba(8, 19, 33, 0.82);
 }
 
@@ -353,6 +358,37 @@ h2 {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
+}
+
+.jobs-pagination {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 14px 10px 0;
+  color: #6f899c;
+  font-size: 10px;
+}
+
+.jobs-pagination button {
+  padding: 6px 8px;
+  color: #8eb0c3;
+  border: 1px solid #1e4359;
+  border-radius: 6px;
+  background: #0d2132;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.jobs-pagination button:last-child {
+  justify-self: end;
+}
+
+.jobs-pagination button:disabled {
+  color: #465e70;
+  border-color: #172b3b;
+  background: transparent;
+  cursor: not-allowed;
 }
 
 .status-dot {
@@ -1020,9 +1056,14 @@ h2 {
     grid-template-columns: 1fr;
   }
 
-  aside {
+  .upload-panel {
     border-right: 0;
     border-bottom: 1px solid #17283b;
+  }
+
+  .recent-jobs-panel {
+    border-top: 1px solid #17283b;
+    border-left: 0;
   }
 
   .jobs {

@@ -20,6 +20,7 @@ const ACTIVE_STATES = new Set([
   "segmenting",
   "postprocessing"
 ]);
+const JOBS_PER_PAGE = 8;
 
 type DetectionMode = "recall" | "balanced" | "fast" | "custom";
 
@@ -59,6 +60,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
+  const [jobPage, setJobPage] = useState(1);
 
   async function refreshJobs() {
     try {
@@ -82,6 +84,11 @@ export default function App() {
     const interval = window.setInterval(() => void refreshJobs(), 1500);
     return () => window.clearInterval(interval);
   }, [jobs]);
+
+  useEffect(() => {
+    const lastPage = Math.max(1, Math.ceil(jobs.length / JOBS_PER_PAGE));
+    setJobPage((current) => Math.min(current, lastPage));
+  }, [jobs.length]);
 
   useEffect(() => {
     if (selected?.state !== "completed") {
@@ -110,6 +117,7 @@ export default function App() {
         jobSettings
       );
       setSelected(created);
+      setJobPage(1);
       setFile(null);
       await refreshJobs();
     } catch (reason) {
@@ -175,6 +183,10 @@ export default function App() {
     }
   }
 
+  const jobPageCount = Math.max(1, Math.ceil(jobs.length / JOBS_PER_PAGE));
+  const pageStart = (jobPage - 1) * JOBS_PER_PAGE;
+  const visibleJobs = jobs.slice(pageStart, pageStart + JOBS_PER_PAGE);
+
   return (
     <div className="app">
       <header>
@@ -189,7 +201,7 @@ export default function App() {
       </header>
 
       <main>
-        <aside>
+        <aside className="upload-panel">
           <form className="upload-card" onSubmit={submit}>
             <div>
               <p className="step">NEW ANALYSIS</p>
@@ -337,50 +349,6 @@ export default function App() {
               {busy ? "Preparing…" : "Start segmentation"}
             </button>
           </form>
-
-          <section className="jobs">
-            <div className="section-title">
-              <h2>Recent jobs</h2>
-              <button className="quiet" onClick={() => void refreshJobs()}>
-                Refresh
-              </button>
-            </div>
-            {jobs.length === 0 && <p className="empty">No videos yet.</p>}
-            {jobs.map((job) => (
-              <div
-                key={job.job_id}
-                className={selected?.job_id === job.job_id ? "job active" : "job"}
-              >
-                <button className="job-select" onClick={() => setSelected(job)}>
-                  <span className={`status-dot ${job.state}`} />
-                  <span>
-                    <strong>{job.prompts.map((item) => item.text).join(", ")}</strong>
-                    <small>
-                      {job.state} ·{" "}
-                      {new Date(job.created_at).toLocaleString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit"
-                      })}
-                    </small>
-                  </span>
-                  {ACTIVE_STATES.has(job.state) && <b>{job.progress.percent}%</b>}
-                </button>
-                <div className="job-identifier">
-                  <span>Job ID</span>
-                  <code title={job.job_id}>{job.job_id}</code>
-                  <button
-                    type="button"
-                    onClick={() => void copyJobId(job.job_id)}
-                    aria-label={`Copy job ID ${job.job_id}`}
-                  >
-                    {copiedJobId === job.job_id ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </section>
         </aside>
 
         <section className="workspace">
@@ -476,6 +444,75 @@ export default function App() {
             </>
           )}
         </section>
+
+        <aside className="recent-jobs-panel">
+          <section className="jobs">
+            <div className="section-title">
+              <h2>Recent jobs</h2>
+              <button className="quiet" onClick={() => void refreshJobs()}>
+                Refresh
+              </button>
+            </div>
+            {jobs.length === 0 && <p className="empty">No videos yet.</p>}
+            {visibleJobs.map((job) => (
+              <div
+                key={job.job_id}
+                className={selected?.job_id === job.job_id ? "job active" : "job"}
+              >
+                <button className="job-select" onClick={() => setSelected(job)}>
+                  <span className={`status-dot ${job.state}`} />
+                  <span>
+                    <strong>{job.prompts.map((item) => item.text).join(", ")}</strong>
+                    <small>
+                      {job.state} ·{" "}
+                      {new Date(job.created_at).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit"
+                      })}
+                    </small>
+                  </span>
+                  {ACTIVE_STATES.has(job.state) && <b>{job.progress.percent}%</b>}
+                </button>
+                <div className="job-identifier">
+                  <span>Job ID</span>
+                  <code title={job.job_id}>{job.job_id}</code>
+                  <button
+                    type="button"
+                    onClick={() => void copyJobId(job.job_id)}
+                    aria-label={`Copy job ID ${job.job_id}`}
+                  >
+                    {copiedJobId === job.job_id ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+            ))}
+            {jobs.length > 0 && (
+              <nav className="jobs-pagination" aria-label="Recent jobs pages">
+                <button
+                  type="button"
+                  disabled={jobPage === 1}
+                  onClick={() => setJobPage((current) => Math.max(1, current - 1))}
+                >
+                  Previous
+                </button>
+                <span>
+                  Page {jobPage} of {jobPageCount}
+                </span>
+                <button
+                  type="button"
+                  disabled={jobPage === jobPageCount}
+                  onClick={() =>
+                    setJobPage((current) => Math.min(jobPageCount, current + 1))
+                  }
+                >
+                  Next
+                </button>
+              </nav>
+            )}
+          </section>
+        </aside>
       </main>
     </div>
   );
