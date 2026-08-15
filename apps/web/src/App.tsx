@@ -66,10 +66,10 @@ export default function App() {
     try {
       const items = await listJobs();
       setJobs(items);
-      if (selected) {
-        const updated = items.find((job) => job.job_id === selected.job_id);
-        if (updated) setSelected(updated);
-      }
+      setSelected((current) => {
+        if (!current) return current;
+        return items.find((job) => job.job_id === current.job_id) ?? current;
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -95,9 +95,20 @@ export default function App() {
       setManifest(null);
       return;
     }
-    void getManifest(selected.job_id).then(setManifest).catch((reason) => {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    });
+    let cancelled = false;
+    setManifest(null);
+    void getManifest(selected.job_id)
+      .then((result) => {
+        if (!cancelled) setManifest(result);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected?.job_id, selected?.state]);
 
   async function submit(event: FormEvent) {
