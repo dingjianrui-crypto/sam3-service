@@ -302,7 +302,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [_line_length(restored[index]) for index in range(5)],
-            [100.0, 98.0, 108.0, 108.0, 110.0],
+            [100.0, 100.0, 110.0, 110.0, 110.0],
         )
         self.assertTrue(all(restored[index][:2] == (0.0, 0.0) for index in range(5)))
 
@@ -323,8 +323,8 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            [_line_length(restored[index]) for index in range(6)],
-            [145.0, 146.0, 144.0, 144.0, 148.0, 147.0],
+            [round(_line_length(restored[index]), 1) for index in range(6)],
+            [148.0, 148.0, 148.0, 148.0, 148.0, 147.5],
         )
 
     def test_reverse_anchor_keeps_only_lengths_within_relative_tolerance(self) -> None:
@@ -342,7 +342,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [round(_line_length(restored[index]), 1) for index in range(4)],
-            [183.5, 183.5, 210.9, 208.8],
+            [210.9, 210.9, 210.9, 209.9],
         )
 
     def test_fixed_reverse_anchor_rejects_gradual_length_drift(self) -> None:
@@ -363,7 +363,26 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [_line_length(restored[index]) for index in range(6)],
-            [125.0, 125.0, 125.0, 135.0, 145.0, 147.0],
+            [147.0, 147.0, 147.0, 147.0, 147.0, 147.0],
+        )
+
+    def test_reverse_anchor_is_a_minimum_for_cnn_complete_candidates(self) -> None:
+        samples = [
+            (0, 121.0, (0.0, 0.0, 112.71, 0.0)),
+            (1, 128.0, (0.0, 0.0, 119.20, 0.0)),
+            (2, 173.0, (0.0, 0.0, 137.10, 0.0)),
+            (3, 175.0, (0.0, 0.0, 136.18, 0.0)),
+        ]
+
+        restored = _restore_bidirectional_phase_lines(
+            samples,
+            active_blade=1,
+            candidate_validator=lambda index, _line, _blade: index != 0,
+        )
+
+        self.assertEqual(
+            [round(_line_length(restored[index]), 2) for index in range(4)],
+            [137.10, 137.10, 137.10, 136.64],
         )
 
     def test_cnn_cropped_masks_cannot_seed_forward_or_backward_length(self) -> None:
@@ -385,7 +404,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [round(_line_length(restored[index]), 1) for index in range(5)],
-            [100.0, 100.0, 105.0, 120.0, 120.0],
+            [102.5, 102.5, 120.0, 120.0, 120.0],
         )
         self.assertEqual(verified_indices, set(range(5)))
 
@@ -572,7 +591,7 @@ class ExporterTest(unittest.TestCase):
         )
         self.assertEqual(
             [round(_line_length(timed.observation.line)) for timed in restored],
-            [60, 58, 58, 58, 58, 58, 58, 58, 58, 60],
+            [60, 60, 60, 60, 60, 60, 60, 60, 60, 60],
         )
         for timed in restored:
             self.assertEqual(timed.observation.line[:2], timed.observation.raw_line[:2])

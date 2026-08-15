@@ -369,10 +369,12 @@ anchors:
 3. for `90°-180°`, traverse observations in reverse from the frame nearest
    `180°`; the first agreeing CNN-complete pair establishes an independent
    fixed reverse anchor;
-4. accept a later CNN-complete length only when its relative difference from
-   the fixed half-phase anchor is at most `15%`;
-5. a cropped, unknown, or out-of-tolerance observation inherits the preceding
-   genuine length in traversal order and does not update the fixed anchor;
+4. accept a later CNN-complete length only when it is not shorter than the
+   fixed half-phase anchor and its relative difference from that anchor is at
+   most `10%`;
+5. a cropped, unknown, shorter-than-anchor, or out-of-tolerance observation
+   inherits the preceding genuine length in traversal order and does not update
+   the fixed anchor;
 6. if an observation lies exactly at `90°`, retain the larger result from the
    two passes;
 7. for every inherited length, anchor the inactive endpoint and adjust only the
@@ -427,14 +429,15 @@ mask-only paddle completeness CNN:
 In each half-phase, only positively CNN-complete masks participate in anchor
 seeding. Two complete candidates must agree within `15%`; their mean becomes
 the fixed phase anchor. A later complete candidate is genuine only when
-`abs(current_length - phase_anchor) / phase_anchor <= 0.15`. A cropped,
-unclassified, or out-of-tolerance mask inherits the preceding genuine length
-in traversal order. Before the pass has established a confirmed seed, its raw
-line may be retained for continuity or drawing, but it is marked unverified and
-is not passed to catch/exit event analysis. This prevents an immersed, cropped
-paddle at the start of the forward pass from creating a false catch and an
-immersed, cropped paddle at the end of the reverse pass from creating a false
-exit.
+`current_length >= phase_anchor` and
+`abs(current_length - phase_anchor) / phase_anchor <= 0.10`. A cropped,
+unclassified, shorter-than-anchor, or out-of-tolerance mask inherits the
+preceding genuine length in traversal order. Before the pass has established a
+confirmed seed, its raw line may be retained for continuity or drawing, but it
+is marked unverified and is not passed to catch/exit event analysis. This
+prevents an immersed, cropped paddle at the start of the forward pass from
+creating a false catch and an immersed, cropped paddle at the end of the
+reverse pass from creating a false exit.
 
 Unverified observations still maintain physical endpoint orientation and raw
 directed-phase continuity. They update the most recent oriented centerline and

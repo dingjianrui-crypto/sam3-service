@@ -49,7 +49,8 @@ PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
-PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE = 0.15
+PADDLE_PHASE_ANCHOR_AGREEMENT_RELATIVE_TOLERANCE = 0.15
+PADDLE_PHASE_CANDIDATE_RELATIVE_TOLERANCE = 0.10
 PADDLE_DEPTH_MOTION_EPSILON_PIXELS = 0.5
 WATERLINE_BOAT_AXIS_MAX_ANGLE_DEGREES = 20.0
 EXPORT_END_GUARD_FRAMES = 2
@@ -2269,7 +2270,7 @@ def _restore_bidirectional_phase_lines(
             second_length = _line_length(candidates[1][2])
             if (
                 relative_difference(first_length, second_length)
-                <= PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE
+                <= PADDLE_PHASE_ANCHOR_AGREEMENT_RELATIVE_TOLERANCE
             ):
                 seed = candidates
                 break
@@ -2285,9 +2286,11 @@ def _restore_bidirectional_phase_lines(
         previous_genuine_length = phase_anchor
         for index, _phase_angle, line in ordered:
             current_length = _line_length(line)
-            candidate_is_genuine = is_complete(index, line) and (
-                relative_difference(phase_anchor, current_length)
-                <= PADDLE_PHASE_LENGTH_RELATIVE_TOLERANCE
+            candidate_is_genuine = (
+                is_complete(index, line)
+                and current_length >= phase_anchor
+                and relative_difference(phase_anchor, current_length)
+                <= PADDLE_PHASE_CANDIDATE_RELATIVE_TOLERANCE
             )
             if candidate_is_genuine:
                 previous_genuine_length = current_length
