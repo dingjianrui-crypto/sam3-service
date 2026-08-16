@@ -260,5 +260,5 @@ def _paddle_completeness_checkpoint_path() -> Path | None:
     configured = os.getenv("SAM3_PADDLE_COMPLETENESS_CHECKPOINT_PATH")
     if configured:
         return Path(configured).expanduser().resolve()
-    default = Path(__file__).resolve().parent.parent / "checkpoints" / "latest.pt"
+    default = Path(__file__).resolve().parent.parent / "checkpoints" / "best.pt"
     return default if default.is_file() else None

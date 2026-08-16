@@ -135,7 +135,7 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_DEFAULT_DEDUPE_IOU_THRESHOLD` | `0.6` | Default same-frame IoU threshold for dropping duplicate detections |
 | `SAM3_CENTERLINE_THICKNESS_PIXELS` | `8` | Centerline thickness in video pixels; the event waterline uses this as a one-sided upward band |
 | `SAM3_SHAFT_THICKNESS_PIXELS` | unset | Deprecated fallback for `SAM3_CENTERLINE_THICKNESS_PIXELS` |
-| `SAM3_PADDLE_COMPLETENESS_CHECKPOINT_PATH` | `src/checkpoints/latest.pt` when present | Mask-only CNN checkpoint used to admit complete paddle-length candidates during event export; phase edges without a verified candidate do not emit catch/exit events |
+| `SAM3_PADDLE_COMPLETENESS_CHECKPOINT_PATH` | `src/checkpoints/best.pt` when present | Mask-only CNN checkpoint used to admit complete paddle-length candidates during event export; phase edges without a verified candidate do not emit catch/exit events |
 | `SAM3_PADDLE_COMPLETENESS_PADDING_PERCENT` | `15` | Detection-box padding used before square crop and `256 × 256` mask normalization; must match training |
 | `SAM3_PADDLE_COMPLETENESS_BATCH_SIZE` | `8` | CPU inference batch size for paddle-mask completeness classification |
 | `SAM3_HOST` | `127.0.0.1` | Private bind address |
