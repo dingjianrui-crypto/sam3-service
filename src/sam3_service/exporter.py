@@ -44,6 +44,10 @@ PADDLE_REFLECTION_CLOSE_FRAME_RATIO = 0.25
 PADDLE_REFLECTION_MIN_CLOSE_PIXELS = 24.0
 PADDLE_EVENT_SLOT_MAX_SPACING_RATIO = 0.4
 PADDLE_EVENT_SLOT_MIN_GATE_PIXELS = 24.0
+BOAT_REFERENCE_LENGTH_MAX_INNOVATION_RATIO = 0.15
+BOAT_REFERENCE_LENGTH_PROCESS_NOISE_RATIO = 0.01
+BOAT_REFERENCE_LENGTH_MEASUREMENT_NOISE_RATIO = 0.03
+BOAT_REFERENCE_LENGTH_MIN_NOISE_PIXELS = 2.0
 PADDLE_DIRECTION_MIN_DELTAS = 5
 PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
@@ -149,6 +153,13 @@ class _TimedPaddleObservation:
     timestamp_ms: int
     physical_id: str
     observation: _PaddleObservation
+
+
+@dataclass
+class _BoatReferenceLengthFilter:
+    length: float
+    variance: float
+    last_timestamp_ms: int | None = None
 
 
 @dataclass
@@ -1367,6 +1378,18 @@ def _detect_paddle_events(
         reference_id: _estimate_paddle_direction(deltas)
         for reference_id, deltas in evidence_by_reference.items()
     }
+    tracks = _stabilize_boat_reference_lengths(
+        tracks,
+        directions,
+        _event_boat_reference_lines(
+            frames,
+            options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+        ),
+    )
 
     event_tracks = _select_event_paddle_tracks(
         tracks,
@@ -1649,6 +1672,180 @@ def _select_event_paddle_tracks(
         if slot_observations:
             selected[slot_id] = slot_observations
     return selected
+
+
+def _stabilize_boat_reference_lengths(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+    directions: dict[str, tuple[str | None, str | None, float]],
+    lines_by_reference: dict[str, dict[int, Line]] | None = None,
+) -> dict[str, list[_TimedPaddleObservation]]:
+    """Normalize each boat length while preserving its observed forward endpoint."""
+    reference_lines = {
+        reference_id: dict(lines_by_timestamp)
+        for reference_id, lines_by_timestamp in (lines_by_reference or {}).items()
+    }
+    for observations in tracks.values():
+        for timed in observations:
+            reference_id = timed.observation.reference_id
+            _, travel_direction, _ = directions.get(
+                reference_id, (None, None, 0.0)
+            )
+            if travel_direction not in {"left", "right"}:
+                continue
+            reference_lines.setdefault(reference_id, {}).setdefault(
+                timed.timestamp_ms,
+                timed.observation.reference_line,
+            )
+
+    corrected: dict[tuple[str, int], Line] = {}
+    for reference_id, lines_by_timestamp in reference_lines.items():
+        if reference_id not in directions:
+            continue
+        _, travel_direction, _ = directions[reference_id]
+        if travel_direction not in {"left", "right"}:
+            continue
+        corrected.update(
+            {
+                (reference_id, timestamp_ms): line
+                for timestamp_ms, line in _kalman_stabilized_boat_reference_lines(
+                    lines_by_timestamp,
+                    travel_direction,
+                ).items()
+            }
+        )
+
+    if not corrected:
+        return tracks
+    stabilized: dict[str, list[_TimedPaddleObservation]] = {}
+    for physical_id, observations in tracks.items():
+        stabilized[physical_id] = [
+            replace(
+                timed,
+                observation=replace(
+                    timed.observation,
+                    reference_line=corrected.get(
+                        (
+                            timed.observation.reference_id,
+                            timed.timestamp_ms,
+                        ),
+                        timed.observation.reference_line,
+                    ),
+                ),
+            )
+            for timed in observations
+        ]
+    return stabilized
+
+
+def _event_boat_reference_lines(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+) -> dict[str, dict[int, Line]]:
+    """Collect every selected boat observation, including frames without a paddle."""
+    lines: dict[str, dict[int, Line]] = {}
+    for timestamp_ms, frame_records in frames.items():
+        for raw_record in frame_records:
+            record = _scale_record(raw_record, scale_x, scale_y)
+            if record.get("prompt_id") != options.reference_prompt_id:
+                continue
+            if not _record_selected_for_export(
+                record,
+                options,
+                width,
+                height,
+                timestamp_ms,
+            ):
+                continue
+            line = _record_line(
+                record,
+                width,
+                height,
+                use_waterline=options.reference_line_mode == "waterline",
+            )
+            if line is None:
+                continue
+            lines.setdefault(_record_track_id(record), {})[timestamp_ms] = line
+    return lines
+
+
+def _kalman_stabilized_boat_reference_lines(
+    lines_by_timestamp: dict[int, Line],
+    travel_direction: str,
+) -> dict[int, Line]:
+    samples: list[tuple[int, tuple[float, float], tuple[float, float], float]] = []
+    for timestamp_ms, line in sorted(lines_by_timestamp.items()):
+        geometry = _boat_reference_head_geometry(line, travel_direction)
+        if geometry is None:
+            continue
+        head, forward, observed_length = geometry
+        samples.append((timestamp_ms, head, forward, observed_length))
+    if not samples:
+        return {}
+
+    seed_length = _median([sample[3] for sample in samples])
+    if seed_length is None or seed_length < 1:
+        return {}
+    measurement_noise = max(
+        BOAT_REFERENCE_LENGTH_MIN_NOISE_PIXELS,
+        seed_length * BOAT_REFERENCE_LENGTH_MEASUREMENT_NOISE_RATIO,
+    )
+    process_noise = max(
+        BOAT_REFERENCE_LENGTH_MIN_NOISE_PIXELS / 2,
+        seed_length * BOAT_REFERENCE_LENGTH_PROCESS_NOISE_RATIO,
+    )
+    state = _BoatReferenceLengthFilter(
+        length=seed_length,
+        variance=(measurement_noise * measurement_noise) / 4,
+    )
+    measurement_variance = measurement_noise * measurement_noise
+    process_variance_per_second = process_noise * process_noise
+    stabilized: dict[int, Line] = {}
+    for timestamp_ms, head, forward, observed_length in samples:
+        if state.last_timestamp_ms is not None:
+            elapsed_seconds = min(
+                5.0,
+                max(1 / 120, (timestamp_ms - state.last_timestamp_ms) / 1000),
+            )
+            state.variance += process_variance_per_second * elapsed_seconds
+        relative_innovation = abs(observed_length - state.length) / max(
+            state.length, 1.0
+        )
+        if relative_innovation <= BOAT_REFERENCE_LENGTH_MAX_INNOVATION_RATIO:
+            gain = state.variance / (state.variance + measurement_variance)
+            state.length += gain * (observed_length - state.length)
+            state.variance = max(1e-6, (1 - gain) * state.variance)
+        state.last_timestamp_ms = timestamp_ms
+        tail = (
+            head[0] - forward[0] * state.length,
+            head[1] - forward[1] * state.length,
+        )
+        stabilized[timestamp_ms] = (tail[0], tail[1], head[0], head[1])
+    return stabilized
+
+
+def _boat_reference_head_geometry(
+    line: Line,
+    travel_direction: str,
+) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+    first = (line[0], line[1])
+    second = (line[2], line[3])
+    observed_length = math.dist(first, second)
+    if observed_length < 1:
+        return None
+    if travel_direction == "right":
+        head, tail = (second, first) if second[0] >= first[0] else (first, second)
+    elif travel_direction == "left":
+        head, tail = (second, first) if second[0] <= first[0] else (first, second)
+    else:
+        return None
+    forward = _normalize((head[0] - tail[0], head[1] - tail[1]))
+    if forward is None:
+        return None
+    return head, forward, observed_length
 
 
 def _event_paddle_slot_anchors(

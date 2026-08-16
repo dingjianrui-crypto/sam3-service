@@ -33,6 +33,7 @@ from sam3_service.exporter import (
     _event_phase_allowed,
     _event_label_text,
     _event_companion_degree_slots,
+    _event_boat_reference_lines,
     _freeze_audio_filter,
     _freeze_moments,
     _freeze_segments,
@@ -40,8 +41,10 @@ from sam3_service.exporter import (
     _line_intersection,
     _line_length,
     _load_frames_by_index,
+    _kalman_stabilized_boat_reference_lines,
     _metric_label_top,
     _maximum_target_count_in_selection,
+    _observation_forward_position,
     _paddle_water_depth_ratio,
     _paddle_rotation_deltas,
     _paddle_event_angle_color,
@@ -57,6 +60,7 @@ from sam3_service.exporter import (
     _selection_rect_at,
     _select_event_paddle_tracks,
     _spm_label_top,
+    _stabilize_boat_reference_lengths,
     _update_directed_paddle_state,
     _update_paddle_event_state,
     _waterline_transition_kind,
@@ -996,6 +1000,126 @@ class ExporterTest(unittest.TestCase):
             next(iter(second_rightward.values()))[0].observation.source_ids,
             ("paddle:middle",),
         )
+
+    def test_boat_reference_length_filter_anchors_head_and_rejects_tail_outliers(self) -> None:
+        stabilized = _kalman_stabilized_boat_reference_lines(
+            {
+                0: (100.0, 100.0, 500.0, 100.0),
+                100: (-100.0, 100.0, 500.0, 100.0),
+                200: (250.0, 100.0, 500.0, 100.0),
+                300: (90.0, 100.0, 500.0, 100.0),
+            },
+            "right",
+        )
+
+        self.assertEqual(set(stabilized), {0, 100, 200, 300})
+        for line in stabilized.values():
+            self.assertEqual(line[2:], (500.0, 100.0))
+            self.assertAlmostEqual(_line_length(line), 405.0, delta=5.0)
+        self.assertLess(_line_length(stabilized[100]), 430.0)
+        self.assertGreater(_line_length(stabilized[200]), 380.0)
+
+    def test_boat_reference_length_filter_anchors_leftward_head(self) -> None:
+        stabilized = _kalman_stabilized_boat_reference_lines(
+            {
+                0: (100.0, 100.0, 500.0, 100.0),
+                100: (100.0, 100.0, 620.0, 100.0),
+                200: (100.0, 100.0, 500.0, 100.0),
+            },
+            "left",
+        )
+
+        for line in stabilized.values():
+            self.assertEqual(line[2:], (100.0, 100.0))
+            self.assertAlmostEqual(line[0], 500.0, delta=5.0)
+
+    def test_boat_reference_length_stabilization_prevents_projection_shift(self) -> None:
+        def timed(timestamp_ms: int, reference_line: tuple[float, float, float, float]):
+            observation = _PaddleObservation(
+                source_ids=("paddle:1",),
+                reference_id="boat:1",
+                line=(440.0, 20.0, 460.0, 40.0),
+                reference_line=reference_line,
+            )
+            return _TimedPaddleObservation(timestamp_ms, "paddle:1", observation)
+
+        tracks = {
+            "paddle:1": [
+                timed(0, (100.0, 50.0, 500.0, 50.0)),
+                timed(100, (-100.0, 50.0, 500.0, 50.0)),
+                timed(200, (100.0, 50.0, 500.0, 50.0)),
+            ]
+        }
+
+        raw_inflated_position = _observation_forward_position(
+            tracks["paddle:1"][1].observation,
+            "right",
+        )
+        stabilized = _stabilize_boat_reference_lengths(
+            tracks,
+            {"boat:1": ("clockwise", "right", 1.0)},
+        )
+        positions = [
+            _observation_forward_position(timed.observation, "right")
+            for timed in stabilized["paddle:1"]
+        ]
+
+        self.assertEqual(raw_inflated_position, 250.0)
+        self.assertEqual(positions, [150.0, 150.0, 150.0])
+
+    def test_boat_reference_filter_uses_frames_without_a_paddle(self) -> None:
+        tracks = {
+            "paddle:1": [
+                _TimedPaddleObservation(
+                    0,
+                    "paddle:1",
+                    _PaddleObservation(
+                        source_ids=("paddle:1",),
+                        reference_id="boat:1",
+                        line=(440.0, 20.0, 460.0, 40.0),
+                        reference_line=(-100.0, 50.0, 500.0, 50.0),
+                    ),
+                )
+            ]
+        }
+
+        stabilized = _stabilize_boat_reference_lengths(
+            tracks,
+            {"boat:1": ("clockwise", "right", 1.0)},
+            {
+                "boat:1": {
+                    0: (-100.0, 50.0, 500.0, 50.0),
+                    100: (100.0, 50.0, 500.0, 50.0),
+                    200: (100.0, 50.0, 500.0, 50.0),
+                }
+            },
+        )
+
+        reference_line = stabilized["paddle:1"][0].observation.reference_line
+        self.assertEqual(reference_line[2:], (500.0, 50.0))
+        self.assertEqual(_line_length(reference_line), 400.0)
+
+    def test_event_boat_reference_lines_collects_boat_only_frames(self) -> None:
+        def boat_record(timestamp_ms: int) -> dict[str, object]:
+            return {
+                "timestamp_ms": timestamp_ms,
+                "prompt_id": "boat",
+                "instance_id": "boat:1",
+                "centerline_line_xyxy": [100.0, 50.0, 500.0, 50.0],
+                "box_xywh": [100.0, 40.0, 400.0, 20.0],
+                "segmentation": {"type": "polygon", "points": []},
+            }
+
+        lines = _event_boat_reference_lines(
+            {0: [boat_record(0)], 100: [boat_record(100)]},
+            ExportOptions(reference_prompt_id="boat", reference_line_mode="centerline"),
+            640,
+            360,
+            1.0,
+            1.0,
+        )
+
+        self.assertEqual(set(lines["boat:1"]), {0, 100})
 
     def test_event_paddle_slot_stitches_fragments_without_collapsing_a_gap(self) -> None:
         def timed(

@@ -742,10 +742,15 @@ For each exported frame, the server finds every target centerline, matches it to
 When `metric_count` is supplied, the degree row always reserves exactly that many positions, independently of the number of paddle detection records. Paddles are ordered left to right in each frame, extra detections are ignored, and an unavailable position remains blank without shifting the other metric positions or carrying forward a stale value. Empty slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them. The web UI always sends this value and defaults it to `1`.
 
 `event_paddle_index` affects only catch and exit analysis. For each reference
-boat, the server derives stable paddle-line slots from direction-normalized
-centerline positions, ordered front-to-back in the travel direction. Index `1`
-is the leading slot. On every frame, a detected centerline is assigned to its
-nearest slot only when it is sufficiently close to that slot's anchor. This
+boat, the server first stabilizes the finite boat reference length. It identifies
+the head from travel direction, keeps that endpoint fixed, and reconstructs the
+tail using a per-boat Kalman-filtered length. Raw lengths differing from the
+current estimate by more than `15%` are treated as water inflation or cropping
+and do not update the filter. The server then derives stable paddle-line slots
+from projections onto the corrected, direction-normalized boat reference,
+ordered front-to-back in the travel direction. Index `1` is the leading slot.
+On every frame, a detected centerline is assigned to its nearest slot only when
+it is sufficiently close to that slot's anchor. This
 stitches fragmented physical track IDs into the same event stream while leaving
 a temporarily missing slot blank instead of shifting a different paddle into
 it. Omitting the parameter analyzes all eligible physical tracks. If the

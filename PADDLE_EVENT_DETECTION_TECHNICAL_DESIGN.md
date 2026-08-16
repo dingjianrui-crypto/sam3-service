@@ -597,6 +597,21 @@ creates fresh catch and exit eligibility.
   collapse multiple genuine candidates whose centers are above the boat.
 - Rotation direction is estimated per boat direction segment using consensus
   across its paddles when possible.
+- Before slot-anchor construction, normalize the finite reference-line length
+  independently for each boat. Orient the reference using travel direction,
+  preserve its forward endpoint as the boat head, and reconstruct only the
+  tail from a one-dimensional Kalman-filtered length. Seed the filter from the
+  median observed length over the available timeline.
+- Reject length measurements whose innovation exceeds `15%` of the current
+  estimate. This prevents water-inflated tails and cropped boat masks from
+  changing the filter state; the inherited estimate cuts or extends the tail
+  instead. Accepted measurements use `3%` measurement noise and `1%` process
+  noise, with a `2 px` minimum noise scale so the estimate can follow gradual
+  perspective changes without following frame-level mask noise.
+- If travel direction is unavailable, retain the raw reference geometry because
+  the forward endpoint cannot be identified safely. Length correction changes
+  only the finite span along the observed axis, so the corresponding infinite
+  waterline and angle remain geometrically unchanged.
 - An optional one-based event-paddle index is applied only after direction
   estimation. Derive stable paddle-line slot anchors per reference boat from
   center projections along the direction-normalized boat axis, ordered from
