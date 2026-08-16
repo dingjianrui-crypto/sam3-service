@@ -143,14 +143,16 @@ the export label and angle arc.
 
 ## 7. High-level Architecture
 
-Event analysis will use two logical passes. Export rendering remains a later,
-independent operation.
+Event analysis uses a provisional geometry pass, a slot-aware tracking pass,
+and a phase/event pass. Export rendering remains a later, independent
+operation.
 
-### 7.1 Pass A: observation tracking and direction estimation
+### 7.1 Pass A1: provisional direction and slot-anchor estimation
 
 1. Load and scale all result records.
 2. Match every paddle observation to its nearest selected waterline.
-3. Consolidate nearby collinear fragments into one physical observation.
+3. Provisionally consolidate nearby collinear fragments to obtain enough
+   temporal evidence for direction estimation.
 4. When multiple candidates are near one boat, discard below-water candidates
    if at least one above-water candidate exists.
 5. Associate observations with persistent physical-paddle tracks.
@@ -159,8 +161,23 @@ independent operation.
    centerline.
 8. Estimate rotation direction from the temporal paddle-axis sequence.
 9. Derive travel direction and a confidence score.
+10. Project provisional paddle centers onto the direction-normalized boat axis
+    and derive stable front-to-back slot anchors.
 
-### 7.2 Pass B: phase and event analysis
+### 7.2 Pass A2: slot-aware fragment consolidation and tracking
+
+1. Return to the raw paddle detections for every frame.
+2. Assign each raw detection to its nearest slot anchor within the configured
+   distance gate.
+3. Keep unassigned detections isolated; they must not form a shared fragment
+   cluster.
+4. Consolidate geometrically compatible fragments only when they were assigned
+   to the same slot.
+5. Rebuild physical observation tracks and refine direction evidence from the
+   slot-safe observations.
+6. Apply reflection filtering and boat-reference length stabilization.
+
+### 7.3 Pass B: phase and event analysis
 
 1. Build the direction-normalized waterline basis.
 2. Anchor or maintain active-blade endpoint identity.
@@ -620,6 +637,12 @@ creates fresh catch and exit eligibility.
   gate. This lets successive physical-track fragments feed the same event slot
   without allowing a rear or between-slot candidate to move forward when the
   selected centerline is temporarily absent.
+- Slot assignment happens on raw detections before the event-analysis fragment
+  merge. Only detections assigned to the same slot may be consolidated. This
+  prevents synchronized, nearly collinear paddles from adjacent crew members
+  being mistaken for fragments of one long paddle.
+- A raw detection outside every slot gate remains an isolated observation. It
+  cannot merge with another unassigned detection or contaminate a valid slot.
 - `ALL` leaves every eligible physical track in event analysis. If a requested
   slot is unavailable for a reference boat or frame, do not substitute another
   paddle. Angle and SPM metric slots remain independent of event-paddle

@@ -1366,18 +1366,42 @@ def _detect_paddle_events(
         scale_y,
         progress,
     )
-    evidence_by_reference: dict[str, list[float]] = {}
-    for observations in tracks.values():
-        if not observations:
-            continue
-        reference_id = _dominant_reference_id(observations)
-        evidence_by_reference.setdefault(reference_id, []).extend(
-            _paddle_rotation_deltas(observations)
+    directions = _event_paddle_directions(tracks)
+    slot_count = max(options.event_paddle_index or 0, options.target_slot_count)
+    if options.event_paddle_index is not None and slot_count > 1:
+        slot_anchors = _event_paddle_slot_anchors_by_reference(
+            tracks,
+            directions,
+            slot_count,
         )
-    directions = {
-        reference_id: _estimate_paddle_direction(deltas)
-        for reference_id, deltas in evidence_by_reference.items()
-    }
+        if slot_anchors:
+            # The initial pass exists only to estimate travel direction and
+            # stable boat-relative slot anchors. Rebuild observations from raw
+            # masks so fragment merging cannot cross those paddle slots.
+            tracks = _track_paddle_observations(
+                frames,
+                options,
+                width,
+                height,
+                scale_x,
+                scale_y,
+                progress,
+                slot_anchors_by_reference=slot_anchors,
+                travel_directions={
+                    reference_id: travel_direction
+                    for reference_id, (_, travel_direction, _) in directions.items()
+                    if travel_direction in {"left", "right"}
+                },
+            )
+            refined_directions = _event_paddle_directions(tracks)
+            directions.update(
+                {
+                    reference_id: direction
+                    for reference_id, direction in refined_directions.items()
+                    if direction[0] is not None
+                    and direction[1] in {"left", "right"}
+                }
+            )
     tracks = _stabilize_boat_reference_lengths(
         tracks,
         directions,
@@ -1546,6 +1570,9 @@ def _track_paddle_observations(
     scale_x: float,
     scale_y: float,
     progress: Callable[[str, float, str], None] | None = None,
+    *,
+    slot_anchors_by_reference: dict[str, list[float]] | None = None,
+    travel_directions: dict[str, str] | None = None,
 ) -> dict[str, list[_TimedPaddleObservation]]:
     states: list[_PaddleEventState] = []
     tracks: dict[str, list[_TimedPaddleObservation]] = {}
@@ -1576,7 +1603,12 @@ def _track_paddle_observations(
             elif record.get("prompt_id") in target_prompt_ids:
                 targets.append(centerline)
         observations = _consolidate_paddle_observations(
-            targets, references, width, height
+            targets,
+            references,
+            width,
+            height,
+            slot_anchors_by_reference=slot_anchors_by_reference,
+            travel_directions=travel_directions,
         )
         assignments = _assign_paddle_observations(
             observations, states, timestamp_ms, width, height
@@ -1610,6 +1642,54 @@ def _dominant_reference_id(observations: list[_TimedPaddleObservation]) -> str:
         reference_id = timed.observation.reference_id
         counts[reference_id] = counts.get(reference_id, 0) + 1
     return max(counts, key=counts.get) if counts else ""
+
+
+def _event_paddle_directions(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+) -> dict[str, tuple[str | None, str | None, float]]:
+    evidence_by_reference: dict[str, list[float]] = {}
+    for observations in tracks.values():
+        if not observations:
+            continue
+        reference_id = _dominant_reference_id(observations)
+        evidence_by_reference.setdefault(reference_id, []).extend(
+            _paddle_rotation_deltas(observations)
+        )
+    return {
+        reference_id: _estimate_paddle_direction(deltas)
+        for reference_id, deltas in evidence_by_reference.items()
+    }
+
+
+def _event_paddle_slot_anchors_by_reference(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+    directions: dict[str, tuple[str | None, str | None, float]],
+    slot_count: int,
+) -> dict[str, list[float]]:
+    observations_by_reference: dict[
+        str, dict[int, list[_TimedPaddleObservation]]
+    ] = {}
+    for observations in tracks.values():
+        for timed in observations:
+            reference_id = timed.observation.reference_id
+            observations_by_reference.setdefault(reference_id, {}).setdefault(
+                timed.timestamp_ms,
+                [],
+            ).append(timed)
+
+    anchors_by_reference: dict[str, list[float]] = {}
+    for reference_id, observations_by_timestamp in observations_by_reference.items():
+        _, travel_direction, _ = directions.get(reference_id, (None, None, 0.0))
+        if travel_direction not in {"left", "right"}:
+            continue
+        anchors = _event_paddle_slot_anchors(
+            observations_by_timestamp,
+            travel_direction,
+            slot_count,
+        )
+        if anchors:
+            anchors_by_reference[reference_id] = anchors
+    return anchors_by_reference
 
 
 def _select_event_paddle_tracks(
@@ -1889,25 +1969,38 @@ def _assign_event_paddle_slots(
             timed.observation,
             travel_direction,
         )
-        slot_index = min(
-            range(len(anchors)),
-            key=lambda index: abs(position - anchors[index]),
-        )
-        distance = abs(position - anchors[slot_index])
-        neighbor_distances = [
-            abs(anchors[slot_index] - anchors[neighbor_index])
-            for neighbor_index in (slot_index - 1, slot_index + 1)
-            if 0 <= neighbor_index < len(anchors)
-        ]
-        if neighbor_distances and distance > max(
-            PADDLE_EVENT_SLOT_MIN_GATE_PIXELS,
-            min(neighbor_distances) * PADDLE_EVENT_SLOT_MAX_SPACING_RATIO,
-        ):
+        slot_index = _gated_event_paddle_slot_index(position, anchors)
+        if slot_index is None:
             continue
+        distance = abs(position - anchors[slot_index])
         previous = assigned.get(slot_index)
         if previous is None or distance < previous[0]:
             assigned[slot_index] = (distance, timed)
     return {slot_index: item[1] for slot_index, item in assigned.items()}
+
+
+def _gated_event_paddle_slot_index(
+    position: float,
+    anchors: list[float],
+) -> int | None:
+    if not anchors or not math.isfinite(position):
+        return None
+    slot_index = min(
+        range(len(anchors)),
+        key=lambda index: abs(position - anchors[index]),
+    )
+    distance = abs(position - anchors[slot_index])
+    neighbor_distances = [
+        abs(anchors[slot_index] - anchors[neighbor_index])
+        for neighbor_index in (slot_index - 1, slot_index + 1)
+        if 0 <= neighbor_index < len(anchors)
+    ]
+    if neighbor_distances and distance > max(
+        PADDLE_EVENT_SLOT_MIN_GATE_PIXELS,
+        min(neighbor_distances) * PADDLE_EVENT_SLOT_MAX_SPACING_RATIO,
+    ):
+        return None
+    return slot_index
 
 
 def _observation_forward_position(
@@ -2010,14 +2103,38 @@ def _consolidate_paddle_observations(
     references: list[Centerline],
     width: int,
     height: int,
+    *,
+    slot_anchors_by_reference: dict[str, list[float]] | None = None,
+    travel_directions: dict[str, str] | None = None,
 ) -> list[_PaddleObservation]:
     if not references:
         return []
-    grouped: dict[str, tuple[Centerline, list[list[Centerline]]]] = {}
+    grouped: dict[
+        tuple[str, int | str | None],
+        tuple[Centerline, list[list[Centerline]]],
+    ] = {}
     for target in sorted(targets, key=lambda item: _line_length(item.line), reverse=True):
         reference = _nearest_centerline(target, references)
         reference_id = _record_track_id(reference.record)
-        entry = grouped.setdefault(reference_id, (reference, []))
+        group_slot: int | str | None = None
+        anchors = (slot_anchors_by_reference or {}).get(reference_id)
+        travel_direction = (travel_directions or {}).get(reference_id)
+        if anchors and travel_direction in {"left", "right"}:
+            raw_observation = _PaddleObservation(
+                source_ids=(_record_track_id(target.record),),
+                reference_id=reference_id,
+                line=target.line,
+                reference_line=reference.line,
+            )
+            group_slot = _gated_event_paddle_slot_index(
+                _observation_forward_position(raw_observation, travel_direction),
+                anchors,
+            )
+            if group_slot is None:
+                # Keep every unassigned raw detection isolated so neighboring
+                # paddles cannot merge outside the slot gates.
+                group_slot = f"unassigned:{_record_track_id(target.record)}"
+        entry = grouped.setdefault((reference_id, group_slot), (reference, []))
         clusters = entry[1]
         cluster = next(
             (
@@ -2036,11 +2153,10 @@ def _consolidate_paddle_observations(
             clusters.append([target])
         else:
             cluster.append(target)
-    observations: list[_PaddleObservation] = []
-    for reference_id, (reference, clusters) in grouped.items():
-        reference_observations: list[_PaddleObservation] = []
+    observations_by_reference: dict[str, list[_PaddleObservation]] = {}
+    for (reference_id, _group_slot), (reference, clusters) in grouped.items():
         for cluster in clusters:
-            reference_observations.append(
+            observations_by_reference.setdefault(reference_id, []).append(
                 _PaddleObservation(
                     source_ids=tuple(
                         sorted({_record_track_id(item.record) for item in cluster})
@@ -2050,6 +2166,8 @@ def _consolidate_paddle_observations(
                     reference_line=reference.line,
                 )
             )
+    observations: list[_PaddleObservation] = []
+    for reference_observations in observations_by_reference.values():
         observations.extend(
             _filter_reflected_paddle_observations(
                 reference_observations,

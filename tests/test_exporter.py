@@ -1397,6 +1397,45 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(len(observations), 1)
         self.assertEqual(len(events), 1)
 
+    def test_fragment_consolidation_does_not_merge_across_paddle_slots(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "track_id": "boat:track:1"},
+            line=(0.0, 100.0, 400.0, 100.0),
+            color=(255, 255, 255, 255),
+        )
+        rear = Centerline(
+            record={"prompt_id": "paddle", "track_id": "paddle:rear"},
+            line=(20.0, -2.0, 190.0, 18.0),
+            color=(255, 255, 255, 255),
+        )
+        front = Centerline(
+            record={"prompt_id": "paddle", "track_id": "paddle:front"},
+            line=(210.0, 20.0, 380.0, 40.0),
+            color=(255, 255, 255, 255),
+        )
+
+        legacy = _consolidate_paddle_observations(
+            [rear, front],
+            [reference],
+            400,
+            200,
+        )
+        slot_aware = _consolidate_paddle_observations(
+            [rear, front],
+            [reference],
+            400,
+            200,
+            slot_anchors_by_reference={"boat:track:1": [95.0, -95.0]},
+            travel_directions={"boat:track:1": "right"},
+        )
+
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(len(slot_aware), 2)
+        self.assertEqual(
+            {observation.source_ids for observation in slot_aware},
+            {("paddle:front",), ("paddle:rear",)},
+        )
+
     def test_offset_parallel_exit_lines_from_screenshot_are_consolidated(self) -> None:
         reference = Centerline(
             record={"prompt_id": "boat", "track_id": "boat:track:1"},
