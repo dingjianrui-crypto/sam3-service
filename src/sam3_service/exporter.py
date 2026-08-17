@@ -73,7 +73,9 @@ class ExportOptions:
     include_catch: bool = False
     include_exit: bool = False
     include_event_paddle_length: bool = False
-    event_hold_seconds: float = 1.5
+    include_event_freeze: bool = False
+    event_hold_seconds: float = 1.2
+    include_event_metrics: bool = False
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     reference_line_mode: str | None = None
@@ -135,6 +137,14 @@ class PaddleEvent:
 class FreezeMoment:
     frame_index: int
     events: tuple[PaddleEvent, ...]
+
+
+@dataclass(frozen=True)
+class EventMetricColumn:
+    """One selected-paddle event and the aligned values for every metric slot."""
+
+    event: PaddleEvent
+    values: tuple[int | None, ...]
 
 
 @dataclass(frozen=True)
@@ -371,9 +381,34 @@ def export_centerline_video(
         frame_count,
         max_events_per_moment=export_options.target_slot_count,
     )
+    result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
+    event_metric_columns: tuple[EventMetricColumn, ...] = ()
+    if (
+        export_options.include_event_metrics
+        and export_options.event_paddle_index is not None
+        and export_options.target_slot_count > 0
+    ):
+        event_metric_columns = _build_event_metric_columns(
+            events,
+            frames,
+            frames_by_index,
+            frame_timestamps,
+            colors,
+            export_options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+            fps,
+            result_tolerance_ms=result_tolerance_ms,
+        )
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
-    freeze_frame_count = max(1, round(export_options.event_hold_seconds * fps))
-    has_audio = bool(freeze_moments) and _has_audio_stream(video_path)
+    freeze_frame_count = _event_freeze_frame_count(export_options, fps)
+    has_audio = (
+        bool(freeze_moments)
+        and freeze_frame_count > 0
+        and _has_audio_stream(video_path)
+    )
     filter_parts: list[str] = []
     if has_audio:
         filter_parts.append(
@@ -423,7 +458,6 @@ def export_centerline_video(
     command.extend(["-movflags", "+faststart", str(temporary_output)])
 
     _report_progress(progress, "rendering", 15, "Rendering overlay frames")
-    result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     spm_estimator = SpmEstimator()
     output_frame_index = 0
     decoded_frame_count = 0
@@ -461,7 +495,11 @@ def export_centerline_video(
             # Event geometry is backdated to the actual waterline crossing and can
             # differ from the regular geometry stored for this source frame. Keep
             # a clean copy so a held event frame does not show both line sets.
-            event_image = bytearray(image) if freeze_moment is not None else None
+            event_image = (
+                bytearray(image)
+                if freeze_moment is not None and export_options.include_event_metrics
+                else None
+            )
             _draw_frame_overlay(
                 image,
                 width,
@@ -473,27 +511,47 @@ def export_centerline_video(
                 spm_estimator=spm_estimator,
                 paddle_events=(),
             )
-            if freeze_moment is not None:
-                assert event_image is not None
-                _draw_event_companion_angles(
-                    event_image,
+            if event_metric_columns:
+                _draw_event_metric_table(
+                    image,
                     width,
                     height,
-                    scaled_records,
-                    colors,
+                    event_metric_columns,
+                    timestamp_ms,
                     export_options,
-                    freeze_moment.events,
                 )
-                for event in freeze_moment.events:
-                    _draw_paddle_event_label(
-                        event_image, width, height, event, export_options
-                    )
+            if freeze_moment is not None:
+                if export_options.include_event_metrics:
+                    assert event_image is not None
+                    for event in freeze_moment.events:
+                        _draw_paddle_event_label(
+                            event_image, width, height, event, export_options
+                        )
+                    if event_metric_columns:
+                        _draw_event_metric_table(
+                            event_image,
+                            width,
+                            height,
+                            event_metric_columns,
+                            timestamp_ms,
+                            export_options,
+                        )
+                else:
+                    event_image = image
+                assert event_image is not None
                 for _ in range(freeze_frame_count):
                     encoder.stdin.write(event_image)
                     output_frame_index += 1
-            encoder.stdin.write(image)
+            output_image = (
+                event_image
+                if freeze_moment is not None
+                and freeze_frame_count == 0
+                and export_options.include_event_metrics
+                else image
+            )
+            encoder.stdin.write(output_image)
             output_frame_index += 1
-            final_image = image
+            final_image = output_image
             if frame_index == frame_count - 1 or frame_index % max(1, frame_count // 100) == 0:
                 percent = 15 + 75 * (frame_index + 1) / frame_count
                 _report_progress(
@@ -675,6 +733,12 @@ def _freeze_moments(
     )
 
 
+def _event_freeze_frame_count(options: ExportOptions, fps: float) -> int:
+    if not options.include_event_freeze:
+        return 0
+    return max(1, round(options.event_hold_seconds * fps))
+
+
 def _freeze_audio_filter(
     moments: tuple[FreezeMoment, ...],
     freeze_frames: int,
@@ -829,7 +893,11 @@ def _normalize_export_options(
     font_size = requested.angle_label_font_size or default_font_size
     metric_center_offset_percent = requested.metric_center_offset_percent
     if metric_center_offset_percent is None:
-        metric_center_offset_percent = _default_metric_center_offset_percent(width, height)
+        metric_center_offset_percent = (
+            LANDSCAPE_METRIC_CENTER_OFFSET_PERCENT
+            if requested.include_event_metrics
+            else _default_metric_center_offset_percent(width, height)
+        )
     manifest_line_mode = manifest.get("settings", {}).get(
         "boat_reference_line", "centerline"
     )
@@ -843,12 +911,14 @@ def _normalize_export_options(
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
-        include_angles=bool(requested.include_angles),
+        include_angles=bool(requested.include_angles and not requested.include_event_metrics),
         include_spm=bool(requested.include_spm),
         include_catch=bool(requested.include_catch),
         include_exit=bool(requested.include_exit),
         include_event_paddle_length=bool(requested.include_event_paddle_length),
+        include_event_freeze=bool(requested.include_event_freeze),
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
+        include_event_metrics=bool(requested.include_event_metrics),
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         reference_line_mode=reference_line_mode,
@@ -1144,6 +1214,379 @@ def _event_companion_degree_slots(
             color=_paddle_event_angle_color(event),
         )
     return slots
+
+
+def _build_event_metric_columns(
+    events: list[PaddleEvent],
+    frames: dict[int, list[dict[str, Any]]],
+    frames_by_index: dict[int, list[dict[str, Any]]] | None,
+    frame_timestamps: list[int],
+    colors: dict[str, Color],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+    fps: float,
+    result_tolerance_ms: float,
+) -> tuple[EventMetricColumn, ...]:
+    """Precompute the fixed event-table columns before rendering any frames."""
+    columns: list[EventMetricColumn] = []
+    for event in sorted(events, key=lambda item: item.timestamp_ms):
+        frame_index = max(0, round(event.timestamp_ms * fps / 1000))
+        records = (
+            frames_by_index.get(frame_index, [])
+            if frames_by_index is not None
+            else _records_for_timestamp(
+                frames,
+                frame_timestamps,
+                event.timestamp_ms,
+                result_tolerance_ms,
+            )
+        )
+        scaled_records = [_scale_record(record, scale_x, scale_y) for record in records]
+        scaled_records = [
+            record
+            for record in scaled_records
+            if _record_selected_for_export(
+                record,
+                options,
+                width,
+                height,
+                event.timestamp_ms,
+            )
+        ]
+        centerlines = _centerlines_for_records(
+            scaled_records,
+            colors,
+            options,
+            width,
+            height,
+        )
+        columns.append(
+            EventMetricColumn(
+                event=event,
+                values=_event_metric_values(centerlines, options, event),
+            )
+        )
+    return tuple(columns)
+
+
+def _centerlines_for_records(
+    records: list[dict[str, Any]],
+    colors: dict[str, Color],
+    options: ExportOptions,
+    width: int,
+    height: int,
+) -> list[Centerline]:
+    centerlines: list[Centerline] = []
+    for record in records:
+        use_waterline = (
+            options.reference_line_mode == "waterline"
+            and record.get("prompt_id") == options.reference_prompt_id
+        )
+        line = _record_line(record, width, height, use_waterline=use_waterline)
+        if line is None:
+            continue
+        centerlines.append(
+            Centerline(
+                record=record,
+                line=line,
+                color=colors.get(record.get("prompt_id", ""), (53, 194, 255, 255)),
+            )
+        )
+    return centerlines
+
+
+def _event_metric_values(
+    centerlines: list[Centerline],
+    options: ExportOptions,
+    event: PaddleEvent,
+) -> tuple[int | None, ...]:
+    """Return the selected raw angle and signed companion differences."""
+    slot_count = max(1, options.target_slot_count)
+    selected_index = (options.event_paddle_index or 1) - 1
+    selected_angle = _event_display_angle(event)
+    selected_degree = (
+        round(selected_angle) % 360 if selected_angle is not None else None
+    )
+    labels = _degree_labels(centerlines, options)
+    if event.travel_direction == "right":
+        labels.reverse()
+    slots = _degree_slots(labels, replace(options, target_slot_count=slot_count))
+    values: list[int | None] = []
+    for index in range(slot_count):
+        if index == selected_index:
+            values.append(selected_degree)
+            continue
+        degree = slots[index].degree if index < len(slots) else None
+        if degree is None or selected_degree is None:
+            values.append(None)
+            continue
+        aligned_degree = _aligned_companion_degree(degree, selected_degree)
+        values.append(_signed_degree_difference(aligned_degree, selected_degree))
+    return tuple(values)
+
+
+def _aligned_companion_degree(acute_degree: int, reference_degree: int) -> int:
+    """Choose the directed equivalent of an acute metric nearest the event angle."""
+    candidates = {
+        acute_degree % 360,
+        (180 - acute_degree) % 360,
+        (180 + acute_degree) % 360,
+        (360 - acute_degree) % 360,
+    }
+    return min(
+        candidates,
+        key=lambda degree: abs(_signed_degree_difference(degree, reference_degree)),
+    )
+
+
+def _signed_degree_difference(degree: int, reference_degree: int) -> int:
+    difference = (degree - reference_degree + 180) % 360 - 180
+    return int(difference)
+
+
+def _event_metric_text(
+    column: EventMetricColumn,
+    row_index: int,
+    selected_index: int,
+) -> str:
+    value = column.values[row_index] if row_index < len(column.values) else None
+    if value is None:
+        return "--"
+    if row_index == selected_index:
+        return f"{value}°"
+    return f"{value:+d}°" if value else "0°"
+
+
+def _draw_event_metric_table(
+    image: bytearray,
+    width: int,
+    height: int,
+    columns: tuple[EventMetricColumn, ...],
+    timestamp_ms: int,
+    options: ExportOptions,
+) -> None:
+    if not columns or options.event_paddle_index is None:
+        return
+    visible_count = sum(column.event.timestamp_ms <= timestamp_ms for column in columns)
+    if visible_count <= 0:
+        return
+    if _draw_event_metric_table_with_pillow(
+        image,
+        width,
+        height,
+        columns,
+        visible_count,
+        options,
+    ):
+        return
+    _draw_event_metric_table_bitmap(
+        image,
+        width,
+        height,
+        columns,
+        visible_count,
+        options,
+    )
+
+
+def _draw_event_metric_table_with_pillow(
+    image: bytearray,
+    width: int,
+    height: int,
+    columns: tuple[EventMetricColumn, ...],
+    visible_count: int,
+    options: ExportOptions,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+    font_path = _find_export_font()
+    if font_path is None:
+        return False
+
+    row_count = max(1, options.target_slot_count)
+    selected_index = options.event_paddle_index - 1
+    max_font_size = int(options.angle_label_font_size or max(18, round(height * 0.045)))
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    layout: tuple[Any, int, int, int, int, int] | None = None
+    for font_size in range(max_font_size, 5, -1):
+        try:
+            font = ImageFont.truetype(str(font_path), font_size)
+        except OSError:
+            return False
+        stroke_width = max(1, round(font_size * 0.05))
+        label_width = max(
+            draw.textbbox((0, 0), f"P{row_count}", font=font, stroke_width=stroke_width)[2],
+            draw.textbbox((0, 0), "P1", font=font, stroke_width=stroke_width)[2],
+        )
+        cell_bbox = draw.textbbox(
+            (0, 0), "-000°", font=font, stroke_width=stroke_width
+        )
+        cell_width = cell_bbox[2] - cell_bbox[0] + max(4, round(font_size * 0.35))
+        row_height = cell_bbox[3] - cell_bbox[1] + max(3, round(font_size * 0.3))
+        label_gap = max(5, round(font_size * 0.45))
+        column_gap = max(2, round(font_size * 0.15))
+        table_width = (
+            label_width
+            + label_gap
+            + len(columns) * cell_width
+            + max(0, len(columns) - 1) * column_gap
+        )
+        table_height = row_count * row_height
+        if table_width <= width * 0.96 and table_height <= height * 0.45:
+            layout = (
+                font,
+                font_size,
+                stroke_width,
+                label_width,
+                cell_width,
+                row_height,
+            )
+            break
+    if layout is None:
+        return False
+    font, font_size, stroke_width, label_width, cell_width, row_height = layout
+    label_gap = max(5, round(font_size * 0.45))
+    column_gap = max(2, round(font_size * 0.15))
+    table_width = (
+        label_width
+        + label_gap
+        + len(columns) * cell_width
+        + max(0, len(columns) - 1) * column_gap
+    )
+    table_height = row_count * row_height
+    left = round((width - table_width) / 2)
+    top = _metric_label_top(
+        width,
+        height,
+        table_height,
+        font_size,
+        options.angle_label_position,
+        options.metric_center_offset_percent,
+    )
+    top = max(0, min(height - table_height, top))
+    for row_index in range(row_count):
+        row_top = top + row_index * row_height
+        row_label = f"P{row_index + 1}"
+        label_bbox = draw.textbbox(
+            (0, 0), row_label, font=font, stroke_width=stroke_width
+        )
+        draw.text(
+            (
+                left + label_width - (label_bbox[2] - label_bbox[0]) - label_bbox[0],
+                row_top + (row_height - (label_bbox[3] - label_bbox[1])) / 2 - label_bbox[1],
+            ),
+            row_label,
+            font=font,
+            fill=(235, 245, 255, 255),
+            stroke_width=stroke_width,
+            stroke_fill=(2, 5, 9, 255),
+        )
+        cell_left = left + label_width + label_gap
+        for column_index, column in enumerate(columns):
+            if column_index >= visible_count:
+                break
+            text = _event_metric_text(column, row_index, selected_index)
+            bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+            actual_width = bbox[2] - bbox[0]
+            actual_height = bbox[3] - bbox[1]
+            x = cell_left + column_index * (cell_width + column_gap)
+            draw.text(
+                (
+                    x + (cell_width - actual_width) / 2 - bbox[0],
+                    row_top + (row_height - actual_height) / 2 - bbox[1],
+                ),
+                text,
+                font=font,
+                fill=_paddle_event_angle_color(column.event),
+                stroke_width=stroke_width,
+                stroke_fill=(2, 5, 9, 255),
+            )
+    _blend_overlay(image, width, overlay.tobytes())
+    return True
+
+
+def _draw_event_metric_table_bitmap(
+    image: bytearray,
+    width: int,
+    height: int,
+    columns: tuple[EventMetricColumn, ...],
+    visible_count: int,
+    options: ExportOptions,
+) -> None:
+    row_count = max(1, options.target_slot_count)
+    selected_index = (options.event_paddle_index or 1) - 1
+    max_scale = max(1, round((options.angle_label_font_size or 32) / 7))
+    scale = max_scale
+    while scale > 1:
+        cell_width = 6 * 5 * scale
+        label_width = 8 * scale
+        table_width = label_width + len(columns) * cell_width
+        if table_width <= width * 0.96 and row_count * 9 * scale <= height * 0.45:
+            break
+        scale -= 1
+    cell_width = 6 * 5 * scale
+    label_width = 8 * scale
+    row_height = 9 * scale
+    table_width = label_width + len(columns) * cell_width
+    table_height = row_count * row_height
+    left = round((width - table_width) / 2)
+    top = _metric_label_top(
+        width,
+        height,
+        table_height,
+        scale * 7,
+        options.angle_label_position,
+        options.metric_center_offset_percent,
+    )
+    top = max(0, min(height - table_height, top))
+    for row_index in range(row_count):
+        _draw_bitmap_text(
+            image,
+            width,
+            height,
+            left,
+            top + row_index * row_height,
+            f"P{row_index + 1}",
+            scale,
+            (235, 245, 255, 255),
+        )
+        for column_index, column in enumerate(columns[:visible_count]):
+            text = _event_metric_text(column, row_index, selected_index)
+            _draw_bitmap_text(
+                image,
+                width,
+                height,
+                left + label_width + column_index * cell_width,
+                top + row_index * row_height,
+                text,
+                scale,
+                _paddle_event_angle_color(column.event),
+            )
+
+
+def _draw_bitmap_text(
+    image: bytearray,
+    width: int,
+    height: int,
+    left: int,
+    top: int,
+    text: str,
+    scale: int,
+    color: Color,
+) -> None:
+    gap = max(1, scale // 2)
+    x = left
+    for character in text:
+        glyph = _glyph(character)
+        _draw_bitmap(image, width, height, x + scale, top + scale, glyph, scale, (2, 5, 9, 255))
+        _draw_bitmap(image, width, height, x, top, glyph, scale, color)
+        x += len(glyph[0]) * scale + gap
 
 
 def _record_line(
@@ -4321,6 +4764,7 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "v": ("00000", "10001", "10001", "10001", "01010", "01010", "00100"),
     "x": ("00000", "10001", "01010", "00100", "01010", "10001", "00000"),
     ":": ("000", "010", "010", "000", "010", "010", "000"),
+    "+": ("000", "010", "010", "111", "010", "010", "000"),
     "-": ("000", "000", "000", "111", "000", "000", "000"),
     "°": ("01100", "10010", "10010", "01100", "00000", "00000", "00000"),
     " ": ("000", "000", "000", "000", "000", "000", "000"),

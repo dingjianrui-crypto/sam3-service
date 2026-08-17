@@ -43,8 +43,8 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 const OVERLAY_FONT_FAMILY =
   'Arial, Helvetica, system-ui, sans-serif';
 
-function defaultMetricCenterOffsetPercent(manifest: ResultManifest) {
-  return manifest.video.height > manifest.video.width ? 16 : 5.5;
+function defaultMetricCenterOffsetPercent() {
+  return 5.5;
 }
 
 function defaultOverlayModes(manifest: ResultManifest): Record<string, OverlayMode> {
@@ -91,7 +91,7 @@ export function Player({ manifest }: Props) {
   const [videoDurationMs, setVideoDurationMs] = useState(manifest.video.duration_ms);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
   const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
-    defaultMetricCenterOffsetPercent(manifest)
+    defaultMetricCenterOffsetPercent()
   );
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportMetricCount, setExportMetricCount] = useState(1);
@@ -104,7 +104,9 @@ export function Player({ manifest }: Props) {
   const [exportExitEnabled, setExportExitEnabled] = useState(false);
   const [exportEventPaddleLengthEnabled, setExportEventPaddleLengthEnabled] =
     useState(false);
-  const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.5);
+  const [exportEventFreezeEnabled, setExportEventFreezeEnabled] = useState(false);
+  const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.2);
+  const [exportEventMetricsEnabled, setExportEventMetricsEnabled] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
@@ -112,10 +114,6 @@ export function Player({ manifest }: Props) {
     new Set(manifest.prompts.map((prompt) => prompt.id))
   );
   const [status, setStatus] = useState("Loading result…");
-
-  useEffect(() => {
-    setExportMetricCenterOffsetPercent(defaultMetricCenterOffsetPercent(manifest));
-  }, [manifest.job_id, manifest.video.height, manifest.video.width]);
 
   const colorByPrompt = useMemo(
     () => new Map(manifest.prompts.map((prompt) => [prompt.id, prompt.color])),
@@ -465,7 +463,9 @@ export function Player({ manifest }: Props) {
           include_catch: exportCatchEnabled,
           include_exit: exportExitEnabled,
           include_event_paddle_length: exportEventPaddleLengthEnabled,
+          include_event_freeze: exportEventFreezeEnabled,
           event_hold_seconds: exportEventHoldSeconds,
+          include_event_metrics: exportEventMetricsEnabled,
           metric_count: exportMetricCount,
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
@@ -493,8 +493,10 @@ export function Player({ manifest }: Props) {
     exportFontSize,
     exportAnglesEnabled,
     exportCatchEnabled,
+    exportEventFreezeEnabled,
     exportEventPaddleLengthEnabled,
     exportEventHoldSeconds,
+    exportEventMetricsEnabled,
     exportEventPaddleIndex,
     exportExitEnabled,
     exportLabelPosition,
@@ -717,7 +719,10 @@ export function Player({ manifest }: Props) {
               <input
                 type="checkbox"
                 checked={exportEventPaddleLengthEnabled}
-                disabled={!exportCatchEnabled && !exportExitEnabled}
+                disabled={
+                  (!exportCatchEnabled && !exportExitEnabled) ||
+                  !exportEventMetricsEnabled
+                }
                 onChange={(event) =>
                   setExportEventPaddleLengthEnabled(event.target.checked)
                 }
@@ -729,11 +734,12 @@ export function Player({ manifest }: Props) {
               <select
                 value={exportEventPaddleIndex}
                 disabled={!exportCatchEnabled && !exportExitEnabled}
-                onChange={(event) =>
-                  setExportEventPaddleIndex(
-                    event.target.value === "all" ? "all" : Number(event.target.value)
-                  )
-                }
+                onChange={(event) => {
+                  const nextValue =
+                    event.target.value === "all" ? "all" : Number(event.target.value);
+                  setExportEventPaddleIndex(nextValue);
+                  if (nextValue === "all") setExportEventMetricsEnabled(false);
+                }}
               >
                 <option value="all">ALL</option>
                 {Array.from({ length: exportMetricCount }, (_, index) => index + 1).map(
@@ -745,30 +751,77 @@ export function Player({ manifest }: Props) {
                 )}
               </select>
             </label>
-            <label className="event-hold-control">
-              Event freeze
+            <label className="checkbox">
               <input
-                type="number"
-                min="0.1"
-                max="10"
-                step="0.1"
-                value={exportEventHoldSeconds}
+                type="checkbox"
+                checked={exportEventFreezeEnabled}
+                disabled={!exportCatchEnabled && !exportExitEnabled}
+                onChange={(event) => setExportEventFreezeEnabled(event.target.checked)}
+              />
+              Event freeze
+            </label>
+            {exportEventFreezeEnabled && (
+              <label className="event-hold-control">
+                Freeze time
+                <input
+                  type="number"
+                  min="0.1"
+                  max="10"
+                  step="0.1"
+                  value={exportEventHoldSeconds}
+                  disabled={!exportCatchEnabled && !exportExitEnabled}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setExportEventHoldSeconds(
+                      Number.isFinite(value) ? clamp(value, 0.1, 10) : 1.2
+                    );
+                  }}
+                />
+                seconds
+              </label>
+            )}
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportEventMetricsEnabled}
                 disabled={!exportCatchEnabled && !exportExitEnabled}
                 onChange={(event) => {
-                  const value = Number(event.target.value);
-                  setExportEventHoldSeconds(
-                    Number.isFinite(value) ? clamp(value, 0.1, 10) : 1.5
-                  );
+                  const enabled = event.target.checked;
+                  setExportEventMetricsEnabled(enabled);
+                  if (enabled && exportEventPaddleIndex === "all") {
+                    setExportEventPaddleIndex(1);
+                  }
+                  if (enabled) setExportAnglesEnabled(false);
+                  if (!enabled) setExportEventPaddleLengthEnabled(false);
                 }}
               />
-              seconds
+              Event metrics
             </label>
+            {exportEventMetricsEnabled && (
+              <label className="event-metric-offset-control">
+                Center offset %
+                <input
+                  type="number"
+                  min="0"
+                  max="45"
+                  step="0.5"
+                  value={exportMetricCenterOffsetPercent}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setExportMetricCenterOffsetPercent(
+                      Number.isFinite(value) ? clamp(value, 0, 45) : 5.5
+                    );
+                  }}
+                />
+              </label>
+            )}
           </div>
           <div className="angle-controls">
             <label className="checkbox">
               <input
                 type="checkbox"
                 checked={exportAnglesEnabled}
+                disabled={exportEventMetricsEnabled}
                 onChange={(event) => setExportAnglesEnabled(event.target.checked)}
               />
               Include angles
@@ -864,22 +917,6 @@ export function Player({ manifest }: Props) {
                   setExportMetricCount(nextMetricCount);
                   setExportEventPaddleIndex((current) =>
                     current === "all" || current <= nextMetricCount ? current : "all"
-                  );
-                }}
-              />
-            </label>
-            <label>
-              Center offset %
-              <input
-                type="number"
-                min="0"
-                max="45"
-                step="0.5"
-                value={exportMetricCenterOffsetPercent}
-                onChange={(event) => {
-                  const value = Number(event.target.value);
-                  setExportMetricCenterOffsetPercent(
-                    Number.isFinite(value) ? clamp(value, 0, 45) : 0
                   );
                 }}
               />

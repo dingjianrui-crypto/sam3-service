@@ -730,11 +730,22 @@ cycle model described here. Do not retain a two-phase opposite-blade exception.
 
 ### 18.4 Compatibility
 
-- Existing API query parameters retain their behavior. The optional
-  `include_event_paddle_length` parameter defaults to `false` and changes only
-  event-label rendering.
-- `include_catch`, `include_exit`, and `event_hold_seconds` keep their existing
-  meaning.
+- The optional `include_event_paddle_length` parameter defaults to `false` and
+  changes only event-label rendering.
+- Event pausing is independently enabled by `include_event_freeze`. Its
+  duration defaults to `1.2 s` and is constrained to `0.1 s` through `10 s`.
+  When disabled, event frames replace their ordinary source frame and no video
+  or audio time is inserted.
+- `include_event_metrics` independently enables a cumulative, horizontally
+  centered event table. Its center offset defaults to `5.5%`.
+- The selected event-paddle row contains its displayed catch/exit angles. Each
+  other metric row contains a signed difference from that selected angle, with
+  `--` preserving a missing sample. Catch columns are red, exit columns are
+  green, and the font shrinks to reserve one fixed column per detected event.
+  This table replaces the live raw-angle row to prevent overlapping metrics.
+  Before subtraction, each companion's acute measurement is mapped to the
+  directed equivalent nearest the selected event angle (for example, `31°`
+  aligns to `149°` when the selected event is `149°`).
 - The event analysis pass remains offline and deterministic for a fixed result
   manifest.
 - Existing export selection, metric count, audio freeze, and rendering logic

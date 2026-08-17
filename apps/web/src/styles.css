@@ -880,7 +880,8 @@ h2 {
   align-items: center;
 }
 
-.event-hold-control input {
+.event-hold-control input,
+.event-metric-offset-control input {
   width: 64px;
   box-sizing: border-box;
 }
@@ -990,7 +991,7 @@ h2 {
 
 .export-controls {
   display: grid;
-  grid-template-columns: auto repeat(4, minmax(110px, 1fr)) auto;
+  grid-template-columns: auto repeat(3, minmax(110px, 1fr)) auto;
   gap: 10px;
   align-items: end;
 }

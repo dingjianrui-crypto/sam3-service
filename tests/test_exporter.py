@@ -11,6 +11,7 @@ from unittest.mock import patch
 from sam3_service.exporter import (
     Centerline,
     DegreeLabel,
+    EventMetricColumn,
     ExportOptions,
     PaddleEvent,
     SpmEstimator,
@@ -18,6 +19,7 @@ from sam3_service.exporter import (
     _PaddleEventState,
     _TimedPaddleObservation,
     _advance_directed_paddle_phase,
+    _aligned_companion_degree,
     _blade_transition_on_waterline,
     _blade_waterline_overlaps,
     _catch_phase_allowed,
@@ -33,6 +35,9 @@ from sam3_service.exporter import (
     _event_phase_allowed,
     _event_label_text,
     _event_companion_degree_slots,
+    _event_freeze_frame_count,
+    _event_metric_text,
+    _event_metric_values,
     _event_boat_reference_lines,
     _freeze_audio_filter,
     _freeze_moments,
@@ -44,6 +49,7 @@ from sam3_service.exporter import (
     _kalman_stabilized_boat_reference_lines,
     _metric_label_top,
     _maximum_target_count_in_selection,
+    _normalize_export_options,
     _observation_forward_position,
     _paddle_water_depth_ratio,
     _paddle_rotation_deltas,
@@ -1649,6 +1655,39 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("atrim=start=1.000000000:end=1.033333333", audio_filter)
         self.assertIn("volume=0", audio_filter)
 
+    def test_event_freeze_and_metrics_are_opt_in_with_new_defaults(self) -> None:
+        options = ExportOptions()
+
+        self.assertFalse(options.include_event_freeze)
+        self.assertEqual(options.event_hold_seconds, 1.2)
+        self.assertFalse(options.include_event_metrics)
+        self.assertEqual(_event_freeze_frame_count(options, 30), 0)
+        self.assertEqual(
+            _event_freeze_frame_count(
+                replace(options, include_event_freeze=True),
+                30,
+            ),
+            36,
+        )
+
+    def test_event_metrics_use_fixed_default_offset_and_replace_live_angles(self) -> None:
+        options = _normalize_export_options(
+            ExportOptions(include_angles=True, include_event_metrics=True),
+            {
+                "prompts": [
+                    {"id": "boat", "text": "boat"},
+                    {"id": "paddle", "text": "paddle"},
+                ],
+                "tracks": [],
+                "settings": {},
+            },
+            1080,
+            1920,
+        )
+
+        self.assertFalse(options.include_angles)
+        self.assertEqual(options.metric_center_offset_percent, 5.5)
+
     def test_event_angle_uses_first_crossing_geometry(self) -> None:
         state = _PaddleEventState(immersed=False)
         paddle = (50.0, 0.0, 50.0, 80.0)
@@ -2191,6 +2230,49 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([slot.degree for slot in leftward], [31, 45, 60])
         self.assertIsNone(rightward[1].line)
         self.assertIsNone(leftward[1].line)
+
+    def test_event_metric_rows_use_selected_raw_angle_and_signed_differences(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "instance_id": "boat:1"},
+            line=(0.0, 50.0, 100.0, 50.0),
+            color=(255, 181, 71, 255),
+        )
+        targets = [
+            Centerline(
+                record={"prompt_id": "paddle", "instance_id": f"paddle:{index}"},
+                line=(center_x - 10.0, 30.0, center_x + 10.0, 30.0 + rise),
+                color=(53, 194, 255, 255),
+            )
+            for index, (center_x, rise) in enumerate(
+                [(20.0, 12.0), (50.0, 20.0), (80.0, 35.0)],
+                start=1,
+            )
+        ]
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+            target_slot_count=3,
+            event_paddle_index=2,
+        )
+        event = PaddleEvent(
+            kind="catch",
+            timestamp_ms=1000,
+            instance_id="slot:2",
+            line=targets[1].line,
+            confidence=1.0,
+            phase_angle=45,
+            travel_direction="right",
+        )
+
+        values = _event_metric_values([reference, *targets], options, event)
+        column = EventMetricColumn(event=event, values=values)
+
+        self.assertEqual(values, (15, 45, -14))
+        self.assertEqual(
+            [_event_metric_text(column, index, 1) for index in range(3)],
+            ["+15°", "45°", "-14°"],
+        )
+        self.assertEqual(_aligned_companion_degree(31, 149), 149)
 
     def test_record_line_scales_rle_centerline_coordinates_to_output_size(self) -> None:
         line = _record_line(

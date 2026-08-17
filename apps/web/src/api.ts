@@ -84,7 +84,9 @@ export type ExportVideoOptions = {
   include_catch: boolean;
   include_exit: boolean;
   include_event_paddle_length: boolean;
+  include_event_freeze: boolean;
   event_hold_seconds: number;
+  include_event_metrics: boolean;
   metric_count: number;
   event_paddle_index?: number;
   metric_center_offset_percent: number;
@@ -238,7 +240,9 @@ export async function exportJobVideo(
     include_catch: String(options.include_catch),
     include_exit: String(options.include_exit),
     include_event_paddle_length: String(options.include_event_paddle_length),
+    include_event_freeze: String(options.include_event_freeze),
     event_hold_seconds: String(options.event_hold_seconds),
+    include_event_metrics: String(options.include_event_metrics),
     metric_count: String(options.metric_count),
     metric_center_offset_percent: String(options.metric_center_offset_percent)
   });
