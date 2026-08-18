@@ -66,6 +66,11 @@ PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
 BODY_LEFT_COLOR = (52, 211, 153, 235)
 BODY_RIGHT_COLOR = (244, 114, 182, 235)
 BODY_JOINT_COLOR = (255, 255, 255, 245)
+BODY_LEFT_ELBOW_COLOR = (52, 211, 153, 255)
+BODY_RIGHT_ELBOW_COLOR = (244, 114, 182, 255)
+BODY_TORSO_COLOR = (255, 242, 168, 255)
+BODY_LEFT_SHOULDER_COLOR = (56, 189, 248, 255)
+BODY_RIGHT_SHOULDER_COLOR = (251, 146, 60, 255)
 
 
 @dataclass(frozen=True)
@@ -4007,7 +4012,7 @@ def _draw_paddle_event_label(
     width: int,
     height: int,
     event: PaddleEvent,
-    _options: ExportOptions,
+    options: ExportOptions,
 ) -> None:
     line_width = max(3, round(min(width, height) * 0.007))
     _draw_line(
@@ -4033,7 +4038,7 @@ def _draw_paddle_event_label(
             -width * 0.1 <= vertex[0] <= width * 1.1
             and -height * 0.1 <= vertex[1] <= height * 1.1
         ):
-            _draw_event_angle_marker(image, width, height, event, vertex)
+            _draw_event_angle_marker(image, width, height, event, vertex, options)
 
 
 def _draw_event_angle_marker(
@@ -4042,6 +4047,7 @@ def _draw_event_angle_marker(
     height: int,
     event: PaddleEvent,
     vertex: tuple[float, float],
+    options: ExportOptions,
 ) -> None:
     assert event.reference_line is not None
     angle_color = _paddle_event_angle_color(event)
@@ -4122,6 +4128,30 @@ def _draw_event_angle_marker(
             line_width,
         )
         previous = point
+    middle_angle = start_angle + delta / 2
+    label_radius = radius + max(18, (options.angle_label_font_size or 32) * 0.65)
+    label_x = vertex[0] + math.cos(middle_angle) * label_radius
+    label_y = vertex[1] + math.sin(middle_angle) * label_radius
+    text = _event_label_text(event)
+    if not _draw_paddle_event_label_with_pillow(
+        image,
+        width,
+        height,
+        label_x,
+        label_y,
+        text,
+        angle_color,
+        options,
+    ):
+        _draw_small_degree_label(
+            image,
+            width,
+            height,
+            label_x,
+            label_y,
+            text,
+            angle_color,
+        )
 
 
 def _event_display_angle(event: PaddleEvent) -> float | None:
@@ -4671,7 +4701,17 @@ def _draw_body_metric_row(
     item_gap = max(8, scale * 5)
     padding_x = scale * 4
     padding_y = scale * 2
-    abbreviated = [f"{label[0]} {value}" for label, value, _color in entries]
+    abbreviations = {
+        "L Elbow": "LE",
+        "R Elbow": "RE",
+        "Torso": "T",
+        "L Shoulder": "LS",
+        "R Shoulder": "RS",
+    }
+    abbreviated = [
+        f"{abbreviations.get(label, label[0])} {value}"
+        for label, value, _color in entries
+    ]
     item_widths = [
         sum(len(_glyph(character)[0]) * scale for character in text)
         + glyph_gap * max(0, len(text) - 1)
@@ -4820,44 +4860,79 @@ def _draw_body_motion_overlay(
                     BODY_JOINT_COLOR,
                 )
 
-    primary_side = record.get("primary_side")
     metrics = record.get("metrics")
-    if primary_side in {"left", "right"} and isinstance(metrics, dict):
-        definitions = {
-            "elbow": ("shoulder", "elbow", "wrist"),
-            "shoulder": ("elbow", "shoulder", "hip"),
-        }
-        color = BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR
-        metric_entries: list[tuple[str, str, Color]] = []
-        for joint, definition in definitions.items():
-            value = metrics.get(f"{primary_side}_{joint}_deg")
-            if not isinstance(value, (int, float)):
-                continue
+    if not isinstance(metrics, dict):
+        metrics = {}
+    definitions = {
+        "elbow": ("shoulder", "elbow", "wrist"),
+        "shoulder": ("elbow", "shoulder", "hip"),
+    }
+    joint_metrics = (
+        ("L Elbow", "left", "elbow", BODY_LEFT_ELBOW_COLOR),
+        ("R Elbow", "right", "elbow", BODY_RIGHT_ELBOW_COLOR),
+    )
+    shoulder_metrics = (
+        ("L Shoulder", "left", "shoulder", BODY_LEFT_SHOULDER_COLOR),
+        ("R Shoulder", "right", "shoulder", BODY_RIGHT_SHOULDER_COLOR),
+    )
+    metric_entries: list[tuple[str, str, Color]] = []
+    for label, side, joint, color in joint_metrics:
+        value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
+        if value is not None:
             _draw_body_joint_arc(
                 image,
                 width,
                 height,
                 landmarks,
-                primary_side,
-                definition,
+                side,
+                definitions[joint],
                 color,
                 radius,
                 thickness,
             )
-            metric_entries.append((joint.title(), f"{round(value)}°", color))
-        lean = metrics.get("lean_deg")
-        if isinstance(lean, (int, float)):
-            metric_entries.append(
-                ("Lean", f"{float(lean):+.1f}°", (255, 242, 168, 255))
-            )
-        if metric_entries:
-            _draw_body_metric_row(
+        metric_entries.append(
+            (label, f"{round(value)}°" if value is not None else "--", color)
+        )
+    lean = _finite_body_metric(metrics, "lean_deg")
+    metric_entries.append(
+        (
+            "Torso",
+            f"{lean:+.1f}°" if lean is not None else "--",
+            BODY_TORSO_COLOR,
+        )
+    )
+    for label, side, joint, color in shoulder_metrics:
+        value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
+        if value is not None:
+            _draw_body_joint_arc(
                 image,
                 width,
                 height,
-                metric_entries,
-                metric_offset_percent,
+                landmarks,
+                side,
+                definitions[joint],
+                color,
+                radius,
+                thickness,
             )
+        metric_entries.append(
+            (label, f"{round(value)}°" if value is not None else "--", color)
+        )
+    _draw_body_metric_row(
+        image,
+        width,
+        height,
+        metric_entries,
+        metric_offset_percent,
+    )
+
+
+def _finite_body_metric(metrics: dict[str, Any], name: str) -> float | None:
+    value = metrics.get(name)
+    if not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def _draw_body_joint_arc(
@@ -5014,7 +5089,9 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
     "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
     "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
     "a": ("00000", "01110", "00001", "01111", "10001", "10011", "01101"),
     "d": ("00001", "00001", "00001", "01111", "10001", "10001", "01111"),
     "e": ("00000", "01110", "10001", "11111", "10000", "10001", "01110"),

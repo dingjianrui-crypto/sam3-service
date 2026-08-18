@@ -124,10 +124,30 @@ class BodyMotionTest(unittest.TestCase):
 
         draw_row.assert_called_once()
         entries = draw_row.call_args.args[3]
-        self.assertEqual([entry[0] for entry in entries], ["Elbow", "Shoulder", "Lean"])
+        self.assertEqual(
+            [entry[0] for entry in entries],
+            ["L Elbow", "R Elbow", "Torso", "L Shoulder", "R Shoulder"],
+        )
+        self.assertEqual(len({entry[2] for entry in entries}), 5)
         self.assertEqual(draw_row.call_args.args[4], 10.0)
         self.assertNotIn("Hip", [entry[0] for entry in entries])
         self.assertNotIn("Knee", [entry[0] for entry in entries])
+
+    @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_keeps_missing_body_metrics_in_fixed_slots(
+        self, draw_row: Mock
+    ) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        record["metrics"].pop("left_elbow_deg")
+        record["metrics"].pop("lean_deg")
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(image, 200, 120, record)
+
+        values = {entry[0]: entry[1] for entry in draw_row.call_args.args[3]}
+        self.assertEqual(values["L Elbow"], "--")
+        self.assertEqual(values["Torso"], "--")
+        self.assertNotEqual(values["R Elbow"], "--")
 
     @patch("sam3_service.exporter._draw_body_metric_row")
     def test_export_passes_body_metric_offset(self, draw_row: Mock) -> None:

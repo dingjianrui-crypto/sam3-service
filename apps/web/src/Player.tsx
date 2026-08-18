@@ -1325,34 +1325,86 @@ function drawBodyMotionOverlay(
     }
   }
 
-  const side = frame.primary_side;
+  const metricColors = {
+    leftElbow: "#34D399",
+    rightElbow: "#F472B6",
+    torso: "#FFF2A8",
+    leftShoulder: "#38BDF8",
+    rightShoulder: "#FB923C"
+  } as const;
+  const jointMetrics = [
+    {
+      label: "L Elbow",
+      side: "left",
+      joint: "elbow",
+      color: metricColors.leftElbow
+    },
+    {
+      label: "R Elbow",
+      side: "right",
+      joint: "elbow",
+      color: metricColors.rightElbow
+    }
+  ] as const;
+  const shoulderMetrics = [
+    {
+      label: "L Shoulder",
+      side: "left",
+      joint: "shoulder",
+      color: metricColors.leftShoulder
+    },
+    {
+      label: "R Shoulder",
+      side: "right",
+      joint: "shoulder",
+      color: metricColors.rightShoulder
+    }
+  ] as const;
   const metricEntries: Array<{ label: string; value: string; color: string }> = [];
-  if (side === "left" || side === "right") {
-    for (const joint of ["elbow", "shoulder"] as const) {
-      const value = frame.metrics[`${side}_${joint}_deg`];
-      if (!Number.isFinite(value)) continue;
+  for (const metric of jointMetrics) {
+    const value = frame.metrics[`${metric.side}_${metric.joint}_deg`];
+    if (Number.isFinite(value)) {
       drawBodyJointArc(
         context,
         frame,
-        side,
-        joint,
-        colors[side],
+        metric.side,
+        metric.joint,
+        metric.color,
         jointRadius,
         lineWidth
       );
-      metricEntries.push({
-        label: joint === "elbow" ? "Elbow" : "Shoulder",
-        value: `${Math.round(value)}°`,
-        color: colors[side]
-      });
     }
+    metricEntries.push({
+      label: metric.label,
+      value: Number.isFinite(value) ? `${Math.round(value)}°` : "--",
+      color: metric.color
+    });
   }
   const lean = frame.metrics.lean_deg;
-  if (Number.isFinite(lean)) {
+  metricEntries.push({
+    label: "Torso",
+    value: Number.isFinite(lean)
+      ? `${lean >= 0 ? "+" : ""}${lean.toFixed(1)}°`
+      : "--",
+    color: metricColors.torso
+  });
+  for (const metric of shoulderMetrics) {
+    const value = frame.metrics[`${metric.side}_${metric.joint}_deg`];
+    if (Number.isFinite(value)) {
+      drawBodyJointArc(
+        context,
+        frame,
+        metric.side,
+        metric.joint,
+        metric.color,
+        jointRadius,
+        lineWidth
+      );
+    }
     metricEntries.push({
-      label: "Lean",
-      value: `${lean >= 0 ? "+" : ""}${lean.toFixed(1)}°`,
-      color: "#FFF2A8"
+      label: metric.label,
+      value: Number.isFinite(value) ? `${Math.round(value)}°` : "--",
+      color: metric.color
     });
   }
   drawBodyMetricRow(context, metricEntries, 10);

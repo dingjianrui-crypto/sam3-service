@@ -1781,7 +1781,7 @@ class ExporterTest(unittest.TestCase):
         draw_block.assert_called_once()
         draw_marker.assert_not_called()
 
-    def test_event_geometry_does_not_draw_a_local_degree_label(self) -> None:
+    def test_event_geometry_draws_degree_label_around_the_arc(self) -> None:
         event = PaddleEvent(
             kind="catch",
             timestamp_ms=0,
@@ -1805,7 +1805,8 @@ class ExporterTest(unittest.TestCase):
                 ExportOptions(),
             )
 
-        pillow_label.assert_not_called()
+        pillow_label.assert_called_once()
+        self.assertEqual(pillow_label.call_args.args[5], "90°")
         bitmap_label.assert_not_called()
 
     def test_record_line_can_select_waterline_and_fall_back_to_centerline(self) -> None:
