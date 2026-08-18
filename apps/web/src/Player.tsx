@@ -20,8 +20,6 @@ type AngleConfig = {
   targetPromptIds: Set<string>;
 };
 
-type ExportLabelPosition = "top" | "bottom";
-
 type ExportRect = { x: number; y: number; width: number; height: number };
 type ExportSelectionKeyframe = ExportRect & { time_ms: number };
 type SelectionInteraction =
@@ -43,8 +41,8 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 const OVERLAY_FONT_FAMILY =
   'Arial, Helvetica, system-ui, sans-serif';
 
-function defaultMetricCenterOffsetPercent() {
-  return 5.5;
+function defaultDegreeOffsetPercent(manifest: ResultManifest) {
+  return manifest.video.height > manifest.video.width ? 16 : 5.5;
 }
 
 function defaultOverlayModes(manifest: ResultManifest): Record<string, OverlayMode> {
@@ -89,9 +87,11 @@ export function Player({ manifest }: Props) {
   const [draftSelection, setDraftSelection] = useState<ExportRect | null>(null);
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
   const [videoDurationMs, setVideoDurationMs] = useState(manifest.video.duration_ms);
-  const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
+  const [exportDegreeOffsetPercent, setExportDegreeOffsetPercent] = useState(() =>
+    defaultDegreeOffsetPercent(manifest)
+  );
   const [exportEventMetricCenterOffsetPercent, setExportEventMetricCenterOffsetPercent] =
-    useState(defaultMetricCenterOffsetPercent());
+    useState(5.5);
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportMetricCount, setExportMetricCount] = useState(1);
   const [exportEventPaddleIndex, setExportEventPaddleIndex] = useState<number | "all">(
@@ -101,8 +101,6 @@ export function Player({ manifest }: Props) {
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exportCatchEnabled, setExportCatchEnabled] = useState(false);
   const [exportExitEnabled, setExportExitEnabled] = useState(false);
-  const [exportEventPaddleLengthEnabled, setExportEventPaddleLengthEnabled] =
-    useState(false);
   const [exportEventFreezeEnabled, setExportEventFreezeEnabled] = useState(false);
   const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.2);
   const [exportEventMetricsEnabled, setExportEventMetricsEnabled] = useState(false);
@@ -126,6 +124,11 @@ export function Player({ manifest }: Props) {
   useEffect(() => {
     selectionKeyframesRef.current = selectionKeyframes;
   }, [selectionKeyframes]);
+
+  useEffect(() => {
+    setExportDegreeOffsetPercent(defaultDegreeOffsetPercent(manifest));
+  }, [manifest.job_id, manifest.video.height, manifest.video.width]);
+
   const ensureChunk = useCallback(
     async (timeMs: number) => {
       const descriptor = manifest.chunks.find(
@@ -455,13 +458,12 @@ export function Player({ manifest }: Props) {
       const blob = await exportJobVideo(
         manifest.job_id,
         {
-          angle_label_position: exportLabelPosition,
+          angle_label_position: exportDegreeOffsetPercent < 0 ? "bottom" : "top",
           angle_label_font_size: exportFontSize,
           include_angles: exportAnglesEnabled,
           include_spm: exportSpmEnabled,
           include_catch: exportCatchEnabled,
           include_exit: exportExitEnabled,
-          include_event_paddle_length: exportEventPaddleLengthEnabled,
           include_event_freeze: exportEventFreezeEnabled,
           event_hold_seconds: exportEventHoldSeconds,
           include_event_metrics: exportEventMetricsEnabled,
@@ -469,6 +471,7 @@ export function Player({ manifest }: Props) {
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
           event_metric_center_offset_percent: exportEventMetricCenterOffsetPercent,
+          metric_center_offset_percent: Math.abs(exportDegreeOffsetPercent),
           reference_prompt_id: angleReferencePromptId,
           target_prompt_ids: [...angleTargetPromptIds],
           selection_keyframes: selectionKeyframes.length ? selectionKeyframes : undefined
@@ -492,13 +495,12 @@ export function Player({ manifest }: Props) {
     exportFontSize,
     exportAnglesEnabled,
     exportCatchEnabled,
+    exportDegreeOffsetPercent,
     exportEventFreezeEnabled,
-    exportEventPaddleLengthEnabled,
     exportEventHoldSeconds,
     exportEventMetricsEnabled,
     exportEventPaddleIndex,
     exportExitEnabled,
-    exportLabelPosition,
     exportMetricCount,
     exportEventMetricCenterOffsetPercent,
     exportSpmEnabled,
@@ -714,20 +716,6 @@ export function Player({ manifest }: Props) {
               />
               Exit
             </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={exportEventPaddleLengthEnabled}
-                disabled={
-                  (!exportCatchEnabled && !exportExitEnabled) ||
-                  !exportEventMetricsEnabled
-                }
-                onChange={(event) =>
-                  setExportEventPaddleLengthEnabled(event.target.checked)
-                }
-              />
-              Event paddle length
-            </label>
             <label>
               Event paddle
               <select
@@ -790,7 +778,6 @@ export function Player({ manifest }: Props) {
                   if (enabled && exportEventPaddleIndex === "all") {
                     setExportEventPaddleIndex(1);
                   }
-                  if (!enabled) setExportEventPaddleLengthEnabled(false);
                 }}
               />
               Event metrics
@@ -822,6 +809,39 @@ export function Player({ manifest }: Props) {
                 onChange={(event) => setExportAnglesEnabled(event.target.checked)}
               />
               Include angles
+            </label>
+            <label className="angle-number-control">
+              <span>Degree offset %</span>
+              <input
+                type="number"
+                min="-45"
+                max="45"
+                step="0.5"
+                value={exportDegreeOffsetPercent}
+                title="Positive values measure down from the top; negative values measure up from the bottom."
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportDegreeOffsetPercent(
+                    Number.isFinite(value)
+                      ? clamp(value, -45, 45)
+                      : defaultDegreeOffsetPercent(manifest)
+                  );
+                }}
+              />
+            </label>
+            <label className="angle-number-control">
+              <span>Font size</span>
+              <input
+                type="number"
+                min="12"
+                max="96"
+                step="2"
+                value={exportFontSize}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
+                }}
+              />
             </label>
             <label>
               Angle reference
@@ -871,32 +891,6 @@ export function Player({ manifest }: Props) {
                 onChange={(event) => setExportSpmEnabled(event.target.checked)}
               />
               Include SPM
-            </label>
-            <label>
-              Degree position
-              <select
-                value={exportLabelPosition}
-                onChange={(event) =>
-                  setExportLabelPosition(event.target.value as ExportLabelPosition)
-                }
-              >
-                <option value="top">Top</option>
-                <option value="bottom">Bottom</option>
-              </select>
-            </label>
-            <label>
-              Font size
-              <input
-                type="number"
-                min="12"
-                max="96"
-                step="2"
-                value={exportFontSize}
-                onChange={(event) => {
-                  const value = Number(event.target.value);
-                  setExportFontSize(Number.isFinite(value) ? clamp(value, 12, 96) : 12);
-                }}
-              />
             </label>
             <label>
               Metric count

@@ -969,8 +969,8 @@ h2 {
 }
 
 .angle-controls {
-  display: grid;
-  grid-template-columns: auto minmax(190px, auto) minmax(220px, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
@@ -978,7 +978,13 @@ h2 {
   border-bottom: 1px solid #1b3549;
 }
 
+.angle-number-control input {
+  width: 72px;
+  box-sizing: border-box;
+}
+
 .angle-targets {
+  flex: 1 1 220px;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -991,7 +997,7 @@ h2 {
 
 .export-controls {
   display: grid;
-  grid-template-columns: auto repeat(3, minmax(110px, 1fr)) auto;
+  grid-template-columns: auto minmax(110px, 1fr) auto;
   gap: 10px;
   align-items: end;
 }
@@ -1080,7 +1086,6 @@ h2 {
     min-height: 240px;
   }
 
-  .angle-controls,
   .export-controls {
     grid-template-columns: 1fr 1fr;
   }
@@ -1092,9 +1097,17 @@ h2 {
 
 @media (max-width: 560px) {
   .object-overlay-row,
-  .angle-controls,
   .export-controls {
     grid-template-columns: 1fr;
+  }
+
+  .angle-controls {
+    align-items: flex-start;
+  }
+
+  .angle-controls > label:not(.checkbox),
+  .angle-targets {
+    flex-basis: 100%;
   }
 
   .object-overlay-row > label:last-child {

@@ -730,8 +730,6 @@ cycle model described here. Do not retain a two-phase opposite-blade exception.
 
 ### 18.4 Compatibility
 
-- The optional `include_event_paddle_length` parameter defaults to `false` and
-  changes only event-label rendering.
 - Event pausing is independently enabled by `include_event_freeze`. Its
   duration defaults to `1.2 s` and is constrained to `0.1 s` through `10 s`.
   When disabled, event frames replace their ordinary source frame and no video

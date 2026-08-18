@@ -72,7 +72,6 @@ class ExportOptions:
     include_spm: bool = False
     include_catch: bool = False
     include_exit: bool = False
-    include_event_paddle_length: bool = False
     include_event_freeze: bool = False
     event_hold_seconds: float = 1.2
     include_event_metrics: bool = False
@@ -922,7 +921,6 @@ def _normalize_export_options(
         include_spm=bool(requested.include_spm),
         include_catch=bool(requested.include_catch),
         include_exit=bool(requested.include_exit),
-        include_event_paddle_length=bool(requested.include_event_paddle_length),
         include_event_freeze=bool(requested.include_event_freeze),
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         include_event_metrics=bool(requested.include_event_metrics),
@@ -4038,10 +4036,7 @@ def _draw_paddle_event_label(
         PADDLE_EVENT_PADDLE_COLOR,
         max(2, round(min(width, height) * 0.004)),
     )
-    text = _event_label_text(
-        event,
-        include_paddle_length=options.include_event_paddle_length,
-    )
+    text = _event_label_text(event)
     if not text:
         return
     if _draw_paddle_event_label_with_pillow(
@@ -4157,10 +4152,7 @@ def _draw_event_angle_marker(
     label_radius = radius + max(18, (options.angle_label_font_size or 32) * 0.65)
     label_x = vertex[0] + math.cos(middle_angle) * label_radius
     label_y = vertex[1] + math.sin(middle_angle) * label_radius
-    text = _event_label_text(
-        event,
-        include_paddle_length=options.include_event_paddle_length,
-    )
+    text = _event_label_text(event)
     if not _draw_paddle_event_label_with_pillow(
         image,
         width,
@@ -4190,16 +4182,9 @@ def _event_display_angle(event: PaddleEvent) -> float | None:
     return event.phase_angle
 
 
-def _event_label_text(
-    event: PaddleEvent,
-    *,
-    include_paddle_length: bool = False,
-) -> str:
+def _event_label_text(event: PaddleEvent) -> str:
     angle = _event_display_angle(event)
-    parts = [f"{round(angle) % 360}°"] if angle is not None else []
-    if include_paddle_length:
-        parts.append(f"{round(_line_length(event.line))} px")
-    return " ".join(parts)
+    return f"{round(angle) % 360}°" if angle is not None else ""
 
 
 def _paddle_event_angle_color(event: PaddleEvent) -> Color:
