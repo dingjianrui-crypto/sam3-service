@@ -76,6 +76,7 @@ class ExportOptions:
     include_event_freeze: bool = False
     event_hold_seconds: float = 1.2
     include_event_metrics: bool = False
+    event_metric_center_offset_percent: float = 5.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
     reference_line_mode: str | None = None
@@ -523,6 +524,16 @@ def export_centerline_video(
             if freeze_moment is not None:
                 if export_options.include_event_metrics:
                     assert event_image is not None
+                    if export_options.include_angles:
+                        _draw_event_companion_angles(
+                            event_image,
+                            width,
+                            height,
+                            scaled_records,
+                            colors,
+                            export_options,
+                            freeze_moment.events,
+                        )
                     for event in freeze_moment.events:
                         _draw_paddle_event_label(
                             event_image, width, height, event, export_options
@@ -893,11 +904,7 @@ def _normalize_export_options(
     font_size = requested.angle_label_font_size or default_font_size
     metric_center_offset_percent = requested.metric_center_offset_percent
     if metric_center_offset_percent is None:
-        metric_center_offset_percent = (
-            LANDSCAPE_METRIC_CENTER_OFFSET_PERCENT
-            if requested.include_event_metrics
-            else _default_metric_center_offset_percent(width, height)
-        )
+        metric_center_offset_percent = _default_metric_center_offset_percent(width, height)
     manifest_line_mode = manifest.get("settings", {}).get(
         "boat_reference_line", "centerline"
     )
@@ -911,7 +918,7 @@ def _normalize_export_options(
     return ExportOptions(
         angle_label_position=position,
         angle_label_font_size=max(12, min(96, int(font_size))),
-        include_angles=bool(requested.include_angles and not requested.include_event_metrics),
+        include_angles=bool(requested.include_angles),
         include_spm=bool(requested.include_spm),
         include_catch=bool(requested.include_catch),
         include_exit=bool(requested.include_exit),
@@ -919,6 +926,10 @@ def _normalize_export_options(
         include_event_freeze=bool(requested.include_event_freeze),
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         include_event_metrics=bool(requested.include_event_metrics),
+        event_metric_center_offset_percent=max(
+            -45.0,
+            min(45.0, float(requested.event_metric_center_offset_percent)),
+        ),
         metric_center_offset_percent=max(0.0, min(45.0, float(metric_center_offset_percent))),
         reference_prompt_id=reference_prompt_id,
         reference_line_mode=reference_line_mode,
@@ -1141,11 +1152,7 @@ def _draw_event_companion_angles(
     events: tuple[PaddleEvent, ...],
 ) -> None:
     """Draw non-event paddle angles on a held event frame."""
-    if (
-        options.target_slot_count <= 1
-        or options.event_paddle_index is None
-        or not events
-    ):
+    if options.event_paddle_index is None or not events:
         return
     centerlines: list[Centerline] = []
     for record in records:
@@ -1165,7 +1172,7 @@ def _draw_event_companion_angles(
         )
     event = events[0]
     slots = _event_companion_degree_slots(centerlines, options, event)
-    if not any(slot.degree is not None and slot.line is not None for slot in slots):
+    if not any(slot.degree is not None for slot in slots):
         return
     line_width = max(3, round(min(width, height) * 0.006))
     for entry in _degree_label_entries(slots):
@@ -1197,7 +1204,7 @@ def _event_companion_degree_slots(
     event: PaddleEvent,
 ) -> list[DegreeLabel]:
     """Return directional metric slots with the event paddle left for event drawing."""
-    if options.target_slot_count <= 1 or options.event_paddle_index is None:
+    if options.target_slot_count <= 0 or options.event_paddle_index is None:
         return []
     labels = _degree_labels(centerlines, options)
     if event.travel_direction == "right":
@@ -1461,15 +1468,11 @@ def _draw_event_metric_table_with_pillow(
     )
     table_height = row_count * row_height
     left = round((width - table_width) / 2)
-    top = _metric_label_top(
-        width,
+    top = _event_metric_table_top(
         height,
         table_height,
-        font_size,
-        options.angle_label_position,
-        options.metric_center_offset_percent,
+        options.event_metric_center_offset_percent,
     )
-    top = max(0, min(height - table_height, top))
     for row_index in range(row_count):
         row_top = top + row_index * row_height
         row_label = f"P{row_index + 1}"
@@ -1536,15 +1539,11 @@ def _draw_event_metric_table_bitmap(
     table_width = label_width + len(columns) * cell_width
     table_height = row_count * row_height
     left = round((width - table_width) / 2)
-    top = _metric_label_top(
-        width,
+    top = _event_metric_table_top(
         height,
         table_height,
-        scale * 7,
-        options.angle_label_position,
-        options.metric_center_offset_percent,
+        options.event_metric_center_offset_percent,
     )
-    top = max(0, min(height - table_height, top))
     for row_index in range(row_count):
         _draw_bitmap_text(
             image,
@@ -4543,6 +4542,18 @@ def _metric_label_top(
     if position == "top":
         return margin
     return max(margin, height - margin - text_height)
+
+
+def _event_metric_table_top(
+    height: int,
+    table_height: int,
+    signed_offset_percent: float,
+) -> int:
+    """Place event metrics from the top for positive and bottom for negative offsets."""
+    offset = max(-45.0, min(45.0, signed_offset_percent))
+    inset = round(height * abs(offset) / 100)
+    top = inset if offset >= 0 else height - inset - table_height
+    return max(0, min(max(0, height - table_height), top))
 
 
 def _spm_label_top(

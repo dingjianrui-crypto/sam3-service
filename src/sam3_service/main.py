@@ -430,6 +430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
         event_paddle_index: int | None = Query(default=None, ge=1, le=4),
+        event_metric_center_offset_percent: float = Query(default=5.5, ge=-45, le=45),
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),
@@ -519,6 +520,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     include_event_metrics=include_event_metrics,
                     target_slot_count=metric_count or 0,
                     event_paddle_index=event_paddle_index,
+                    event_metric_center_offset_percent=event_metric_center_offset_percent,
                     metric_center_offset_percent=metric_center_offset_percent,
                     reference_prompt_id=reference_prompt_id,
                     target_prompt_ids=tuple(

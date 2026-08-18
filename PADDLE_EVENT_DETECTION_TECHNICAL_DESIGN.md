@@ -737,12 +737,16 @@ cycle model described here. Do not retain a two-phase opposite-blade exception.
   When disabled, event frames replace their ordinary source frame and no video
   or audio time is inserted.
 - `include_event_metrics` independently enables a cumulative, horizontally
-  centered event table. Its center offset defaults to `5.5%`.
+  centered event table. Its signed center offset defaults to `+5.5%`.
+  Nonnegative values inset the table from the top; negative values inset it
+  from the bottom. The range is `-45%` through `+45%`, and `0%` means no top
+  inset.
 - The selected event-paddle row contains its displayed catch/exit angles. Each
   other metric row contains a signed difference from that selected angle, with
   `--` preserving a missing sample. Catch columns are red, exit columns are
   green, and the font shrinks to reserve one fixed column per detected event.
-  This table replaces the live raw-angle row to prevent overlapping metrics.
+  The event table and live raw-angle row are independently enabled; the signed
+  event offset controls only the table.
   Before subtraction, each companion's acute measurement is mapped to the
   directed equivalent nearest the selected event angle (for example, `31°`
   aligns to `149°` when the selected event is `149°`).

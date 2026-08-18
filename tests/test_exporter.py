@@ -36,6 +36,7 @@ from sam3_service.exporter import (
     _event_label_text,
     _event_companion_degree_slots,
     _event_freeze_frame_count,
+    _event_metric_table_top,
     _event_metric_text,
     _event_metric_values,
     _event_boat_reference_lines,
@@ -1670,7 +1671,7 @@ class ExporterTest(unittest.TestCase):
             36,
         )
 
-    def test_event_metrics_use_fixed_default_offset_and_replace_live_angles(self) -> None:
+    def test_event_metrics_keep_live_angles_and_use_an_independent_offset(self) -> None:
         options = _normalize_export_options(
             ExportOptions(include_angles=True, include_event_metrics=True),
             {
@@ -1685,8 +1686,14 @@ class ExporterTest(unittest.TestCase):
             1920,
         )
 
-        self.assertFalse(options.include_angles)
-        self.assertEqual(options.metric_center_offset_percent, 5.5)
+        self.assertTrue(options.include_angles)
+        self.assertEqual(options.event_metric_center_offset_percent, 5.5)
+        self.assertEqual(options.metric_center_offset_percent, 16.0)
+
+    def test_signed_event_metric_offset_selects_top_or_bottom_anchor(self) -> None:
+        self.assertEqual(_event_metric_table_top(1000, 100, 10), 100)
+        self.assertEqual(_event_metric_table_top(1000, 100, -10), 800)
+        self.assertEqual(_event_metric_table_top(1000, 100, 0), 0)
 
     def test_event_angle_uses_first_crossing_geometry(self) -> None:
         state = _PaddleEventState(immersed=False)
@@ -2230,6 +2237,22 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual([slot.degree for slot in leftward], [31, 45, 60])
         self.assertIsNone(rightward[1].line)
         self.assertIsNone(leftward[1].line)
+
+        single = _event_companion_degree_slots(
+            [reference, targets[0]],
+            replace(options, target_slot_count=1, event_paddle_index=1),
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=0,
+                instance_id="slot:1",
+                line=targets[0].line,
+                confidence=1.0,
+                phase_angle=45,
+                travel_direction="left",
+            ),
+        )
+        self.assertEqual([slot.degree for slot in single], [45])
+        self.assertIsNone(single[0].line)
 
     def test_event_metric_rows_use_selected_raw_angle_and_signed_differences(self) -> None:
         reference = Centerline(

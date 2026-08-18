@@ -89,7 +89,8 @@ export type ExportVideoOptions = {
   include_event_metrics: boolean;
   metric_count: number;
   event_paddle_index?: number;
-  metric_center_offset_percent: number;
+  event_metric_center_offset_percent: number;
+  metric_center_offset_percent?: number;
   reference_prompt_id?: string;
   target_prompt_ids?: string[];
   selection_rect?: { x: number; y: number; width: number; height: number };
@@ -244,8 +245,16 @@ export async function exportJobVideo(
     event_hold_seconds: String(options.event_hold_seconds),
     include_event_metrics: String(options.include_event_metrics),
     metric_count: String(options.metric_count),
-    metric_center_offset_percent: String(options.metric_center_offset_percent)
+    event_metric_center_offset_percent: String(
+      options.event_metric_center_offset_percent
+    )
   });
+  if (options.metric_center_offset_percent != null) {
+    params.set(
+      "metric_center_offset_percent",
+      String(options.metric_center_offset_percent)
+    );
+  }
   if (options.event_paddle_index != null) {
     params.set("event_paddle_index", String(options.event_paddle_index));
   }

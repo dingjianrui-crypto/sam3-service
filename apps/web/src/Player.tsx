@@ -90,9 +90,8 @@ export function Player({ manifest }: Props) {
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
   const [videoDurationMs, setVideoDurationMs] = useState(manifest.video.duration_ms);
   const [exportLabelPosition, setExportLabelPosition] = useState<ExportLabelPosition>("top");
-  const [exportMetricCenterOffsetPercent, setExportMetricCenterOffsetPercent] = useState(
-    defaultMetricCenterOffsetPercent()
-  );
+  const [exportEventMetricCenterOffsetPercent, setExportEventMetricCenterOffsetPercent] =
+    useState(defaultMetricCenterOffsetPercent());
   const [exportFontSize, setExportFontSize] = useState(32);
   const [exportMetricCount, setExportMetricCount] = useState(1);
   const [exportEventPaddleIndex, setExportEventPaddleIndex] = useState<number | "all">(
@@ -469,7 +468,7 @@ export function Player({ manifest }: Props) {
           metric_count: exportMetricCount,
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
-          metric_center_offset_percent: exportMetricCenterOffsetPercent,
+          event_metric_center_offset_percent: exportEventMetricCenterOffsetPercent,
           reference_prompt_id: angleReferencePromptId,
           target_prompt_ids: [...angleTargetPromptIds],
           selection_keyframes: selectionKeyframes.length ? selectionKeyframes : undefined
@@ -501,7 +500,7 @@ export function Player({ manifest }: Props) {
     exportExitEnabled,
     exportLabelPosition,
     exportMetricCount,
-    exportMetricCenterOffsetPercent,
+    exportEventMetricCenterOffsetPercent,
     exportSpmEnabled,
     manifest.job_id,
     selectionKeyframes
@@ -791,7 +790,6 @@ export function Player({ manifest }: Props) {
                   if (enabled && exportEventPaddleIndex === "all") {
                     setExportEventPaddleIndex(1);
                   }
-                  if (enabled) setExportAnglesEnabled(false);
                   if (!enabled) setExportEventPaddleLengthEnabled(false);
                 }}
               />
@@ -802,14 +800,14 @@ export function Player({ manifest }: Props) {
                 Center offset %
                 <input
                   type="number"
-                  min="0"
+                  min="-45"
                   max="45"
                   step="0.5"
-                  value={exportMetricCenterOffsetPercent}
+                  value={exportEventMetricCenterOffsetPercent}
                   onChange={(event) => {
                     const value = Number(event.target.value);
-                    setExportMetricCenterOffsetPercent(
-                      Number.isFinite(value) ? clamp(value, 0, 45) : 5.5
+                    setExportEventMetricCenterOffsetPercent(
+                      Number.isFinite(value) ? clamp(value, -45, 45) : 5.5
                     );
                   }}
                 />
@@ -821,7 +819,6 @@ export function Player({ manifest }: Props) {
               <input
                 type="checkbox"
                 checked={exportAnglesEnabled}
-                disabled={exportEventMetricsEnabled}
                 onChange={(event) => setExportAnglesEnabled(event.target.checked)}
               />
               Include angles
