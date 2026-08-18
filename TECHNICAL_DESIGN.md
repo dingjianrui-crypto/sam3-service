@@ -405,6 +405,8 @@ Body motion is stricter: the player and exporter first look up the exact normali
 
 The visual renderer draws wrists, elbows, shoulders, hips, and the connecting upper-body segments; rendering stops at the hips even though knee and ankle landmarks remain in body-motion data for compatibility and possible future analysis. It draws angle arcs only at the primary-side elbow and shoulder, with no leader lines. A color-coded Elbow, Shoulder, and signed Lean row is placed at a fixed 10% top offset in playback. Export uses `event_metric_center_offset_percent` to position the same row. The former cumulative Event metrics table is not rendered, while catch/exit event geometry, labels, and freeze behavior remain independent and unchanged.
 
+Exported paddle-angle numbers are rendered only in the configured top or bottom degree block. Ordinary and event frames do not draw numeric labels or leaders near paddle centerlines. On a catch/exit frame, the exporter replaces the matching degree-block slot with the backdated event-time angle and event color before duplicating that fully annotated image for any configured freeze. With all event paddles selected, simultaneous events are assigned to the nearest detected paddle slots.
+
 ## 9. Domain model
 
 ### 9.1 Core tables

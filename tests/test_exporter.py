@@ -27,6 +27,7 @@ from sam3_service.exporter import (
     _dedupe_paddle_events,
     _detect_paddle_events,
     _draw_frame_overlay,
+    _draw_paddle_event_label,
     _degree_label_entries,
     _degree_labels,
     _degree_slots,
@@ -35,6 +36,7 @@ from sam3_service.exporter import (
     _event_phase_allowed,
     _event_label_text,
     _event_companion_degree_slots,
+    _event_frame_degree_slots,
     _event_freeze_frame_count,
     _event_metric_table_top,
     _event_metric_text,
@@ -1742,6 +1744,70 @@ class ExporterTest(unittest.TestCase):
         draw_block.assert_not_called()
         draw_marker.assert_not_called()
 
+    def test_export_angles_use_only_the_top_or_bottom_block(self) -> None:
+        records = [
+            {
+                "prompt_id": "boat",
+                "instance_id": "boat:1",
+                "centerline_line_xyxy": [0, 20, 100, 20],
+            },
+            {
+                "prompt_id": "paddle",
+                "instance_id": "paddle:1",
+                "centerline_line_xyxy": [50, 0, 50, 80],
+            },
+        ]
+        options = ExportOptions(
+            include_angles=True,
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+        )
+
+        with (
+            patch("sam3_service.exporter._draw_degree_label_block") as draw_block,
+            patch("sam3_service.exporter._draw_target_degree_marker") as draw_marker,
+        ):
+            _draw_frame_overlay(
+                bytearray(100 * 100 * 4),
+                100,
+                100,
+                records,
+                {"boat": (255, 181, 71, 255), "paddle": (53, 194, 255, 255)},
+                export_options=options,
+                timestamp_ms=0,
+                spm_estimator=SpmEstimator(),
+            )
+
+        draw_block.assert_called_once()
+        draw_marker.assert_not_called()
+
+    def test_event_geometry_does_not_draw_a_local_degree_label(self) -> None:
+        event = PaddleEvent(
+            kind="catch",
+            timestamp_ms=0,
+            instance_id="paddle:1",
+            line=(50.0, 0.0, 50.0, 80.0),
+            reference_line=(0.0, 50.0, 100.0, 50.0),
+            confidence=1.0,
+            phase_angle=90.0,
+            travel_direction="right",
+        )
+
+        with (
+            patch("sam3_service.exporter._draw_paddle_event_label_with_pillow") as pillow_label,
+            patch("sam3_service.exporter._draw_small_degree_label") as bitmap_label,
+        ):
+            _draw_paddle_event_label(
+                bytearray(100 * 100 * 4),
+                100,
+                100,
+                event,
+                ExportOptions(),
+            )
+
+        pillow_label.assert_not_called()
+        bitmap_label.assert_not_called()
+
     def test_record_line_can_select_waterline_and_fall_back_to_centerline(self) -> None:
         record = {
             "centerline_line_xyxy": [0, 20, 100, 20],
@@ -2238,6 +2304,57 @@ class ExporterTest(unittest.TestCase):
         )
         self.assertEqual([slot.degree for slot in single], [45])
         self.assertIsNone(single[0].line)
+
+    def test_all_event_paddles_replace_nearest_top_or_bottom_slots(self) -> None:
+        reference = Centerline(
+            record={"prompt_id": "boat", "instance_id": "boat:1"},
+            line=(0.0, 50.0, 100.0, 50.0),
+            color=(255, 181, 71, 255),
+        )
+        targets = [
+            Centerline(
+                record={"prompt_id": "paddle", "instance_id": f"paddle:{index}"},
+                line=(center_x - 10.0, 30.0, center_x + 10.0, 30.0 + rise),
+                color=(53, 194, 255, 255),
+            )
+            for index, (center_x, rise) in enumerate(
+                [(20.0, 12.0), (50.0, 20.0), (80.0, 35.0)],
+                start=1,
+            )
+        ]
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+            target_slot_count=3,
+        )
+        events = (
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=0,
+                instance_id="event:left",
+                line=targets[0].line,
+                confidence=1.0,
+                phase_angle=44.0,
+            ),
+            PaddleEvent(
+                kind="exit",
+                timestamp_ms=0,
+                instance_id="event:right",
+                line=targets[2].line,
+                confidence=1.0,
+                phase_angle=140.0,
+            ),
+        )
+
+        slots = _event_frame_degree_slots([reference, *targets], options, events)
+
+        self.assertEqual(slots[0].degree, 44)
+        self.assertEqual(slots[2].degree, 40)
+        self.assertIsNone(slots[0].line)
+        self.assertIsNotNone(slots[1].line)
+        self.assertIsNone(slots[2].line)
+        self.assertEqual(slots[0].color, (255, 82, 96, 255))
+        self.assertEqual(slots[2].color, (46, 204, 113, 255))
 
     def test_event_metric_rows_use_selected_raw_angle_and_signed_differences(self) -> None:
         reference = Centerline(

@@ -787,7 +787,7 @@ Query parameters:
 |---|---|---|---|
 | `angle_label_position` | `top` or `bottom` | `top` | Vertical placement for the stacked degree label block |
 | `angle_label_font_size` | integer, `12` to `96` | `32` | Font size in video pixels for the burned-in degree labels |
-| `include_angles` | boolean | `true` | Draw degree labels and near-paddle angle markers; angle measurements remain available internally for SPM when this is `false` |
+| `include_angles` | boolean | `true` | Draw the top/bottom degree-label block; angle measurements remain available internally for SPM when this is `false` |
 | `include_spm` | boolean | `false` | Draw instantaneous and average SPM |
 | `include_catch` | boolean | `false` | Detect catch events and draw the catch angle in red |
 | `include_exit` | boolean | `false` | Detect exit events and draw the exit angle in green |
@@ -810,9 +810,9 @@ Query parameters:
 | `reference_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
 | `target_track_ids` | comma-separated string | none | Deprecated compatibility filter; not used by the web UI |
 
-For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. The same index-and-degree label is also drawn near each paddle centerline. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
+For each exported frame, the server finds every target centerline, matches it to the nearest reference centerline, and prints one degree label per target on the same horizontal row under the Chinese title `桨叶角度`, without a background panel. For example, if four paddle instances are detected, the exported video can show `1: 42°   2: 51°   3: 37°   4: 48°`. Numeric labels and leader lines are not drawn near the paddle centerlines. When only one paddle is detected, the exported video omits the index and shows only the value, such as `42°`. When more than three paddle labels are present, the label farthest from the average degree is highlighted in red.
 
-When `metric_count` is supplied, the degree row always reserves exactly that many positions, independently of the number of paddle detection records. Paddles are ordered left to right in each frame, extra detections are ignored, and an unavailable position remains blank without shifting the other metric positions or carrying forward a stale value. Empty slots are excluded from outlier highlighting and SPM estimation, and no near-paddle marker is drawn for them. The web UI always sends this value and defaults it to `1`.
+When `metric_count` is supplied, the degree row always reserves exactly that many positions, independently of the number of paddle detection records. Paddles are ordered left to right in each frame, extra detections are ignored, and an unavailable position remains blank without shifting the other metric positions or carrying forward a stale value. Empty slots are excluded from outlier highlighting and SPM estimation. The web UI always sends this value and defaults it to `1`.
 
 `event_paddle_index` affects only catch and exit analysis. For each reference
 boat, the server first stabilizes the finite boat reference length. It identifies
@@ -855,7 +855,7 @@ Nearby collinear same-type events within 250 ms are merged after state analysis 
 
 When `include_event_freeze=true`, the exporter inserts a pause at each event timestamp for `event_hold_seconds`. Audio is silent during the pause, then video and audio resume from the same source timestamp without skipping source content. When it is false, no video or audio time is inserted. Events from different paddles within 250 ms share one freeze so a synchronized crew does not create several consecutive pauses. SPM and selection calculations remain on the original source timeline. When body motion is also enabled, the exporter first draws the pose for that exact source frame and then duplicates the fully annotated frame; pose lookup never advances during inserted hold time.
 
-Catch/exit event geometry is drawn on the event frame independently of the deprecated `include_event_metrics` parameter: the paddle centerline is cyan, its matched boat centerline or waterline is amber, and the directed angle is red for catch or green for exit. Event labels and optional freeze behavior are preserved. The former cumulative catch/exit event table is no longer rendered.
+Catch/exit event geometry is drawn on the event frame independently of the deprecated `include_event_metrics` parameter: the paddle centerline is cyan, its matched boat centerline or waterline is amber, and the directed angle arc is red for catch or green for exit. The numeric event angle is placed in the configured top or bottom degree block rather than beside the paddle, and the same completed frame is used throughout an optional freeze. When all event paddles are selected, simultaneous events replace their nearest detected paddle slots. The former cumulative catch/exit event table is no longer rendered.
 
 When body motion is included in export, `event_metric_center_offset_percent` now controls the color-coded Elbow, Shoulder, and Lean row. A nonnegative value anchors its top edge that percentage of the video height below the top (`+10` means 10% down). A negative value anchors its bottom edge by the absolute percentage above the bottom (`-10` means 10% up). Zero means no top inset. The existing `metric_center_offset_percent` remains an independent compatibility setting for the live paddle-degree and SPM rows.
 

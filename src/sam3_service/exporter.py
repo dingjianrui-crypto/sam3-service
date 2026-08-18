@@ -1108,9 +1108,6 @@ def _draw_frame_overlay(
     labels = _degree_labels(centerlines, export_options)
     displayed_labels = _degree_slots(labels, export_options)
     if export_options.include_angles:
-        for entry in _degree_label_entries(displayed_labels):
-            if entry.label.degree is not None and entry.label.line is not None:
-                _draw_target_degree_marker(image, width, height, entry)
         if displayed_labels:
             _draw_degree_label_block(image, width, height, displayed_labels, export_options)
     if export_options.include_spm:
@@ -1135,8 +1132,8 @@ def _draw_event_companion_angles(
     options: ExportOptions,
     events: tuple[PaddleEvent, ...],
 ) -> None:
-    """Draw non-event paddle angles on a held event frame."""
-    if options.event_paddle_index is None or not events:
+    """Draw all paddle angles in the top/bottom block on an event frame."""
+    if not events:
         return
     centerlines: list[Centerline] = []
     for record in records:
@@ -1154,8 +1151,7 @@ def _draw_event_companion_angles(
                 color=colors.get(record.get("prompt_id", ""), (53, 194, 255, 255)),
             )
         )
-    event = events[0]
-    slots = _event_companion_degree_slots(centerlines, options, event)
+    slots = _event_frame_degree_slots(centerlines, options, events)
     if not any(slot.degree is not None for slot in slots):
         return
     line_width = max(3, round(min(width, height) * 0.006))
@@ -1170,15 +1166,18 @@ def _draw_event_companion_angles(
             entry.label.color,
             line_width,
         )
-        _draw_target_degree_marker(image, width, height, entry)
-    selected_index = options.event_paddle_index - 1
+    event_text_colors = {
+        index: slot.color
+        for index, slot in enumerate(slots)
+        if slot.degree is not None and slot.line is None
+    }
     _draw_degree_label_block(
         image,
         width,
         height,
         slots,
         options,
-        text_color_overrides={selected_index: _paddle_event_angle_color(event)},
+        text_color_overrides=event_text_colors,
     )
 
 
@@ -1187,15 +1186,45 @@ def _event_companion_degree_slots(
     options: ExportOptions,
     event: PaddleEvent,
 ) -> list[DegreeLabel]:
-    """Return directional metric slots with the event paddle left for event drawing."""
+    """Return directional metric slots with the event angle in its selected slot."""
     if options.target_slot_count <= 0 or options.event_paddle_index is None:
         return []
+    return _event_frame_degree_slots(centerlines, options, (event,))
+
+
+def _event_frame_degree_slots(
+    centerlines: list[Centerline],
+    options: ExportOptions,
+    events: tuple[PaddleEvent, ...],
+) -> list[DegreeLabel]:
+    """Use event-time angles in the ordinary top/bottom paddle metric slots."""
     labels = _degree_labels(centerlines, options)
-    if event.travel_direction == "right":
+    if options.event_paddle_index is not None and events[0].travel_direction == "right":
         labels.reverse()
     slots = _degree_slots(labels, options)
-    selected_index = options.event_paddle_index - 1
-    if 0 <= selected_index < len(slots):
+    if options.event_paddle_index is not None:
+        selected_indexes = [options.event_paddle_index - 1]
+    else:
+        available_indexes = {
+            index for index, slot in enumerate(slots) if slot.line is not None
+        }
+        selected_indexes = []
+        for event in events:
+            if not available_indexes:
+                break
+            event_center = _line_center(event.line)
+            selected_index = min(
+                available_indexes,
+                key=lambda index: math.hypot(
+                    _line_center(slots[index].line)[0] - event_center[0],
+                    _line_center(slots[index].line)[1] - event_center[1],
+                ),
+            )
+            available_indexes.remove(selected_index)
+            selected_indexes.append(selected_index)
+    for selected_index, event in zip(selected_indexes, events):
+        if not 0 <= selected_index < len(slots):
+            continue
         selected = slots[selected_index]
         display_angle = _event_display_angle(event)
         slots[selected_index] = replace(
@@ -3978,9 +4007,8 @@ def _draw_paddle_event_label(
     width: int,
     height: int,
     event: PaddleEvent,
-    options: ExportOptions,
+    _options: ExportOptions,
 ) -> None:
-    angle_color = _paddle_event_angle_color(event)
     line_width = max(3, round(min(width, height) * 0.007))
     _draw_line(
         image,
@@ -4005,46 +4033,7 @@ def _draw_paddle_event_label(
             -width * 0.1 <= vertex[0] <= width * 1.1
             and -height * 0.1 <= vertex[1] <= height * 1.1
         ):
-            _draw_event_angle_marker(image, width, height, event, vertex, options)
-            return
-    center_x, center_y = _line_center(event.line)
-    dx = event.line[2] - event.line[0]
-    dy = event.line[3] - event.line[1]
-    length = max(math.hypot(dx, dy), 1.0)
-    offset = max(28, min(width, height) * 0.06)
-    label_x = center_x + (-dy / length) * offset
-    label_y = center_y + (dx / length) * offset
-    _draw_line(
-        image,
-        width,
-        height,
-        (center_x, center_y, label_x, label_y),
-        PADDLE_EVENT_PADDLE_COLOR,
-        max(2, round(min(width, height) * 0.004)),
-    )
-    text = _event_label_text(event)
-    if not text:
-        return
-    if _draw_paddle_event_label_with_pillow(
-        image,
-        width,
-        height,
-        label_x,
-        label_y,
-        text,
-        angle_color,
-        options,
-    ):
-        return
-    _draw_small_degree_label(
-        image,
-        width,
-        height,
-        label_x,
-        label_y,
-        text,
-        angle_color,
-    )
+            _draw_event_angle_marker(image, width, height, event, vertex)
 
 
 def _draw_event_angle_marker(
@@ -4053,7 +4042,6 @@ def _draw_event_angle_marker(
     height: int,
     event: PaddleEvent,
     vertex: tuple[float, float],
-    options: ExportOptions,
 ) -> None:
     assert event.reference_line is not None
     angle_color = _paddle_event_angle_color(event)
@@ -4134,30 +4122,6 @@ def _draw_event_angle_marker(
             line_width,
         )
         previous = point
-    middle_angle = start_angle + delta / 2
-    label_radius = radius + max(18, (options.angle_label_font_size or 32) * 0.65)
-    label_x = vertex[0] + math.cos(middle_angle) * label_radius
-    label_y = vertex[1] + math.sin(middle_angle) * label_radius
-    text = _event_label_text(event)
-    if not _draw_paddle_event_label_with_pillow(
-        image,
-        width,
-        height,
-        label_x,
-        label_y,
-        text,
-        angle_color,
-        options,
-    ):
-        _draw_small_degree_label(
-            image,
-            width,
-            height,
-            label_x,
-            label_y,
-            text,
-            angle_color,
-        )
 
 
 def _event_display_angle(event: PaddleEvent) -> float | None:
