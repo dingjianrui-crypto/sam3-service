@@ -1018,6 +1018,24 @@ h2 {
   box-sizing: border-box;
 }
 
+.export-controls .metric-count-control input {
+  width: 72px;
+}
+
+.body-motion-job-setting {
+  align-items: center;
+  color: #9db0c1;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 9px;
+}
+
+.body-motion-warning {
+  color: #f6bd68;
+  font-size: 12px;
+}
+
 .export-button {
   min-height: 34px;
 }

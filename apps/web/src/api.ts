@@ -26,6 +26,32 @@ export type JobSettings = {
   max_detections_per_frame: number;
   dedupe_iou_threshold: number;
   boat_reference_line: "centerline" | "waterline";
+  body_motion?: boolean;
+};
+
+export type BodyLandmark = {
+  x: number;
+  y: number;
+  z: number;
+  visibility: number;
+  presence: number;
+};
+
+export type BodyMotionFrame = {
+  frame_index: number;
+  timestamp_ms: number;
+  athlete_id: string;
+  primary_side?: "left" | "right" | null;
+  landmarks: Record<string, BodyLandmark>;
+  metrics: Record<string, number>;
+  confidence: Record<string, number>;
+};
+
+export type BodyMotionChunk = {
+  schema_version: number;
+  start_ms: number;
+  end_ms: number;
+  frames: BodyMotionFrame[];
 };
 
 export type FrameMask = {
@@ -65,7 +91,7 @@ export type ResultManifest = {
     frame_count: number;
   };
   prompts: Prompt[];
-  settings?: Pick<JobSettings, "boat_reference_line">;
+  settings?: Pick<JobSettings, "boat_reference_line" | "body_motion">;
   instances: { id: string; prompt_id: string; color: string }[];
   chunks: {
     sequence: number;
@@ -74,6 +100,23 @@ export type ResultManifest = {
     size_bytes: number;
     url: string;
   }[];
+  body_motion?: {
+    schema_version: number;
+    status: "completed" | "failed";
+    model_name?: string;
+    reference_axis?: "video_vertical";
+    direction_reference?: "centerline" | "waterline";
+    athlete_count?: number;
+    error?: { code: string; message: string; retryable: boolean };
+    chunks: {
+      sequence: number;
+      start_ms: number;
+      end_ms: number;
+      size_bytes: number;
+      url: string;
+    }[];
+  };
+  warnings?: { code: string; message: string }[];
 };
 
 export type ExportVideoOptions = {
@@ -86,6 +129,7 @@ export type ExportVideoOptions = {
   include_event_freeze: boolean;
   event_hold_seconds: number;
   include_event_metrics: boolean;
+  include_body_motion: boolean;
   metric_count: number;
   event_paddle_index?: number;
   event_metric_center_offset_percent: number;
@@ -212,6 +256,10 @@ export function getChunk(url: string): Promise<{ frames: FrameMask[] }> {
   return request(url);
 }
 
+export function getBodyMotionChunk(url: string): Promise<BodyMotionChunk> {
+  return request(url);
+}
+
 export function cancelJob(jobId: string): Promise<Job> {
   return request(`/api/v1/jobs/${jobId}/cancel`, { method: "POST" });
 }
@@ -242,6 +290,7 @@ export async function exportJobVideo(
     include_event_freeze: String(options.include_event_freeze),
     event_hold_seconds: String(options.event_hold_seconds),
     include_event_metrics: String(options.include_event_metrics),
+    include_body_motion: String(options.include_body_motion),
     metric_count: String(options.metric_count),
     event_metric_center_offset_percent: String(
       options.event_metric_center_offset_percent

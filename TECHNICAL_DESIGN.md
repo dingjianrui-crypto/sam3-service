@@ -101,9 +101,11 @@ Responsibilities:
 - create jobs and poll status;
 - play normalized browser-compatible video;
 - fetch result chunks near the current playback time;
+- fetch optional body-motion chunks near the current playback time;
 - decode RLE masks in a Web Worker;
 - render overlays on a canvas aligned with the video;
-- expose prompt, instance, box, label, and opacity controls.
+- expose prompt, instance, box, label, opacity, and Body motion controls;
+- render pose joints and measurements against the exact normalized-video source frame.
 
 Recommended browser APIs:
 
@@ -119,7 +121,8 @@ Responsibilities:
 - create and complete uploads;
 - validate media metadata;
 - create, list, cancel, retry, delete, and expire jobs;
-- return manifests and mask chunks;
+- return manifests, mask chunks, and optional body-motion chunks;
+- pass the backward-compatible `include_body_motion=false` export option to the renderer;
 - expose health and readiness;
 - reconcile upload and job state after restarts.
 
@@ -134,9 +137,10 @@ The worker starts once, validates CUDA and the checkpoint, loads the model, then
 3. normalize/probe the video if needed;
 4. process each text prompt sequentially;
 5. compact and write result chunks atomically;
-6. create the result manifest;
-7. mark the job `completed`;
-8. release per-job CPU/GPU state and clear recoverable caches.
+6. when requested, run the single-athlete MediaPipe pose pass and write separate chunks;
+7. create the result manifest;
+8. mark the job `completed`;
+9. release per-job CPU/GPU state and clear recoverable caches.
 
 Only one job is active per T4. A future worker may claim jobs by a `required_gpu_class` field without changing the API.
 
@@ -205,7 +209,7 @@ Create a normalized review/inference asset when the source is not already suitab
 - audio: copied when compatible or encoded to AAC; ignored by inference;
 - retain a mapping between normalized frame index and presentation timestamp.
 
-The normalized asset is the timing authority for both inference and browser review. The original remains available only until retention cleanup.
+The normalized asset is the timing authority for inference, browser review, pose analysis, and exports from body-motion jobs. Its optional audio stream is copied when compatible or encoded to AAC. Legacy jobs retain their existing source-first export behavior. The original remains available only until retention cleanup.
 
 Rotation metadata must be applied during normalization so mask dimensions match displayed pixels.
 
@@ -276,6 +280,22 @@ Cancellation is cooperative:
 
 Cancellation latency depends on where the upstream predictor yields control and must be measured.
 
+### 7.5 MediaPipe Pose Landmarker
+
+Body motion is an optional worker pass selected by `settings.body_motion`. The implementation uses MediaPipe Pose Landmarker in VIDEO mode with `num_poses=1` and an explicit CPU delegate, so the feature intentionally follows one primary kayaker without competing with SAM for GPU memory. The model asset is deployed separately and configured through `SAM3_POSE_MODEL_PATH`; the optional Python runtime is installed with the `pose` dependency extra.
+
+The pass emits exact normalized-video `frame_index` and `timestamp_ms` values. It retains left/right wrists, elbows, shoulders, hips, knees, and ankles. Ankles are internal inputs for knee angles and are not rendered. Derived measurements are:
+
+- elbow: shoulder-elbow-wrist;
+- shoulder: elbow-shoulder-hip;
+- hip: shoulder-hip-knee;
+- knee: hip-knee-ankle;
+- torso lean: shoulder-midpoint to hip-midpoint against the video vertical axis.
+
+Lean magnitude uses the vertical image axis. Its sign is selected from the configured waterline or centerline direction; reference endpoints are canonicalized before the sign is calculated. A requested waterline may fall back to the boat centerline for a frame. Landmark visibility and presence must both reach `0.5`. A missing or low-confidence landmark suppresses its connected segments and dependent measurements. Exponential smoothing uses `alpha=0.35` and never bridges a gap longer than 200 ms.
+
+Pose inference is not a new durable job state. The job remains in `postprocessing` while `progress.stage` reports `body_motion`. Missing runtime/model assets or pose inference errors produce an optional body-motion result with `status: failed` and a manifest warning; successful SAM segmentation remains available and the overall job completes.
+
 ## 8. Result format and playback
 
 ### 8.1 Manifest
@@ -284,7 +304,7 @@ Cancellation latency depends on where the upstream predictor yields control and 
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "job_id": "01...",
   "video": {
     "url": "/api/v1/videos/01.../content",
@@ -306,9 +326,27 @@ Cancellation latency depends on where the upstream predictor yields control and 
       "end_ms": 2000,
       "url": "/api/v1/jobs/01.../results/chunks/000000"
     }
-  ]
+  ],
+  "body_motion": {
+    "schema_version": 1,
+    "status": "completed",
+    "model_name": "mediapipe-pose-landmarker:pose_landmarker_full.task",
+    "reference_axis": "video_vertical",
+    "direction_reference": "centerline",
+    "athlete_count": 1,
+    "chunks": [
+      {
+        "sequence": 0,
+        "start_ms": 0,
+        "end_ms": 2000,
+        "url": "/api/v1/jobs/01.../results/body-motion/chunks/0"
+      }
+    ]
+  }
 }
 ```
+
+The top-level manifest remains schema v2. `body_motion` is an optional schema-v1 subdocument, so existing consumers can ignore it and jobs created without the new setting remain unchanged. A failed optional pass has `status: failed`, an `error` object, no body chunks, and a top-level warning.
 
 ### 8.2 Mask chunks
 
@@ -328,6 +366,29 @@ Use a versioned compact binary envelope such as MessagePack with gzip or Brotli 
 
 Files are written to a temporary path, checksummed, atomically renamed, and only then referenced by the manifest.
 
+Body-motion chunks are JSON and deliberately separate from mask chunks. Each frame contains an athlete ID, normalized landmarks with visibility/presence, derived metric values, and metric confidence. This preserves the established mask-chunk schema and permits independent lazy loading:
+
+```json
+{
+  "schema_version": 1,
+  "start_ms": 0,
+  "end_ms": 2000,
+  "frames": [
+    {
+      "frame_index": 12,
+      "timestamp_ms": 400,
+      "athlete_id": "primary",
+      "primary_side": "right",
+      "landmarks": {
+        "right_elbow": {"x": 0.56, "y": 0.34, "z": -0.08, "visibility": 0.98, "presence": 0.99}
+      },
+      "metrics": {"right_elbow_deg": 93.2, "lean_deg": -8.4},
+      "confidence": {"right_elbow": 0.96, "lean": 0.94}
+    }
+  ]
+}
+```
+
 ### 8.3 Rendering synchronization
 
 For every displayed video frame:
@@ -339,6 +400,8 @@ For every displayed video frame:
 5. masks are scaled from normalized pixel coordinates to that rectangle.
 
 The player must account for letterboxing and device pixel ratio. If no result timestamp is within tolerance, it draws no mask and records a development diagnostic rather than showing a stale mask.
+
+Body motion is stricter: the player and exporter first look up the exact normalized-video frame index and use only a half-frame timestamp fallback. Catch/exit analysis may insert an output freeze, but each duplicated freeze frame is rendered from the same source frame after its mask, event, and body overlays are complete. The pose timeline therefore never advances during inserted hold time. Ordinary UI playback uses the unchanged normalized review video and does not contain freezes. No charts are generated.
 
 ## 9. Domain model
 
@@ -485,7 +548,8 @@ Request:
   "settings": {
     "working_max_dimension": 1280,
     "include_boxes": true,
-    "score_threshold": 0.5
+    "score_threshold": 0.5,
+    "body_motion": true
   }
 }
 ```
@@ -501,6 +565,8 @@ Response: `202 Accepted`
 ```
 
 Only allowlisted settings are accepted. Server policy can lower limits regardless of the submitted values.
+
+`body_motion` is optional and defaults to `false`. Adding it does not change existing job states, mask chunks, or export defaults. The body chunk route and `include_body_motion` export query are additive; older clients and completed jobs remain usable.
 
 ### 10.3 Status
 
@@ -570,7 +636,8 @@ Internal stack traces never appear in API responses.
 │   └── frame_timestamps.msgpack
 ├── jobs/{job_id}/
 │   ├── manifest.json
-│   └── chunks/000000.msgpack
+│   ├── chunks/000000.msgpack
+│   └── body_motion/000000.json
 └── tmp/
 ```
 

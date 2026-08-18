@@ -24,6 +24,8 @@ class Settings:
     max_detections_per_frame_limit: int
     default_dedupe_iou_threshold: float
     cors_allow_origins: tuple[str, ...] = ()
+    body_motion_analyzer: str = "mediapipe"
+    pose_model_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -65,6 +67,14 @@ class Settings:
                 0.0, min(1.0, float(os.getenv("SAM3_DEFAULT_DEDUPE_IOU_THRESHOLD", "0.6")))
             ),
             cors_allow_origins=_csv_env("SAM3_CORS_ALLOW_ORIGINS"),
+            body_motion_analyzer=os.getenv(
+                "SAM3_BODY_MOTION_ANALYZER", "mediapipe"
+            ).lower(),
+            pose_model_path=(
+                Path(os.environ["SAM3_POSE_MODEL_PATH"]).expanduser().resolve()
+                if os.getenv("SAM3_POSE_MODEL_PATH")
+                else None
+            ),
         )
 
     def ensure_directories(self) -> None:

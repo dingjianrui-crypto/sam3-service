@@ -1,6 +1,6 @@
 # SAM 3 Paddle Review
 
-Upload a video, submit text prompts such as `paddle, boat`, process it asynchronously, and review synchronized segmentation overlays in a browser.
+Upload a video, submit text prompts such as `paddle, boat`, process it asynchronously, and review synchronized segmentation overlays in a browser. Jobs can optionally add a single-kayaker MediaPipe body skeleton, joint angles, and signed lean to UI playback and exported MP4s.
 
 The application currently supports a complete mock-mode vertical slice. The SAM 3.1 adapter is included behind the same worker interface and is enabled on the target GPU after the environment feasibility check.
 
@@ -41,6 +41,12 @@ Start the worker in a second terminal:
 SAM3_SEGMENTER=mock uv run sam3-worker
 ```
 
+To exercise the Body motion checkbox locally without a MediaPipe model asset, start the worker with the deterministic pose mock:
+
+```bash
+SAM3_SEGMENTER=mock SAM3_BODY_MOTION_ANALYZER=mock uv run sam3-worker
+```
+
 Open `http://127.0.0.1:8000`. API documentation is available at `/docs`.
 
 For live web development, run `npm run dev` under `apps/web`; Vite proxies `/api` to port 8000.
@@ -52,7 +58,7 @@ For external application integration details, see [SAM3_API_DEVELOPMENT_GUIDE.md
 SAM 3 is an optional dependency because the API and mock worker do not need its large GPU stack. Install the pinned upstream package into this project's `.venv` with:
 
 ```bash
-UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --extra sam3
+UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --extra sam3 --extra pose
 ```
 
 The `sam3` extra in `pyproject.toml` pins an upstream commit compatible with the current adapter. On Linux it also installs PyTorch 2.10.0 and torchvision from the CUDA 12.8 PyTorch index used by the current upstream instructions. It includes setuptools because upstream SAM 3 imports its legacy `pkg_resources` module at runtime without declaring that dependency.
@@ -115,6 +121,28 @@ For the NVIDIA T4 deployment:
 
 The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, so installing FlashAttention 3 would not affect inference unless that code setting were also changed.
 
+### Body motion model
+
+The `pose` extra installs MediaPipe Pose Landmarker. The model bundle is an external deployment asset and is not committed to this repository. For example, download the full float16 task bundle published for MediaPipe and keep it beside the SAM checkpoint:
+
+```bash
+curl -L \
+  https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task \
+  -o /opt/models/pose_landmarker_full.task
+```
+
+Start the worker with:
+
+```bash
+SAM3_BODY_MOTION_ANALYZER=mediapipe \
+SAM3_POSE_MODEL_PATH=/opt/models/pose_landmarker_full.task \
+uv run sam3-worker
+```
+
+MediaPipe runs in video mode with one pose. Body motion is opt-in per job and defaults off. If a requested pose pass cannot run, segmentation still completes and the result manifest reports the body-motion warning; playback and export pose controls remain unavailable. The feature renders overlays only—there are no body-motion charts.
+
+MediaPipe declares `opencv-contrib-python` while the SAM extra declares `opencv-python-headless`; the lockfile pins both to 4.11.0.86. After installing both extras on the target Linux host, verify `uv run python -c "import cv2; print(cv2.__version__)"` prints `4.11.0`. Do not partially upgrade either OpenCV distribution. Also run one real body-motion job on the deployment host before enabling the checkbox for users.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -125,6 +153,8 @@ The service deliberately constructs the SAM 3.1 predictor with `use_fa3=False`, 
 | `SAM3_SEGMENTER` | `mock` | `mock` or `sam3` |
 | `SAM3_CHECKPOINT_PATH` | unset | Local SAM 3.1 checkpoint; skips automatic download |
 | `SAM3_OFFLINE` | `0` | Require local checkpoint and disable Hugging Face network access |
+| `SAM3_BODY_MOTION_ANALYZER` | `mediapipe` | `mediapipe` for production or `mock` for local/test pose output |
+| `SAM3_POSE_MODEL_PATH` | unset | MediaPipe Pose Landmarker `.task` model used when a job enables Body motion |
 | `SAM3_OFFLOAD_VIDEO_TO_CPU` | `1` | Keep decoded video frames in CPU memory to reduce GPU use |
 | `SAM3_MAX_TRACKED_OBJECTS` | `16` | Cap tracked instances to reduce inference memory |
 | `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |
@@ -201,7 +231,7 @@ Copy or clone this repository into `/opt/sam3`, then install the application and
 
 ```bash
 cd /opt/sam3
-sudo UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --no-dev --extra sam3
+sudo UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --no-dev --extra sam3 --extra pose
 ```
 
 For a fully offline installation, copy a checkout of the pinned SAM 3 commit and the required CUDA/Python wheel files to the host. Install the local checkout into the same environment after the base `uv sync`. The example below assumes it was copied to `/opt/sam3-upstream`:
@@ -235,6 +265,8 @@ sudo chown -R root:root /opt/sam3
 sudo chmod -R a+rX /opt/sam3
 sudo chown root:root /opt/models/sam3.1_multiplex.pt
 sudo chmod 0644 /opt/models/sam3.1_multiplex.pt
+sudo chown root:root /opt/models/pose_landmarker_full.task
+sudo chmod 0644 /opt/models/pose_landmarker_full.task
 ```
 
 For an offline deployment, copy the checkpoint and all Python/npm dependencies to the host before running these installation commands. `uv sync` and `npm install` otherwise require their configured package registries.
@@ -258,7 +290,10 @@ SAM3_PORT=8000
 SAM3_SEGMENTER=sam3
 SAM3_OFFLINE=1
 SAM3_CHECKPOINT_PATH=/opt/models/sam3.1_multiplex.pt
+SAM3_BODY_MOTION_ANALYZER=mediapipe
+SAM3_POSE_MODEL_PATH=/opt/models/pose_landmarker_full.task
 HF_HOME=/var/lib/sam3/huggingface
+MPLCONFIGDIR=/var/lib/sam3/matplotlib
 
 SAM3_MAX_UPLOAD_BYTES=524288000
 SAM3_MAX_VIDEO_DURATION_SECONDS=300
@@ -448,7 +483,7 @@ The core worker pipeline uses the standard-library test runner:
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The test generates a small video with FFmpeg, normalizes it, claims a SQLite job, runs mock segmentation, and verifies the result manifest and chunks.
+The tests generate a small video with FFmpeg, normalize it, claim a SQLite job, run mock segmentation and pose analysis, verify both result chunk types, exercise angle/lean derivation and occlusion handling, and confirm body-overlay export rendering.
 
 ## Documents
 

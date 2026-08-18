@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from sam3_service.config import Settings
+from sam3_service.body_motion import MockBodyMotionAnalyzer
 from sam3_service.db import Database, expires_at, utc_now
 from sam3_service.main import _result_manifest_with_tracks
 from sam3_service.segmenter import MockSegmenter
@@ -91,7 +92,7 @@ class PipelineTest(unittest.TestCase):
             (
                 job_id,
                 video_id,
-                json.dumps({"score_threshold": 0.5}),
+                json.dumps({"score_threshold": 0.5, "body_motion": True}),
                 now,
                 expires_at(),
             ),
@@ -109,6 +110,7 @@ class PipelineTest(unittest.TestCase):
             self.database,
             self.storage,
             MockSegmenter(),
+            MockBodyMotionAnalyzer(),
         )
         self.assertTrue(worker.process_next())
         job = self.database.job_detail(job_id)
@@ -122,6 +124,10 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(len(manifest["chunks"]), 1)
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["settings"]["boat_reference_line"], "centerline")
+        self.assertTrue(manifest["settings"]["body_motion"])
+        self.assertEqual(manifest["body_motion"]["status"], "completed")
+        self.assertEqual(manifest["body_motion"]["schema_version"], 1)
+        self.assertEqual(len(manifest["body_motion"]["chunks"]), 1)
         self.assertEqual(len(manifest["tracks"]), 1)
         chunk = json.loads(self.storage.chunk_path(job_id, 0).read_text())
         self.assertEqual(len(chunk["frames"]), 10)
@@ -133,6 +139,10 @@ class PipelineTest(unittest.TestCase):
         self.assertNotIn("shaft_segmentation", chunk["frames"][0])
         self.assertNotIn("shaft_box_xywh", chunk["frames"][0])
         self.assertNotIn("shaft_line_xyxy", chunk["frames"][0])
+        body_chunk = json.loads(self.storage.body_motion_chunk_path(job_id, 0).read_text())
+        self.assertEqual(len(body_chunk["frames"]), 10)
+        self.assertEqual(body_chunk["frames"][0]["athlete_id"], "primary")
+        self.assertIn("left_elbow_deg", body_chunk["frames"][0]["metrics"])
 
         manifest["schema_version"] = 1
         manifest.pop("tracks")

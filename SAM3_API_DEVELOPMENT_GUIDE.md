@@ -152,7 +152,8 @@ Request:
     "redetect_interval_frames": 1,
     "max_detections_per_frame": 13,
     "dedupe_iou_threshold": 0.6,
-    "boat_reference_line": "centerline"
+    "boat_reference_line": "centerline",
+    "body_motion": true
   }
 }
 ```
@@ -168,6 +169,7 @@ Fields:
 | `settings.max_detections_per_frame` | integer | Maximum kept detections per prompt per frame after de-duplication; defaults to 13 and cannot exceed `SAM3_MAX_DETECTIONS_PER_FRAME` |
 | `settings.dedupe_iou_threshold` | number | Same-frame box IoU above which lower-scored duplicate detections are dropped |
 | `settings.boat_reference_line` | `centerline` or `waterline` | Boat geometry used as the paddle-angle reference; defaults to `centerline`. The web upload card exposes this choice. |
+| `settings.body_motion` | boolean | Run the optional single-athlete MediaPipe pose pass; defaults to `false`, so omitted requests retain existing behavior. |
 | `settings.include_boxes` | boolean | Reserved client preference; current chunks include boxes |
 | `settings.working_max_dimension` | integer | Accepted range `320` to `1920`; reserved for processing-size control |
 
@@ -186,6 +188,8 @@ Mode semantics:
 - `redetect_interval_frames: 1` attempts text grounding on every frame, then de-duplicates and caps detections before storing results.
 - Values above `1` re-ground on periodic anchor frames, for example `10` means frame `0, 10, 20, ...`.
 - `max_detections_per_frame` is applied per prompt after same-frame de-duplication. The service rejects values above `SAM3_MAX_DETECTIONS_PER_FRAME`.
+
+When `body_motion` is enabled, the worker analyzes the normalized review video after segmentation. This does not add a new durable job state: the job remains in `postprocessing` while `progress.stage` can report `body_motion`. Pose failure does not discard successful masks; the completed manifest instead reports body motion as failed and includes a warning.
 
 For paddle scenes with up to four paddlers, the recall-first default is `max_detections_per_frame: 13`: up to three visible paddle parts per paddler, plus room for a boat/reference prompt when used separately. Increase the service-side SAM3 object cap above this, for example `SAM3_MAX_TRACKED_OBJECTS=16` or `24`, so duplicate candidates do not consume all model slots before API de-duplication.
 
@@ -302,11 +306,30 @@ Only available when the job state is `completed`.
       "size_bytes": 12345,
       "url": "/api/v1/jobs/7a2b.../results/chunks/0"
     }
-  ]
+  ],
+  "body_motion": {
+    "schema_version": 1,
+    "status": "completed",
+    "model_name": "mediapipe-pose-landmarker:pose_landmarker_full.task",
+    "reference_axis": "video_vertical",
+    "direction_reference": "centerline",
+    "athlete_count": 1,
+    "chunks": [
+      {
+        "sequence": 0,
+        "start_ms": 0,
+        "end_ms": 2000,
+        "size_bytes": 23456,
+        "url": "/api/v1/jobs/7a2b.../results/body-motion/chunks/0"
+      }
+    ]
+  }
 }
 ```
 
 Use `video.url` for playback. The masks and geometry in chunks use the manifest video coordinate system: `(0, 0)` is the top-left pixel, `x` grows right, and `y` grows downward.
+
+The top-level manifest remains schema v2. `body_motion` is an optional schema-v1 subdocument. It is absent for old jobs and requests that omit the setting. If optional pose analysis fails, it contains `status: "failed"`, an `error` object, and an empty `chunks` array; the top-level `warnings` array describes the non-fatal failure.
 
 ## Result Chunk Format
 
@@ -366,6 +389,51 @@ Frame fields:
 | `waterline_box_xywh` | number[4] or null | Box around the waterline mask |
 | `waterline_line_xyxy` | number[4] or null | Boat waterline segment `[x1, y1, x2, y2]` |
 | `waterline_confidence` | number or null | Waterline fit confidence from `0` to `1` |
+
+## Body Motion Chunk Format
+
+`GET /api/v1/jobs/{job_id}/results/body-motion/chunks/{sequence}`
+
+This additive route is available only when `manifest.body_motion.status` is `completed`. Body data is kept separate so the established segmentation chunk schema remains unchanged.
+
+```json
+{
+  "schema_version": 1,
+  "start_ms": 0,
+  "end_ms": 2000,
+  "frames": [
+    {
+      "frame_index": 12,
+      "timestamp_ms": 400,
+      "athlete_id": "primary",
+      "primary_side": "right",
+      "landmarks": {
+        "right_shoulder": { "x": 0.54, "y": 0.28, "z": -0.04, "visibility": 0.99, "presence": 0.99 },
+        "right_elbow": { "x": 0.58, "y": 0.39, "z": -0.08, "visibility": 0.98, "presence": 0.99 },
+        "right_wrist": { "x": 0.64, "y": 0.31, "z": -0.12, "visibility": 0.97, "presence": 0.98 }
+      },
+      "metrics": {
+        "right_elbow_deg": 93.2,
+        "right_shoulder_deg": 71.4,
+        "right_hip_deg": 164.8,
+        "right_knee_deg": 102.6,
+        "lean_deg": -8.4
+      },
+      "confidence": {
+        "right_elbow": 0.97,
+        "right_shoulder": 0.97,
+        "right_hip": 0.95,
+        "right_knee": 0.92,
+        "lean": 0.94
+      }
+    }
+  ]
+}
+```
+
+MediaPipe retains left/right wrists, elbows, shoulders, hips, knees, and ankles for one primary athlete. The UI and exporter draw wrists through knees; ankles are retained only as the third point of the knee angle. Elbow, shoulder, hip, and knee values are ordinary three-point 2D angles. Lean is the shoulder-midpoint-to-hip-midpoint torso angle against the video vertical axis. Its sign uses the canonicalized configured waterline or centerline direction, with centerline fallback when a requested waterline is unavailable.
+
+A landmark is drawable only when both visibility and presence reach `0.5`. Dependent segments and metrics are omitted when this condition fails. Short exponential smoothing is applied without carrying values across a detection gap longer than 200 ms.
 
 ### Stable Track Identity
 
@@ -465,6 +533,8 @@ Recommended matching:
 2. For the current playback time, compute `current_ms = video.currentTime * 1000`.
 3. Use the nearest result timestamp within a tolerance.
 4. A practical tolerance is `max(1000 / fps, 40)` milliseconds.
+
+Body-motion playback first selects the exact normalized-video `frame_index`; it uses at most a half-frame timestamp fallback. The UI plays the unchanged normalized review video. Checking Body motion draws the skeleton and values on the existing canvas; it does not create charts or alter playback duration.
 
 If masks are rendered at a different size from the manifest video:
 
@@ -707,7 +777,7 @@ For noisy masks, add RANSAC before the principal-component step:
 
 `GET /api/v1/jobs/{job_id}/export`
 
-Returns an MP4 with centerlines and angle annotations over the original video.
+Returns an MP4 with centerlines and angle annotations. Body-motion jobs render against the normalized review video so playback, pose analysis, and export share one frame timeline; legacy jobs retain the existing source-first behavior.
 
 Use this endpoint when another application needs a quick visual artifact rather than raw analytical data. For analytics, prefer the manifest and chunks because they preserve per-frame masks, lines, boxes, scores, prompt IDs, and instance IDs.
 
@@ -724,6 +794,7 @@ Query parameters:
 | `include_event_freeze` | boolean | `false` | Insert a pause at each enabled catch or exit event |
 | `event_hold_seconds` | number, `0.1` to `10` | `1.2` | Pause duration when `include_event_freeze=true` |
 | `include_event_metrics` | boolean | `false` | Draw the cumulative catch/exit event table |
+| `include_body_motion` | boolean | `false` | Draw the selected body skeleton, primary-side joint angles, and signed lean; returns `BODY_MOTION_UNAVAILABLE` when completed pose results are absent |
 | `event_metric_center_offset_percent` | number, `-45` to `45` | `5.5` | Event-table vertical inset: nonnegative from the top, negative from the bottom |
 | `export_task_id` | string | generated by server | Client task identifier used to query live export progress |
 | `metric_count` | integer, `1` to `4` | none | Fix the number of paddle metric positions; extra detections are ignored and unavailable positions remain blank |
@@ -782,7 +853,7 @@ Each physical paddle may emit at most one catch and one exit per 360-degree cycl
 
 Nearby collinear same-type events within 250 ms are merged after state analysis as an additional safeguard. Fragment consolidation allows a modest perpendicular offset between nearly parallel detections so duplicate full-length lines from a split paddle remain one physical observation. Spatially separate paddles in a multi-athlete boat remain independent. When `metric_count` is configured, each freeze moment also renders no more than that number of event angles, choosing the highest-confidence and longest event lines first.
 
-When `include_event_freeze=true`, the exporter inserts a pause at each event timestamp for `event_hold_seconds`. Audio is silent during the pause, then video and audio resume from the same source timestamp without skipping source content. When it is false, no video or audio time is inserted. Events from different paddles within 250 ms share one freeze so a synchronized crew does not create several consecutive pauses. SPM and selection calculations remain on the original source timeline.
+When `include_event_freeze=true`, the exporter inserts a pause at each event timestamp for `event_hold_seconds`. Audio is silent during the pause, then video and audio resume from the same source timestamp without skipping source content. When it is false, no video or audio time is inserted. Events from different paddles within 250 ms share one freeze so a synchronized crew does not create several consecutive pauses. SPM and selection calculations remain on the original source timeline. When body motion is also enabled, the exporter first draws the pose for that exact source frame and then duplicates the fully annotated frame; pose lookup never advances during inserted hold time.
 
 When `include_event_metrics=true`, event geometry is drawn on the event frame: the paddle centerline is cyan, its matched boat centerline or waterline is amber, and the directed angle is red for catch or green for exit. A cumulative table reserves one chronological column per detected event. The selected event-paddle row shows raw displayed angles; every other metric row shows its signed difference from the selected angle, and missing companion measurements appear as `--`. The table and live raw-angle row can be enabled together. The table remains horizontally centered and shrinks its font as necessary to fit all configured rows and detected event columns.
 
@@ -815,7 +886,7 @@ Common status codes:
 |---|---|
 | `400` | Invalid request or unsupported video |
 | `404` | Resource not found |
-| `409` | Invalid state, such as requesting results before completion |
+| `409` | Invalid state, such as requesting results before completion, or `BODY_MOTION_UNAVAILABLE` when an export requests absent/failed pose data |
 | `413` | Upload exceeds configured limits |
 | `422` | Schema validation error |
 | `500` | Internal or export failure |
@@ -830,5 +901,7 @@ Common status codes:
 - Results are chunked by time; default chunk duration is controlled by `SAM3_RESULT_CHUNK_SECONDS`.
 - Upload chunk size is controlled by `SAM3_UPLOAD_CHUNK_BYTES`.
 - The real worker uses `SAM3_SEGMENTER=sam3`; local development can use `SAM3_SEGMENTER=mock`.
+- Body motion uses `SAM3_BODY_MOTION_ANALYZER=mediapipe` and requires `SAM3_POSE_MODEL_PATH`; tests can use `SAM3_BODY_MOTION_ANALYZER=mock`.
+- The job setting and export query are both opt-in and default to `false`. Existing request bodies, result chunks, jobs, and clients remain valid.
 - `SAM3_CENTERLINE_THICKNESS_PIXELS` controls the thickness of generated centerline masks, not the `centerline_line_xyxy` endpoints.
 - Always treat `centerline_*` fields as optional. Some masks may be too small or too ambiguous to fit a line.

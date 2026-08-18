@@ -39,6 +39,7 @@ class JobSettings(BaseModel):
     max_detections_per_frame: int | None = Field(default=None, ge=1, le=256)
     dedupe_iou_threshold: float | None = Field(default=None, ge=0, le=1)
     boat_reference_line: Literal["centerline", "waterline"] = "centerline"
+    body_motion: bool = False
 
 
 class JobCreate(BaseModel):

@@ -1,13 +1,13 @@
 # Product Requirements Document: SAM 3 Paddle Video Segmentation
 
-**Status:** Draft for alignment  
-**Version:** 0.1  
-**Date:** 2026-07-05  
+**Status:** Implemented; target-host pose validation pending
+**Version:** 0.2
+**Date:** 2026-08-18
 **Owner:** TBD
 
 ## 1. Summary
 
-Build a browser-based application and web API that let a user upload a local video, describe an object with a short text prompt such as `paddle`, `paddle shaft`, or `paddle blade`, run SAM 3.1 segmentation and tracking on a remote NVIDIA T4 server, and review the resulting object masks overlaid on the video.
+Build a browser-based application and web API that let a user upload a local video, describe an object with a short text prompt such as `paddle`, `paddle shaft`, or `paddle blade`, run SAM 3.1 segmentation and tracking on a remote NVIDIA T4 server, and review the resulting object masks overlaid on the video. An optional Body motion setting detects one primary kayaker with MediaPipe Pose Landmarker and overlays selected joints, joint angles, and signed forward/backward lean in playback and exported video.
 
 The first release is an internal, single-GPU tool optimized for correctness, clear progress reporting, and easy visual review rather than real-time inference or high concurrency.
 
@@ -33,6 +33,7 @@ Thin shafts, motion blur, occlusion, multiple paddles, scene cuts, and similarly
 - Detect, segment, and temporally track every matching object instance.
 - Preserve stable object IDs where the model supports them.
 - Review masks, labels, confidence, and object IDs over synchronized video playback.
+- Optionally review a primary kayaker's body skeleton, joint angles, and signed lean in the same player and MP4 export.
 - Show upload and processing status, progress, errors, and retry actions.
 - Make jobs and results available through a documented HTTP API.
 - Automatically expire uploaded videos and generated results after a configurable retention period.
@@ -43,6 +44,7 @@ Thin shafts, motion blur, occlusion, multiple paddles, scene cuts, and similarly
 - The service completes the agreed validation set without GPU out-of-memory failures.
 - A failed job returns a useful error and can be retried without uploading the video again.
 - Paddle or shaft masks are visible and correctly synchronized during playback.
+- Body-motion overlays, when requested and available, remain synchronized during playback, seeking, and event freezes.
 - On the validation set, the target remains identified on at least 80% of clearly visible frames, with no unreported mask/video synchronization errors.
 - Performance on the T4 is measured and documented before production limits or turnaround promises are finalized.
 
@@ -56,7 +58,8 @@ Thin shafts, motion blur, occlusion, multiple paddles, scene cuts, and similarly
 - Frame-by-frame mask editing.
 - Manual refinement with point, box, or mask prompts.
 - Permanent media storage.
-- Automated sports analytics derived from the masks.
+- Sports analytics beyond the explicitly defined paddle metrics and body-motion overlays.
+- Body-motion charts, reports, or multi-athlete pose comparison.
 
 ## 5. Target user and primary journey
 
@@ -69,9 +72,10 @@ The initial user is a researcher, coach, or developer reviewing paddle-sport foo
 5. The user starts processing.
 6. The job enters a queue and reports its current stage.
 7. When processing is complete, the user opens the review player.
-8. The player shows the source video with colored masks, labels, confidence, and stable instance IDs.
-9. The user can pause, seek, step frame by frame, toggle prompts or instances, and adjust overlay opacity.
-10. The user may delete the job and its media.
+8. The player shows the normalized review video with colored masks, labels, confidence, and stable instance IDs.
+9. When Body motion was requested, the player can also show the primary athlete's selected joints, joint angles, and signed lean.
+10. The user can pause, seek, step frame by frame, toggle prompts or instances, and adjust overlay opacity.
+11. The user may delete the job and its media.
 
 ## 6. Product requirements
 
@@ -113,6 +117,8 @@ Initial limits, subject to the T4 benchmark:
 - Use automatic mixed precision when validated not to cause unacceptable quality loss.
 - Persist model/checkpoint version, prompt, inference settings, input metadata, and timestamps with every result.
 - Fail safely on GPU out-of-memory, corrupt video, unsupported codec, missing checkpoint access, or worker restart.
+- When `body_motion` is true, run MediaPipe Pose Landmarker as an optional post-segmentation pass against the normalized review video.
+- A body-motion failure must not discard otherwise successful segmentation. Complete the job with a body-motion warning and unavailable body controls.
 
 ### 6.4 Segmentation result
 
@@ -127,6 +133,17 @@ For each processed frame and detected instance, retain:
 
 The API may deliver mask metadata in time-based chunks so the browser does not download the complete result before playback begins.
 
+Optional body-motion results use separate time-based chunks and retain:
+
+- exact normalized-video frame index and timestamp;
+- one primary athlete identifier;
+- normalized coordinates, visibility, and presence for left/right wrists, elbows, shoulders, hips, knees, and internal ankle points;
+- elbow, shoulder, hip, and knee angles for each sufficiently visible side;
+- signed torso lean in degrees relative to the video vertical axis;
+- per-measurement confidence.
+
+Ankles are retained only to calculate knee angles and are not drawn. Lean magnitude is measured against the vertical image axis. Its `+` or `-` direction is derived from the configured boat waterline or centerline after canonicalizing line endpoint order, so reversing stored endpoints does not reverse the result. If the preferred waterline is unavailable, the centerline may be used. Low-confidence landmarks and their dependent measurements are omitted rather than guessed. Short temporal smoothing is allowed, but it must not bridge a long detection gap.
+
 ### 6.5 Review player
 
 - Play, pause, seek, change playback speed, and step one frame backward or forward.
@@ -137,7 +154,11 @@ The API may deliver mask metadata in time-based chunks so the browser does not d
 - Optionally show bounding boxes, labels, IDs, and confidence.
 - Show “no object detected” without treating it as a processing failure.
 - Preserve correct mask alignment after seeking.
+- Provide a Body motion playback checkbox for jobs with completed pose results.
+- Draw only wrists, elbows, shoulders, hips, and knees; show the primary visible side's joint angles and signed lean.
+- Use the normalized review video's source frame index for pose lookup. Never advance or interpolate pose state because an export freeze inserted extra output time.
 - Provide a clear empty, loading, failed, expired, and completed state.
+- Do not add body-motion charts in this feature.
 
 ### 6.6 Job management
 
@@ -163,6 +184,8 @@ Minimum endpoints:
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
 | `POST` | `/jobs/{job_id}/retry` | Retry a failed job |
 | `GET` | `/jobs/{job_id}/results` | Read result manifest and mask chunk references |
+| `GET` | `/jobs/{job_id}/results/body-motion/chunks/{sequence}` | Read optional body-motion frames and measurements |
+| `GET` | `/jobs/{job_id}/export` | Render an annotated MP4, optionally including body motion |
 | `DELETE` | `/jobs/{job_id}` | Delete job, source media, and results |
 | `GET` | `/health/live` | Process liveness |
 | `GET` | `/health/ready` | API, storage, worker, model, and GPU readiness |
@@ -241,6 +264,9 @@ The MVP is accepted when:
 8. API endpoints are documented in OpenAPI and pass automated contract tests.
 9. Uploaded and derived files are removed by explicit deletion and automatic retention cleanup.
 10. Benchmark and quality reports document tested video properties, settings, turnaround, GPU memory peak, and known failure cases.
+11. A Body motion job exposes synchronized pose overlays in UI playback and export, while a legacy request that omits `body_motion` behaves exactly as before.
+12. Low-confidence or occluded landmarks and their dependent labels are absent, not carried forward indefinitely.
+13. Catch/exit event freezes duplicate the same fully annotated source frame for the configured hold duration; playback remains the unmodified normalized review video.
 
 ## 12. Delivery phases
 
@@ -268,11 +294,11 @@ The MVP is accepted when:
 ### Candidate post-MVP work
 
 - Point/box corrections and propagation.
-- Downloadable annotated MP4, alpha-mask video, image sequence, or COCO-format export.
+- Alpha-mask video, image sequence, or COCO-format export.
 - User accounts and shared projects.
 - Batch upload and multi-GPU scheduling.
 - Paddle-specific fine-tuning or fallback tracking.
-- Derived analytics such as paddle angle, stroke timing, or trajectory.
+- Additional derived analytics, reports, or charts beyond the implemented paddle and body overlays.
 
 ## 13. Decisions to confirm
 

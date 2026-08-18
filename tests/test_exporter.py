@@ -1646,6 +1646,7 @@ class ExporterTest(unittest.TestCase):
         self.assertFalse(options.include_event_freeze)
         self.assertEqual(options.event_hold_seconds, 1.2)
         self.assertFalse(options.include_event_metrics)
+        self.assertFalse(options.include_body_motion)
         self.assertEqual(_event_freeze_frame_count(options, 30), 0)
         self.assertEqual(
             _event_freeze_frame_count(

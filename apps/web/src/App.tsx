@@ -153,7 +153,8 @@ export default function App() {
     if (mode !== "custom") {
       setJobSettings((current) => ({
         ...DETECTION_PRESETS[mode],
-        boat_reference_line: current.boat_reference_line
+        boat_reference_line: current.boat_reference_line,
+        body_motion: current.body_motion
       }));
     }
   }
@@ -274,6 +275,20 @@ export default function App() {
                   <option value="centerline">Centerline</option>
                   <option value="waterline">Waterline</option>
                 </select>
+              </label>
+              <label className="checkbox body-motion-job-setting">
+                <input
+                  type="checkbox"
+                  checked={Boolean(jobSettings.body_motion)}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setJobSettings((current) => ({
+                      ...current,
+                      body_motion: event.target.checked
+                    }))
+                  }
+                />
+                Body motion
               </label>
               <div className="settings-grid">
                 <label className="field">

@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { exportJobVideo, FrameMask, getChunk, ResultManifest } from "./api";
+import {
+  BodyMotionFrame,
+  exportJobVideo,
+  FrameMask,
+  getBodyMotionChunk,
+  getChunk,
+  ResultManifest
+} from "./api";
 
 type Props = {
   manifest: ResultManifest;
@@ -59,6 +66,8 @@ export function Player({ manifest }: Props) {
   const selectionRectangleRef = useRef<HTMLDivElement>(null);
   const chunksRef = useRef(new Map<number, FrameMask[]>());
   const loadingRef = useRef(new Set<number>());
+  const bodyMotionChunksRef = useRef(new Map<number, BodyMotionFrame[]>());
+  const bodyMotionLoadingRef = useRef(new Set<number>());
   const selectionInteractionRef = useRef<SelectionInteraction | null>(null);
   const lastEditedKeyframeRef = useRef<number | null>(null);
   const selectionKeyframesRef = useRef<ExportSelectionKeyframe[]>([]);
@@ -104,6 +113,11 @@ export function Player({ manifest }: Props) {
   const [exportEventFreezeEnabled, setExportEventFreezeEnabled] = useState(false);
   const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.2);
   const [exportEventMetricsEnabled, setExportEventMetricsEnabled] = useState(false);
+  const bodyMotionAvailable = manifest.body_motion?.status === "completed";
+  const [bodyMotionEnabled, setBodyMotionEnabled] = useState(bodyMotionAvailable);
+  const [exportBodyMotionEnabled, setExportBodyMotionEnabled] =
+    useState(bodyMotionAvailable);
+  const [bodyMotionDataVersion, setBodyMotionDataVersion] = useState(0);
   const [exportProgress, setExportProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
@@ -148,6 +162,31 @@ export function Player({ manifest }: Props) {
     [manifest]
   );
 
+  const ensureBodyMotionChunk = useCallback(
+    async (timeMs: number) => {
+      const descriptor = manifest.body_motion?.chunks.find(
+        (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
+      );
+      if (!descriptor || bodyMotionChunksRef.current.has(descriptor.sequence)) return;
+      if (bodyMotionLoadingRef.current.has(descriptor.sequence)) return;
+      bodyMotionLoadingRef.current.add(descriptor.sequence);
+      try {
+        const payload = await getBodyMotionChunk(descriptor.url);
+        bodyMotionChunksRef.current.set(descriptor.sequence, payload.frames);
+        setBodyMotionDataVersion((current) => current + 1);
+      } catch (reason) {
+        setStatus(
+          reason instanceof Error
+            ? `Body motion overlay unavailable: ${reason.message}`
+            : "Body motion overlay unavailable."
+        );
+      } finally {
+        bodyMotionLoadingRef.current.delete(descriptor.sequence);
+      }
+    },
+    [manifest.body_motion]
+  );
+
   const draw = useCallback(
     (mediaTime: number) => {
       const canvas = canvasRef.current;
@@ -162,31 +201,51 @@ export function Player({ manifest }: Props) {
       context.clearRect(0, 0, canvas.width, canvas.height);
       const timeMs = mediaTime * 1000;
       void ensureChunk(timeMs);
+      if (bodyMotionEnabled) void ensureBodyMotionChunk(timeMs);
       const descriptor = manifest.chunks.find(
         (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
       );
-      if (!descriptor) return;
-      const records = chunksRef.current.get(descriptor.sequence);
-      if (!records) return;
-      const nearby = recordsForTime(
-        records,
-        timeMs,
-        manifest.video.fps,
-        manifest.video.frame_count,
-        enabledPrompts
-      );
-      drawOverlay(context, nearby, {
-        angleConfig: {
-          enabled: previewAnglesEnabled,
-          referencePromptId: angleReferencePromptId,
-          referenceLineMode: manifest.settings?.boat_reference_line ?? "centerline",
-          targetPromptIds: angleTargetPromptIds
-        },
-        colorByPrompt,
-        opacity,
-        overlayModes,
-        showBoxes
-      });
+      const records = descriptor
+        ? chunksRef.current.get(descriptor.sequence)
+        : undefined;
+      if (records) {
+        const nearby = recordsForTime(
+          records,
+          timeMs,
+          manifest.video.fps,
+          manifest.video.frame_count,
+          enabledPrompts
+        );
+        drawOverlay(context, nearby, {
+          angleConfig: {
+            enabled: previewAnglesEnabled,
+            referencePromptId: angleReferencePromptId,
+            referenceLineMode: manifest.settings?.boat_reference_line ?? "centerline",
+            targetPromptIds: angleTargetPromptIds
+          },
+          colorByPrompt,
+          opacity,
+          overlayModes,
+          showBoxes
+        });
+      }
+      if (bodyMotionEnabled) {
+        const bodyDescriptor = manifest.body_motion?.chunks.find(
+          (chunk) => timeMs >= chunk.start_ms && timeMs < chunk.end_ms
+        );
+        const bodyFrames = bodyDescriptor
+          ? bodyMotionChunksRef.current.get(bodyDescriptor.sequence)
+          : undefined;
+        const bodyFrame = bodyFrames
+          ? bodyMotionFrameForTime(
+              bodyFrames,
+              timeMs,
+              manifest.video.fps,
+              manifest.video.frame_count
+            )
+          : null;
+        if (bodyFrame) drawBodyMotionOverlay(context, bodyFrame);
+      }
     },
     [
       previewAnglesEnabled,
@@ -195,7 +254,10 @@ export function Player({ manifest }: Props) {
       colorByPrompt,
       enabledPrompts,
       ensureChunk,
+      ensureBodyMotionChunk,
+      bodyMotionEnabled,
       manifest.chunks,
+      manifest.body_motion,
       manifest.settings?.boat_reference_line,
       manifest.video.fps,
       opacity,
@@ -206,6 +268,11 @@ export function Player({ manifest }: Props) {
 
   useEffect(() => {
     setPreviewAnglesEnabled(false);
+    const hasBodyMotion = manifest.body_motion?.status === "completed";
+    setBodyMotionEnabled(hasBodyMotion);
+    setExportBodyMotionEnabled(hasBodyMotion);
+    bodyMotionChunksRef.current.clear();
+    bodyMotionLoadingRef.current.clear();
     setAngleReferencePromptId(defaultReferencePromptId);
     setAngleTargetPromptIds(defaultTargetPromptIds);
     setOverlayModes(defaultOverlayModes(manifest));
@@ -246,6 +313,11 @@ export function Player({ manifest }: Props) {
     video.addEventListener("timeupdate", fallback);
     return () => video.removeEventListener("timeupdate", fallback);
   }, [draw]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && video.readyState >= 2) draw(video.currentTime);
+  }, [bodyMotionDataVersion, bodyMotionEnabled, draw]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -467,6 +539,7 @@ export function Player({ manifest }: Props) {
           include_event_freeze: exportEventFreezeEnabled,
           event_hold_seconds: exportEventHoldSeconds,
           include_event_metrics: exportEventMetricsEnabled,
+          include_body_motion: exportBodyMotionEnabled,
           metric_count: exportMetricCount,
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
@@ -499,6 +572,7 @@ export function Player({ manifest }: Props) {
     exportEventFreezeEnabled,
     exportEventHoldSeconds,
     exportEventMetricsEnabled,
+    exportBodyMotionEnabled,
     exportEventPaddleIndex,
     exportExitEnabled,
     exportMetricCount,
@@ -641,6 +715,21 @@ export function Player({ manifest }: Props) {
               />
               Preview angles
             </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={bodyMotionEnabled}
+                disabled={!bodyMotionAvailable}
+                onChange={(event) => setBodyMotionEnabled(event.target.checked)}
+              />
+              Body motion
+            </label>
+            {manifest.body_motion?.status === "failed" && (
+              <span className="body-motion-warning">
+                Body motion unavailable:{" "}
+                {manifest.body_motion.error?.message ?? "analysis failed"}
+              </span>
+            )}
           </div>
           <div className="object-overlay-list">
             {manifest.prompts.map((prompt) => {
@@ -700,6 +789,15 @@ export function Player({ manifest }: Props) {
             </div>
           )}
           <div className="export-switches">
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={exportBodyMotionEnabled}
+                disabled={!bodyMotionAvailable}
+                onChange={(event) => setExportBodyMotionEnabled(event.target.checked)}
+              />
+              Include body motion
+            </label>
             <label className="checkbox">
               <input
                 type="checkbox"
@@ -892,7 +990,7 @@ export function Player({ manifest }: Props) {
               />
               Include SPM
             </label>
-            <label>
+            <label className="metric-count-control">
               Metric count
               <input
                 type="number"
@@ -1080,6 +1178,32 @@ function recordsForTime(
   );
 }
 
+function bodyMotionFrameForTime(
+  frames: BodyMotionFrame[],
+  timeMs: number,
+  fps: number,
+  frameCount: number
+): BodyMotionFrame | null {
+  if (!frames.length) return null;
+  const frameIndex = Math.min(
+    Math.max(0, Math.round((timeMs * fps) / 1000)),
+    Math.max(0, frameCount - 1)
+  );
+  const exact = frames.find((frame) => frame.frame_index === frameIndex);
+  if (exact) return exact;
+  const tolerance = 500 / Math.max(fps, 1);
+  let nearest: BodyMotionFrame | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const frame of frames) {
+    const distance = Math.abs(frame.timestamp_ms - timeMs);
+    if (distance < nearestDistance) {
+      nearest = frame;
+      nearestDistance = distance;
+    }
+  }
+  return nearestDistance <= tolerance ? nearest : null;
+}
+
 function defaultAngleReferencePromptId(manifest: ResultManifest) {
   return (
     manifest.prompts.find((prompt) => /\bboat\b/i.test(prompt.text))?.id ??
@@ -1174,6 +1298,141 @@ function drawOverlay(
   if (options.angleConfig.enabled) {
     drawAngleAnnotations(context, centerlines, options.angleConfig);
   }
+}
+
+function drawBodyMotionOverlay(
+  context: CanvasRenderingContext2D,
+  frame: BodyMotionFrame
+) {
+  const connections: Array<[string, string]> = [
+    ["wrist", "elbow"],
+    ["elbow", "shoulder"],
+    ["shoulder", "hip"],
+    ["hip", "knee"]
+  ];
+  const colors = { left: "#34D399", right: "#F472B6" } as const;
+  const lineWidth = Math.max(3, Math.min(context.canvas.width, context.canvas.height) / 180);
+  const jointRadius = Math.max(
+    4,
+    Math.min(context.canvas.width, context.canvas.height) / 125
+  );
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  for (const side of ["left", "right"] as const) {
+    context.strokeStyle = colors[side];
+    context.lineWidth = lineWidth;
+    for (const [firstName, secondName] of connections) {
+      const first = visibleBodyPoint(frame, `${side}_${firstName}`, context);
+      const second = visibleBodyPoint(frame, `${side}_${secondName}`, context);
+      if (!first || !second) continue;
+      context.beginPath();
+      context.moveTo(first[0], first[1]);
+      context.lineTo(second[0], second[1]);
+      context.stroke();
+    }
+    for (const joint of ["wrist", "elbow", "shoulder", "hip", "knee"]) {
+      const point = visibleBodyPoint(frame, `${side}_${joint}`, context);
+      if (!point) continue;
+      context.beginPath();
+      context.fillStyle = "rgba(255,255,255,0.96)";
+      context.arc(point[0], point[1], jointRadius, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = colors[side];
+      context.lineWidth = Math.max(2, lineWidth / 2);
+      context.stroke();
+    }
+  }
+
+  const side = frame.primary_side;
+  if (side === "left" || side === "right") {
+    const offsets: Record<string, [number, number]> = {
+      elbow: [-jointRadius * 4, 0],
+      shoulder: [jointRadius * 4, -jointRadius * 2],
+      hip: [-jointRadius * 4, jointRadius * 2],
+      knee: [jointRadius * 4, jointRadius * 2]
+    };
+    for (const joint of ["elbow", "shoulder", "hip", "knee"]) {
+      const value = frame.metrics[`${side}_${joint}_deg`];
+      const point = visibleBodyPoint(frame, `${side}_${joint}`, context);
+      if (!point || !Number.isFinite(value)) continue;
+      drawBodyMetricLabel(
+        context,
+        point[0] + offsets[joint][0],
+        point[1] + offsets[joint][1],
+        `${Math.round(value)}°`,
+        colors[side]
+      );
+    }
+  }
+  const lean = frame.metrics.lean_deg;
+  const shoulderCenter = bodyMidpoint(
+    frame,
+    "left_shoulder",
+    "right_shoulder",
+    context
+  );
+  if (shoulderCenter && Number.isFinite(lean)) {
+    drawBodyMetricLabel(
+      context,
+      shoulderCenter[0],
+      shoulderCenter[1] - jointRadius * 6,
+      `${lean >= 0 ? "+" : ""}${lean.toFixed(1)}°`,
+      "#FFF2A8"
+    );
+  }
+  context.restore();
+}
+
+function visibleBodyPoint(
+  frame: BodyMotionFrame,
+  name: string,
+  context: CanvasRenderingContext2D
+): [number, number] | null {
+  const landmark = frame.landmarks[name];
+  if (!landmark || Math.min(landmark.visibility, landmark.presence) < 0.5) return null;
+  if (!Number.isFinite(landmark.x) || !Number.isFinite(landmark.y)) return null;
+  return [landmark.x * context.canvas.width, landmark.y * context.canvas.height];
+}
+
+function bodyMidpoint(
+  frame: BodyMotionFrame,
+  firstName: string,
+  secondName: string,
+  context: CanvasRenderingContext2D
+): [number, number] | null {
+  const points = [
+    visibleBodyPoint(frame, firstName, context),
+    visibleBodyPoint(frame, secondName, context)
+  ].filter((point): point is [number, number] => point != null);
+  if (!points.length) return null;
+  return [
+    points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    points.reduce((sum, point) => sum + point[1], 0) / points.length
+  ];
+}
+
+function drawBodyMetricLabel(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  label: string,
+  color: string
+) {
+  const fontSize = Math.max(14, context.canvas.width / 58);
+  context.font = `${fontSize}px ${OVERLAY_FONT_FAMILY}`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  const metrics = context.measureText(label);
+  context.fillStyle = "rgba(2, 5, 9, 0.8)";
+  context.fillRect(
+    x - metrics.width / 2 - 6,
+    y - fontSize * 0.7,
+    metrics.width + 12,
+    fontSize * 1.4
+  );
+  context.fillStyle = color;
+  context.fillText(label, x, y);
 }
 
 function recordTrackLabel(record: FrameMask) {

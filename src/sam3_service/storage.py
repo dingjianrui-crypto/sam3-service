@@ -48,6 +48,20 @@ class LocalStorage:
         directory.mkdir(parents=True, exist_ok=True)
         return self._safe(directory / f"{sequence:06d}.json")
 
+    def body_motion_chunk_path(
+        self, job_id: str, sequence: int, *, create_directory: bool = True
+    ) -> Path:
+        directory = self.job_dir(job_id) / "body_motion"
+        if create_directory:
+            directory.mkdir(parents=True, exist_ok=True)
+        return self._safe(directory / f"{sequence:06d}.json")
+
+    def body_motion_chunk_paths(self, job_id: str) -> list[Path]:
+        directory = self._safe(self.root / "jobs" / job_id / "body_motion")
+        if not directory.is_dir():
+            return []
+        return sorted(path for path in directory.glob("*.json") if path.is_file())
+
     def manifest_path(self, job_id: str) -> Path:
         return self._safe(self.job_dir(job_id) / "manifest.json")
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Iterator
 
+from .body_motion import MIN_LANDMARK_CONFIDENCE, load_body_motion_frames_by_index
 from .errors import ServiceError
 from .media import probe_video
 from .paddle_completeness import build_paddle_completeness_predictor
@@ -62,6 +63,9 @@ PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
 PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
 PADDLE_EVENT_CATCH_ANGLE_COLOR = (255, 82, 96, 255)
 PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
+BODY_LEFT_COLOR = (52, 211, 153, 235)
+BODY_RIGHT_COLOR = (244, 114, 182, 235)
+BODY_JOINT_COLOR = (255, 255, 255, 245)
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ class ExportOptions:
     include_event_freeze: bool = False
     event_hold_seconds: float = 1.2
     include_event_metrics: bool = False
+    include_body_motion: bool = False
     event_metric_center_offset_percent: float = 5.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
@@ -312,6 +317,7 @@ def export_centerline_video(
     temporary_dir: Path,
     manifest: dict[str, Any],
     chunk_paths: list[Path],
+    body_motion_chunk_paths: list[Path] | None = None,
     options: ExportOptions | None = None,
     progress: Callable[[str, float, str], None] | None = None,
 ) -> Path:
@@ -345,6 +351,11 @@ def export_centerline_video(
     }
     frames = _load_frames_by_timestamp(chunk_paths)
     frames_by_index = _load_frames_by_index(chunk_paths)
+    body_motion_frames = (
+        load_body_motion_frames_by_index(body_motion_chunk_paths or [])
+        if export_options.include_body_motion
+        else {}
+    )
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
@@ -477,6 +488,7 @@ def export_centerline_video(
             decoded_frame_count += 1
             timestamp_ms = round(frame_index * 1000 / fps)
             freeze_moment = freeze_by_frame.get(frame_index)
+            body_motion_record = body_motion_frames.get(frame_index)
             records = (
                 frames_by_index.get(frame_index, [])
                 if frames_by_index is not None
@@ -511,6 +523,8 @@ def export_centerline_video(
                 spm_estimator=spm_estimator,
                 paddle_events=(),
             )
+            if body_motion_record is not None:
+                _draw_body_motion_overlay(image, width, height, body_motion_record)
             if event_metric_columns:
                 _draw_event_metric_table(
                     image,
@@ -523,6 +537,10 @@ def export_centerline_video(
             if freeze_moment is not None:
                 if export_options.include_event_metrics:
                     assert event_image is not None
+                    if body_motion_record is not None:
+                        _draw_body_motion_overlay(
+                            event_image, width, height, body_motion_record
+                        )
                     if export_options.include_angles:
                         _draw_event_companion_angles(
                             event_image,
@@ -924,6 +942,7 @@ def _normalize_export_options(
         include_event_freeze=bool(requested.include_event_freeze),
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         include_event_metrics=bool(requested.include_event_metrics),
+        include_body_motion=bool(requested.include_body_motion),
         event_metric_center_offset_percent=max(
             -45.0,
             min(45.0, float(requested.event_metric_center_offset_percent)),
@@ -4700,6 +4719,145 @@ def _draw_small_degree_label(
     for glyph in glyphs:
         _draw_bitmap(image, width, height, x, top, glyph, scale, text_color)
         x += len(glyph[0]) * scale + gap
+
+
+def _draw_body_motion_overlay(
+    image: bytearray,
+    width: int,
+    height: int,
+    record: dict[str, Any],
+) -> None:
+    landmarks = record.get("landmarks")
+    if not isinstance(landmarks, dict):
+        return
+    thickness = max(3, round(min(width, height) * 0.005))
+    radius = max(4, round(min(width, height) * 0.008))
+    connections = (
+        ("wrist", "elbow"),
+        ("elbow", "shoulder"),
+        ("shoulder", "hip"),
+        ("hip", "knee"),
+    )
+    for side, color in (("left", BODY_LEFT_COLOR), ("right", BODY_RIGHT_COLOR)):
+        for first_name, second_name in connections:
+            first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
+            second = _body_point(landmarks.get(f"{side}_{second_name}"), width, height)
+            if first is None or second is None:
+                continue
+            _draw_line(
+                image,
+                width,
+                height,
+                (first[0], first[1], second[0], second[1]),
+                color,
+                thickness,
+            )
+        for joint in ("wrist", "elbow", "shoulder", "hip", "knee"):
+            point = _body_point(landmarks.get(f"{side}_{joint}"), width, height)
+            if point is not None:
+                _fill_circle(
+                    image,
+                    width,
+                    height,
+                    round(point[0]),
+                    round(point[1]),
+                    radius,
+                    BODY_JOINT_COLOR,
+                )
+
+    primary_side = record.get("primary_side")
+    metrics = record.get("metrics")
+    if primary_side in {"left", "right"} and isinstance(metrics, dict):
+        offsets = {
+            "elbow": (-radius * 4, 0),
+            "shoulder": (radius * 4, -radius * 2),
+            "hip": (-radius * 4, radius * 2),
+            "knee": (radius * 4, radius * 2),
+        }
+        for joint, offset in offsets.items():
+            value = metrics.get(f"{primary_side}_{joint}_deg")
+            point = _body_point(
+                landmarks.get(f"{primary_side}_{joint}"), width, height
+            )
+            if point is None or not isinstance(value, (int, float)):
+                continue
+            _draw_small_degree_label(
+                image,
+                width,
+                height,
+                point[0] + offset[0],
+                point[1] + offset[1],
+                f"{round(value)}°",
+            )
+        lean = metrics.get("lean_deg")
+        shoulder_center = _body_landmark_midpoint(
+            landmarks, "left_shoulder", "right_shoulder", width, height
+        )
+        if shoulder_center is not None and isinstance(lean, (int, float)):
+            _draw_small_degree_label(
+                image,
+                width,
+                height,
+                shoulder_center[0],
+                shoulder_center[1] - radius * 6,
+                f"{lean:+.0f}°",
+                (255, 242, 168, 255),
+            )
+
+
+def _body_point(
+    landmark: Any, width: int, height: int
+) -> tuple[float, float] | None:
+    if not isinstance(landmark, dict):
+        return None
+    try:
+        visibility = float(landmark.get("visibility", 0))
+        presence = float(landmark.get("presence", 0))
+        x = float(landmark["x"])
+        y = float(landmark["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(visibility, presence) < MIN_LANDMARK_CONFIDENCE:
+        return None
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None
+    return (x * width, y * height)
+
+
+def _body_landmark_midpoint(
+    landmarks: dict[str, Any],
+    first_name: str,
+    second_name: str,
+    width: int,
+    height: int,
+) -> tuple[float, float] | None:
+    points = [
+        point
+        for name in (first_name, second_name)
+        if (point := _body_point(landmarks.get(name), width, height)) is not None
+    ]
+    if not points:
+        return None
+    return (
+        sum(point[0] for point in points) / len(points),
+        sum(point[1] for point in points) / len(points),
+    )
+
+
+def _fill_circle(
+    image: bytearray,
+    width: int,
+    height: int,
+    center_x: int,
+    center_y: int,
+    radius: int,
+    color: Color,
+) -> None:
+    radius_sq = radius * radius
+    for y in range(max(0, center_y - radius), min(height, center_y + radius + 1)):
+        for x in range(max(0, center_x - radius), min(width, center_x + radius + 1)):
+            if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius_sq:
+                _blend_pixel(image, width, x, y, color)
 
 
 def _draw_line(

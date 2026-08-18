@@ -413,6 +413,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ServiceError("NOT_FOUND", "Result chunk was not found.", status_code=404)
         return FileResponse(row["path"], media_type="application/json")
 
+    @app.get("/api/v1/jobs/{job_id}/results/body-motion/chunks/{sequence}")
+    def get_body_motion_chunk(
+        job_id: str, sequence: int, request: Request
+    ) -> FileResponse:
+        job = request.app.state.database.job_detail(job_id)
+        if not job:
+            raise ServiceError("NOT_FOUND", "Job was not found.", status_code=404)
+        if job["state"] != "completed":
+            raise ServiceError("INVALID_STATE", "Results are not ready.", status_code=409)
+        path = request.app.state.storage.body_motion_chunk_path(
+            job_id, sequence, create_directory=False
+        )
+        if not path.is_file():
+            raise ServiceError(
+                "BODY_MOTION_NOT_FOUND",
+                "Body-motion result chunk was not found.",
+                status_code=404,
+            )
+        return FileResponse(path, media_type="application/json")
+
     @app.get("/api/v1/jobs/{job_id}/export")
     def export_job(
         job_id: str,
@@ -426,6 +446,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         include_event_freeze: bool = Query(default=False),
         event_hold_seconds: float = Query(default=1.2, ge=0.1, le=10),
         include_event_metrics: bool = Query(default=False),
+        include_body_motion: bool = Query(default=False),
         export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
         event_paddle_index: int | None = Query(default=None, ge=1, le=4),
@@ -490,14 +511,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "message": message,
                 }
 
-        update_export_progress("preparing", 0, "Preparing export")
         video = _video_or_404(database, job["video_id"])
-        video_path = Path(video["source_path"] or video["normalized_path"])
+        body_motion_job = bool(job.get("settings", {}).get("body_motion", False))
+        video_path = Path(
+            (video["normalized_path"] if body_motion_job else None)
+            or video["source_path"]
+            or video["normalized_path"]
+        )
         manifest = _result_manifest_with_tracks(database, storage, job_id)
         rows = database.fetch_all(
             "SELECT path FROM result_chunks WHERE job_id = ? ORDER BY sequence", (job_id,)
         )
         chunk_paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
+        body_motion_chunk_paths: list[Path] = []
+        if include_body_motion:
+            body_motion_result = manifest.get("body_motion")
+            if (
+                not isinstance(body_motion_result, dict)
+                or body_motion_result.get("status") != "completed"
+            ):
+                raise ServiceError(
+                    "BODY_MOTION_UNAVAILABLE",
+                    "This job does not contain completed body-motion results.",
+                    status_code=409,
+                )
+            body_motion_chunk_paths = storage.body_motion_chunk_paths(job_id)
+            if not body_motion_chunk_paths:
+                raise ServiceError(
+                    "BODY_MOTION_UNAVAILABLE",
+                    "Body-motion result chunks are unavailable.",
+                    status_code=409,
+                )
+        update_export_progress("preparing", 0, "Preparing export")
         output_path = storage.export_path(job_id)
         try:
             export_centerline_video(
@@ -506,6 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 temporary_dir=storage.export_tmp_dir(job_id),
                 manifest=manifest,
                 chunk_paths=chunk_paths,
+                body_motion_chunk_paths=body_motion_chunk_paths,
                 options=ExportOptions(
                     angle_label_position=angle_label_position,
                     angle_label_font_size=angle_label_font_size,
@@ -516,6 +562,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     include_event_freeze=include_event_freeze,
                     event_hold_seconds=event_hold_seconds,
                     include_event_metrics=include_event_metrics,
+                    include_body_motion=include_body_motion,
                     target_slot_count=metric_count or 0,
                     event_paddle_index=event_paddle_index,
                     event_metric_center_offset_percent=event_metric_center_offset_percent,

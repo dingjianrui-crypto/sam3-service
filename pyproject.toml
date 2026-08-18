@@ -26,6 +26,9 @@ sam3 = [
   "torch==2.10.0; sys_platform == 'linux'",
   "torchvision; sys_platform == 'linux'",
 ]
+pose = [
+  "mediapipe>=0.10,<1",
+]
 
 [project.scripts]
 sam3-api = "sam3_service.main:run"

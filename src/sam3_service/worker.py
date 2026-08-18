@@ -10,6 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .body_motion import (
+    BodyMotionAnalyzer,
+    body_motion_chunk_payload,
+    build_body_motion_record,
+    create_body_motion_analyzer,
+    smooth_body_motion_records,
+)
 from .config import Settings
 from .db import Database, utc_now
 from .errors import JobCancelled, ServiceError
@@ -28,11 +35,13 @@ class Worker:
         database: Database,
         storage: LocalStorage,
         segmenter: VideoSegmenter,
+        body_motion_analyzer: BodyMotionAnalyzer | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.storage = storage
         self.segmenter = segmenter
+        self.body_motion_analyzer = body_motion_analyzer
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
     def process_next(self) -> bool:
@@ -78,6 +87,8 @@ class Worker:
                 "SELECT * FROM job_prompts WHERE job_id = ? ORDER BY position", (job_id,)
             )
             settings = json.loads(job["settings_json"])
+            body_motion_requested = bool(settings.get("body_motion", False))
+            total_passes = len(prompts) + (1 if body_motion_requested else 0)
             prompt_entries = []
             instances: dict[str, dict[str, Any]] = {}
             for prompt_index, prompt in enumerate(prompts):
@@ -89,7 +100,7 @@ class Worker:
 
                 def progress(done: int, total: int) -> None:
                     overall = prompt_index * total + done
-                    combined_total = max(1, len(prompts) * total)
+                    combined_total = max(1, total_passes * total)
                     self.database.execute(
                         """
                         UPDATE jobs SET processed_frames = ?, total_frames = ?,
@@ -117,8 +128,50 @@ class Worker:
                 )
             self._state(job_id, "postprocessing")
             tracks = self._assign_stable_tracks(job_id)
+            body_motion_manifest: dict[str, Any] | None = None
+            warnings: list[dict[str, str]] = []
+            if body_motion_requested:
+                self._progress_stage(job_id, "body_motion")
+                try:
+                    body_motion_manifest = self._analyze_body_motion(
+                        job_id,
+                        normalized,
+                        metadata,
+                        prompt_entries,
+                        settings,
+                        total_passes,
+                    )
+                except JobCancelled:
+                    raise
+                except Exception as exc:
+                    logger.exception("body-motion analysis failed for job %s", job_id)
+                    error = exc if isinstance(exc, ServiceError) else ServiceError(
+                        "POSE_INFERENCE_FAILED", str(exc), retryable=True
+                    )
+                    body_motion_manifest = {
+                        "schema_version": 1,
+                        "status": "failed",
+                        "error": {
+                            "code": error.code,
+                            "message": error.message,
+                            "retryable": error.retryable,
+                        },
+                        "chunks": [],
+                    }
+                    warnings.append(
+                        {"code": error.code, "message": error.message}
+                    )
+                self._progress_stage(job_id, "postprocessing")
             manifest = self._build_manifest(
-                job_id, video["id"], metadata, prompt_entries, instances, tracks, settings
+                job_id,
+                video["id"],
+                metadata,
+                prompt_entries,
+                instances,
+                tracks,
+                settings,
+                body_motion_manifest,
+                warnings,
             )
             self._atomic_json(self.storage.manifest_path(job_id), manifest)
             self.database.execute(
@@ -220,6 +273,8 @@ class Worker:
         instances: dict[str, dict[str, Any]],
         tracks: list[dict[str, Any]],
         settings: dict[str, Any],
+        body_motion: dict[str, Any] | None = None,
+        warnings: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         colors = {prompt["id"]: prompt["color"] for prompt in prompts}
         chunks = self.database.fetch_all(
@@ -227,7 +282,7 @@ class Worker:
             "WHERE job_id = ? ORDER BY sequence",
             (job_id,),
         )
-        return {
+        manifest = {
             "schema_version": 2,
             "job_id": job_id,
             "video": {
@@ -236,7 +291,8 @@ class Worker:
             },
             "prompts": prompts,
             "settings": {
-                "boat_reference_line": settings.get("boat_reference_line", "centerline")
+                "boat_reference_line": settings.get("boat_reference_line", "centerline"),
+                "body_motion": bool(settings.get("body_motion", False)),
             },
             "instances": [
                 {**entry, "color": colors.get(entry["prompt_id"], "#35C2FF")}
@@ -254,6 +310,142 @@ class Worker:
                 for chunk in chunks
             ],
         }
+        if body_motion is not None:
+            manifest["body_motion"] = body_motion
+        if warnings:
+            manifest["warnings"] = warnings
+        return manifest
+
+    def _analyze_body_motion(
+        self,
+        job_id: str,
+        video_path: Path,
+        metadata: dict[str, Any],
+        prompts: list[dict[str, Any]],
+        settings: dict[str, Any],
+        total_passes: int,
+    ) -> dict[str, Any]:
+        if self.body_motion_analyzer is None:
+            raise ServiceError(
+                "POSE_RUNTIME_UNAVAILABLE",
+                "The worker has no body-motion analyzer configured.",
+                retryable=False,
+            )
+        reference_mode = str(settings.get("boat_reference_line", "centerline"))
+        reference_lines = self._body_reference_lines(
+            job_id, prompts, reference_mode, metadata
+        )
+        prompt_passes = max(0, total_passes - 1)
+
+        def progress(done: int, total: int) -> None:
+            self.database.execute(
+                "UPDATE jobs SET processed_frames = ?, total_frames = ?, "
+                "worker_heartbeat_at = ? WHERE id = ?",
+                (
+                    prompt_passes * total + done,
+                    max(1, total_passes * total),
+                    utc_now(),
+                    job_id,
+                ),
+            )
+
+        records = [
+            build_body_motion_record(frame, reference_lines.get(frame.frame_index))
+            for frame in self.body_motion_analyzer.analyze(
+                video_path,
+                metadata,
+                progress,
+                lambda: self._cancel_requested(job_id),
+            )
+        ]
+        if not records:
+            raise ServiceError(
+                "POSE_INFERENCE_FAILED",
+                "Body-motion analysis decoded no video frames.",
+                retryable=True,
+            )
+        if not any(record.get("landmarks") for record in records):
+            raise ServiceError(
+                "POSE_NOT_DETECTED",
+                "No sufficiently visible primary athlete was detected.",
+                retryable=False,
+            )
+        smooth_body_motion_records(records)
+        by_sequence: dict[int, list[dict[str, Any]]] = {}
+        chunk_duration_ms = self.settings.result_chunk_seconds * 1000
+        for record in records:
+            sequence = int(record["timestamp_ms"]) // chunk_duration_ms
+            by_sequence.setdefault(sequence, []).append(record)
+
+        descriptors: list[dict[str, Any]] = []
+        for sequence, chunk_records in sorted(by_sequence.items()):
+            path = self.storage.body_motion_chunk_path(job_id, sequence)
+            payload = body_motion_chunk_payload(
+                chunk_records, sequence, self.settings.result_chunk_seconds
+            )
+            self._atomic_json(path, payload)
+            descriptors.append(
+                {
+                    "sequence": sequence,
+                    "start_ms": payload["start_ms"],
+                    "end_ms": payload["end_ms"],
+                    "size_bytes": path.stat().st_size,
+                    "url": (
+                        f"/api/v1/jobs/{job_id}/results/body-motion/chunks/{sequence}"
+                    ),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "status": "completed",
+            "model_name": self.body_motion_analyzer.model_name,
+            "reference_axis": "video_vertical",
+            "direction_reference": reference_mode,
+            "athlete_count": 1,
+            "chunks": descriptors,
+        }
+
+    def _body_reference_lines(
+        self,
+        job_id: str,
+        prompts: list[dict[str, Any]],
+        reference_mode: str,
+        metadata: dict[str, Any],
+    ) -> dict[int, tuple[float, float, float, float]]:
+        reference_prompt_ids = {
+            str(prompt["id"])
+            for prompt in prompts
+            if _is_boat_prompt(str(prompt.get("text", "")))
+        }
+        if not reference_prompt_ids:
+            return {}
+        rows = self.database.fetch_all(
+            "SELECT path FROM result_chunks WHERE job_id = ? ORDER BY sequence",
+            (job_id,),
+        )
+        candidates: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            path = Path(row["path"])
+            if not path.is_file():
+                continue
+            payload = json.loads(path.read_text())
+            for record in payload.get("frames", []):
+                if str(record.get("prompt_id")) not in reference_prompt_ids:
+                    continue
+                try:
+                    frame_index = int(record["frame_index"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                candidates.setdefault(frame_index, []).append(record)
+        lines: dict[int, tuple[float, float, float, float]] = {}
+        width = max(float(metadata.get("width") or 1), 1.0)
+        height = max(float(metadata.get("height") or 1), 1.0)
+        for frame_index, records in candidates.items():
+            record = max(records, key=_record_area)
+            line = _normalized_reference_line(record, reference_mode, width, height)
+            if line is not None:
+                lines[frame_index] = line
+        return lines
 
     def _assign_stable_tracks(self, job_id: str) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(
@@ -282,6 +474,12 @@ class Worker:
         self.database.execute(
             "UPDATE jobs SET state = ?, progress_stage = ?, worker_heartbeat_at = ? WHERE id = ?",
             (state, state, utc_now(), job_id),
+        )
+
+    def _progress_stage(self, job_id: str, stage: str) -> None:
+        self.database.execute(
+            "UPDATE jobs SET progress_stage = ?, worker_heartbeat_at = ? WHERE id = ?",
+            (stage, utc_now(), job_id),
         )
 
     def _cancel_requested(self, job_id: str) -> bool:
@@ -320,6 +518,51 @@ def _frame_to_dict(frame: FrameResult) -> dict[str, Any]:
     }
 
 
+def _is_boat_prompt(value: str) -> bool:
+    words = set(value.lower().replace("-", " ").split())
+    return bool(words.intersection({"boat", "kayak", "canoe", "shell"}))
+
+
+def _record_area(record: dict[str, Any]) -> float:
+    box = record.get("box_xywh") or (0, 0, 0, 0)
+    try:
+        return max(0.0, float(box[2])) * max(0.0, float(box[3]))
+    except (IndexError, TypeError, ValueError):
+        return 0.0
+
+
+def _normalized_reference_line(
+    record: dict[str, Any],
+    reference_mode: str,
+    video_width: float,
+    video_height: float,
+) -> tuple[float, float, float, float] | None:
+    use_waterline = reference_mode == "waterline"
+    values = (
+        record.get("waterline_line_xyxy") if use_waterline else None
+    ) or record.get("centerline_line_xyxy")
+    if not values or len(values) != 4:
+        return None
+    geometry = "waterline" if use_waterline and record.get("waterline_line_xyxy") else "centerline"
+    segmentation = record.get(f"{geometry}_segmentation")
+    width = video_width
+    height = video_height
+    if isinstance(segmentation, dict) and segmentation.get("type") == "rle":
+        size = segmentation.get("size")
+        if isinstance(size, list) and len(size) == 2:
+            try:
+                height = max(float(size[0]), 1.0)
+                width = max(float(size[1]), 1.0)
+            except (TypeError, ValueError):
+                width = video_width
+                height = video_height
+    try:
+        x1, y1, x2, y2 = (float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return (x1 / width, y1 / height, x2 / width, y2 / height)
+
+
 def run() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     settings = Settings.from_env()
@@ -332,7 +575,11 @@ def run() -> None:
         settings.checkpoint_path,
         offline=settings.offline,
     )
-    worker = Worker(settings, database, storage, segmenter)
+    body_motion_analyzer = create_body_motion_analyzer(
+        settings.body_motion_analyzer,
+        settings.pose_model_path,
+    )
+    worker = Worker(settings, database, storage, segmenter, body_motion_analyzer)
     logger.info("worker %s started with %s", worker.worker_id, segmenter.model_name)
     while True:
         if not worker.process_next():
