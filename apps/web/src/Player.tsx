@@ -1346,23 +1346,60 @@ function drawBodyMotionOverlay(
 
   const side = frame.primary_side;
   if (side === "left" || side === "right") {
-    const offsets: Record<string, [number, number]> = {
-      elbow: [-jointRadius * 4, 0],
-      shoulder: [jointRadius * 4, -jointRadius * 2],
-      hip: [-jointRadius * 4, jointRadius * 2],
-      knee: [jointRadius * 4, jointRadius * 2]
-    };
-    for (const joint of ["elbow", "shoulder", "hip", "knee"]) {
+    const callouts: Array<{
+      anchor: [number, number];
+      vertex: [number, number];
+      value: number;
+    }> = [];
+    for (const joint of ["elbow", "shoulder", "hip"] as const) {
       const value = frame.metrics[`${side}_${joint}_deg`];
-      const point = visibleBodyPoint(frame, `${side}_${joint}`, context);
-      if (!point || !Number.isFinite(value)) continue;
-      drawBodyMetricLabel(
+      if (!Number.isFinite(value)) continue;
+      const geometry = drawBodyJointArc(
         context,
-        point[0] + offsets[joint][0],
-        point[1] + offsets[joint][1],
-        `${Math.round(value)}°`,
-        colors[side]
+        frame,
+        side,
+        joint,
+        colors[side],
+        jointRadius,
+        lineWidth
       );
+      if (geometry) callouts.push({ ...geometry, value });
+    }
+    if (callouts.length) {
+      callouts.sort((first, second) => first.vertex[1] - second.vertex[1]);
+      const athleteX =
+        callouts.reduce((sum, callout) => sum + callout.vertex[0], 0) /
+        callouts.length;
+      const railOnRight = athleteX < context.canvas.width / 2;
+      const railX = context.canvas.width * (railOnRight ? 0.88 : 0.12);
+      const fontSize = Math.max(14, context.canvas.width / 58);
+      const spacing = Math.max(fontSize * 2, context.canvas.height * 0.07);
+      const averageY =
+        callouts.reduce((sum, callout) => sum + callout.vertex[1], 0) /
+        callouts.length;
+      const margin = fontSize * 1.5;
+      const startY = clamp(
+        averageY - (spacing * (callouts.length - 1)) / 2,
+        margin,
+        Math.max(margin, context.canvas.height - margin - spacing * (callouts.length - 1))
+      );
+      context.strokeStyle = colors[side];
+      context.lineWidth = Math.max(2, lineWidth / 2);
+      for (const [index, callout] of callouts.entries()) {
+        const labelY = startY + index * spacing;
+        const leaderEndX = railX + (railOnRight ? -jointRadius * 6 : jointRadius * 6);
+        context.beginPath();
+        context.moveTo(callout.anchor[0], callout.anchor[1]);
+        context.lineTo(leaderEndX, labelY);
+        context.stroke();
+        drawBodyMetricLabel(
+          context,
+          railX,
+          labelY,
+          `${Math.round(callout.value)}°`,
+          colors[side]
+        );
+      }
     }
   }
   const lean = frame.metrics.lean_deg;
@@ -1410,6 +1447,53 @@ function bodyMidpoint(
     points.reduce((sum, point) => sum + point[0], 0) / points.length,
     points.reduce((sum, point) => sum + point[1], 0) / points.length
   ];
+}
+
+function drawBodyJointArc(
+  context: CanvasRenderingContext2D,
+  frame: BodyMotionFrame,
+  side: "left" | "right",
+  joint: "elbow" | "shoulder" | "hip",
+  color: string,
+  jointRadius: number,
+  lineWidth: number
+): { anchor: [number, number]; vertex: [number, number] } | null {
+  const definitions = {
+    elbow: ["shoulder", "elbow", "wrist"],
+    shoulder: ["elbow", "shoulder", "hip"],
+    hip: ["shoulder", "hip", "knee"]
+  } as const;
+  const [firstName, vertexName, thirdName] = definitions[joint];
+  const first = visibleBodyPoint(frame, `${side}_${firstName}`, context);
+  const vertex = visibleBodyPoint(frame, `${side}_${vertexName}`, context);
+  const third = visibleBodyPoint(frame, `${side}_${thirdName}`, context);
+  if (!first || !vertex || !third) return null;
+  const firstLength = Math.hypot(first[0] - vertex[0], first[1] - vertex[1]);
+  const thirdLength = Math.hypot(third[0] - vertex[0], third[1] - vertex[1]);
+  const radius = clamp(
+    Math.min(firstLength, thirdLength) * 0.3,
+    jointRadius * 2.5,
+    jointRadius * 7
+  );
+  const startAngle = Math.atan2(first[1] - vertex[1], first[0] - vertex[0]);
+  const rawEndAngle = Math.atan2(third[1] - vertex[1], third[0] - vertex[0]);
+  let delta = rawEndAngle - startAngle;
+  while (delta <= -Math.PI) delta += Math.PI * 2;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  const endAngle = startAngle + delta;
+  context.beginPath();
+  context.strokeStyle = color;
+  context.lineWidth = Math.max(2, lineWidth * 0.7);
+  context.arc(vertex[0], vertex[1], radius, startAngle, endAngle, delta < 0);
+  context.stroke();
+  const midpoint = startAngle + delta / 2;
+  return {
+    vertex,
+    anchor: [
+      vertex[0] + Math.cos(midpoint) * radius,
+      vertex[1] + Math.sin(midpoint) * radius
+    ]
+  };
 }
 
 function drawBodyMetricLabel(

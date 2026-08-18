@@ -4768,27 +4768,64 @@ def _draw_body_motion_overlay(
     primary_side = record.get("primary_side")
     metrics = record.get("metrics")
     if primary_side in {"left", "right"} and isinstance(metrics, dict):
-        offsets = {
-            "elbow": (-radius * 4, 0),
-            "shoulder": (radius * 4, -radius * 2),
-            "hip": (-radius * 4, radius * 2),
-            "knee": (radius * 4, radius * 2),
+        definitions = {
+            "elbow": ("shoulder", "elbow", "wrist"),
+            "shoulder": ("elbow", "shoulder", "hip"),
+            "hip": ("shoulder", "hip", "knee"),
         }
-        for joint, offset in offsets.items():
+        callouts: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+        for joint, definition in definitions.items():
             value = metrics.get(f"{primary_side}_{joint}_deg")
-            point = _body_point(
-                landmarks.get(f"{primary_side}_{joint}"), width, height
-            )
-            if point is None or not isinstance(value, (int, float)):
+            if not isinstance(value, (int, float)):
                 continue
-            _draw_small_degree_label(
+            geometry = _draw_body_joint_arc(
                 image,
                 width,
                 height,
-                point[0] + offset[0],
-                point[1] + offset[1],
-                f"{round(value)}°",
+                landmarks,
+                primary_side,
+                definition,
+                BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR,
+                radius,
+                thickness,
             )
+            if geometry is not None:
+                anchor, vertex = geometry
+                callouts.append((anchor, vertex, float(value)))
+        if callouts:
+            callouts.sort(key=lambda callout: callout[1][1])
+            athlete_x = sum(callout[1][0] for callout in callouts) / len(callouts)
+            rail_on_right = athlete_x < width / 2
+            rail_x = width * (0.88 if rail_on_right else 0.12)
+            spacing = max(radius * 7.0, height * 0.07)
+            average_y = sum(callout[1][1] for callout in callouts) / len(callouts)
+            margin = radius * 4.0
+            start_y = _clamp(
+                average_y - spacing * (len(callouts) - 1) / 2,
+                margin,
+                max(margin, height - margin - spacing * (len(callouts) - 1)),
+            )
+            color = BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR
+            for index, (anchor, _vertex, value) in enumerate(callouts):
+                label_y = start_y + index * spacing
+                leader_end_x = rail_x + (-radius * 6 if rail_on_right else radius * 6)
+                _draw_line(
+                    image,
+                    width,
+                    height,
+                    (anchor[0], anchor[1], leader_end_x, label_y),
+                    color,
+                    max(2, round(thickness / 2)),
+                )
+                _draw_small_degree_label(
+                    image,
+                    width,
+                    height,
+                    rail_x,
+                    label_y,
+                    f"{round(value)}°",
+                    color,
+                )
         lean = metrics.get("lean_deg")
         shoulder_center = _body_landmark_midpoint(
             landmarks, "left_shoulder", "right_shoulder", width, height
@@ -4803,6 +4840,65 @@ def _draw_body_motion_overlay(
                 f"{lean:+.0f}°",
                 (255, 242, 168, 255),
             )
+
+
+def _draw_body_joint_arc(
+    image: bytearray,
+    width: int,
+    height: int,
+    landmarks: dict[str, Any],
+    side: str,
+    definition: tuple[str, str, str],
+    color: Color,
+    joint_radius: int,
+    line_thickness: int,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    first_name, vertex_name, third_name = definition
+    first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
+    vertex = _body_point(landmarks.get(f"{side}_{vertex_name}"), width, height)
+    third = _body_point(landmarks.get(f"{side}_{third_name}"), width, height)
+    if first is None or vertex is None or third is None:
+        return None
+    first_length = math.hypot(first[0] - vertex[0], first[1] - vertex[1])
+    third_length = math.hypot(third[0] - vertex[0], third[1] - vertex[1])
+    arc_radius = _clamp(
+        min(first_length, third_length) * 0.3,
+        joint_radius * 2.5,
+        joint_radius * 7.0,
+    )
+    start_angle = math.atan2(first[1] - vertex[1], first[0] - vertex[0])
+    end_angle = math.atan2(third[1] - vertex[1], third[0] - vertex[0])
+    delta = end_angle - start_angle
+    while delta <= -math.pi:
+        delta += math.tau
+    while delta > math.pi:
+        delta -= math.tau
+    segments = max(8, round(abs(delta) * arc_radius / 4))
+    previous = (
+        vertex[0] + math.cos(start_angle) * arc_radius,
+        vertex[1] + math.sin(start_angle) * arc_radius,
+    )
+    for index in range(1, segments + 1):
+        angle = start_angle + delta * index / segments
+        current = (
+            vertex[0] + math.cos(angle) * arc_radius,
+            vertex[1] + math.sin(angle) * arc_radius,
+        )
+        _draw_line(
+            image,
+            width,
+            height,
+            (previous[0], previous[1], current[0], current[1]),
+            color,
+            max(2, round(line_thickness * 0.7)),
+        )
+        previous = current
+    midpoint = start_angle + delta / 2
+    anchor = (
+        vertex[0] + math.cos(midpoint) * arc_radius,
+        vertex[1] + math.sin(midpoint) * arc_radius,
+    )
+    return anchor, vertex
 
 
 def _body_point(

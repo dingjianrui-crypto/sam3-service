@@ -5,6 +5,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from sam3_service.body_motion import (
     BodyMotionFrame,
@@ -113,6 +114,19 @@ class BodyMotionTest(unittest.TestCase):
         _draw_body_motion_overlay(image, 200, 120, record)
 
         self.assertTrue(any(image[index] for index in range(0, len(image), 4)))
+
+    @patch("sam3_service.exporter._draw_small_degree_label")
+    def test_export_uses_callouts_without_showing_knee_angle(
+        self, draw_label: Mock
+    ) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(image, 200, 120, record)
+
+        labels = [call.args[5] for call in draw_label.call_args_list]
+        self.assertEqual(len(labels), 4)  # elbow, shoulder, hip, and lean
+        self.assertNotIn("180°", labels)
 
 
 if __name__ == "__main__":

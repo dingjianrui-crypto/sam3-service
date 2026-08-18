@@ -431,7 +431,7 @@ This additive route is available only when `manifest.body_motion.status` is `com
 }
 ```
 
-MediaPipe retains left/right wrists, elbows, shoulders, hips, knees, and ankles for one primary athlete. The UI and exporter draw wrists through knees; ankles are retained only as the third point of the knee angle. Elbow, shoulder, hip, and knee values are ordinary three-point 2D angles. Lean is the shoulder-midpoint-to-hip-midpoint torso angle against the video vertical axis. Its sign uses the canonicalized configured waterline or centerline direction, with centerline fallback when a requested waterline is unavailable.
+MediaPipe retains left/right wrists, elbows, shoulders, hips, knees, and ankles for one primary athlete. The UI and exporter draw wrists through knees; ankles are retained only as the third point of the knee angle. Elbow, shoulder, hip, and knee values remain ordinary three-point 2D angles in the API. Visually, only elbow, shoulder, and hip angles are rendered: each uses a joint-centered arc, a leader line, and a callout in a stacked rail outside the athlete. The knee angle remains available in data but is not displayed. Lean is the shoulder-midpoint-to-hip-midpoint torso angle against the video vertical axis. Its sign uses the canonicalized configured waterline or centerline direction, with centerline fallback when a requested waterline is unavailable.
 
 A landmark is drawable only when both visibility and presence reach `0.5`. Dependent segments and metrics are omitted when this condition fails. Short exponential smoothing is applied without carrying values across a detection gap longer than 200 ms.
 
