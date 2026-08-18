@@ -16,7 +16,7 @@ def probe_video(path: Path) -> dict[str, Any]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,codec_name,avg_frame_rate,nb_frames:format=duration",
+        "stream=width,height,codec_name,avg_frame_rate,nb_frames,duration:format=duration",
         "-of",
         "json",
         str(path),
@@ -27,10 +27,20 @@ def probe_video(path: Path) -> dict[str, Any]:
         stream = payload["streams"][0]
         numerator, denominator = stream.get("avg_frame_rate", "0/1").split("/")
         fps = float(numerator) / float(denominator) if float(denominator) else 0.0
-        duration = float(payload.get("format", {}).get("duration") or 0)
-        reported_frame_count = int(stream.get("nb_frames") or 0)
+        duration = float(
+            stream.get("duration")
+            or payload.get("format", {}).get("duration")
+            or 0
+        )
+        try:
+            reported_frame_count = int(stream.get("nb_frames") or 0)
+        except (TypeError, ValueError):
+            reported_frame_count = 0
         duration_frame_count = round(duration * fps) if fps > 0 else 0
-        frame_count = max(reported_frame_count, duration_frame_count)
+        # Container duration can include a slightly longer audio stream. When
+        # ffprobe provides the video stream's exact frame count, it is the
+        # authoritative upper bound for zero-based inference frame indices.
+        frame_count = reported_frame_count or duration_frame_count
         if not stream.get("width") or not stream.get("height") or duration <= 0:
             raise ValueError("missing video dimensions or duration")
         return {
