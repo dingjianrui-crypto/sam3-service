@@ -155,7 +155,8 @@ Ankles are retained only to calculate knee angles and are not drawn. Lean magnit
 - Show “no object detected” without treating it as a processing failure.
 - Preserve correct mask alignment after seeking.
 - Provide a Body motion playback checkbox for jobs with completed pose results.
-- Draw wrists, elbows, shoulders, hips, and knees. For the primary visible side, show elbow, shoulder, and hip angles as joint-centered arcs linked to an external callout rail. Retain the knee metric but do not display its angle. Show signed lean separately.
+- Draw wrists, elbows, shoulders, and hips; the visible skeleton stops at the hips and does not draw knees or hip-to-knee links. For the primary visible side, show elbow and shoulder angles as joint-centered arcs without leader lines. Show Elbow, Shoulder, and signed Lean values in a color-coded row at a default 10% inset from the top during playback.
+- In export, use the former Event metrics center-offset control to position the Elbow, Shoulder, and Lean row. Remove the cumulative Event metrics table while preserving catch/exit event geometry, labels, and freeze behavior.
 - Use the normalized review video's source frame index for pose lookup. Never advance or interpolate pose state because an export freeze inserted extra output time.
 - Provide a clear empty, loading, failed, expired, and completed state.
 - Do not add body-motion charts in this feature.

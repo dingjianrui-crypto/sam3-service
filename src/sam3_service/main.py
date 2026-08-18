@@ -445,12 +445,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         include_exit: bool = Query(default=False),
         include_event_freeze: bool = Query(default=False),
         event_hold_seconds: float = Query(default=1.2, ge=0.1, le=10),
-        include_event_metrics: bool = Query(default=False),
+        include_event_metrics: bool = Query(
+            default=False,
+            deprecated=True,
+            description=(
+                "Deprecated compatibility parameter; the cumulative event table "
+                "is no longer rendered."
+            ),
+        ),
         include_body_motion: bool = Query(default=False),
         export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
         event_paddle_index: int | None = Query(default=None, ge=1, le=4),
-        event_metric_center_offset_percent: float = Query(default=5.5, ge=-45, le=45),
+        event_metric_center_offset_percent: float = Query(
+            default=5.5,
+            ge=-45,
+            le=45,
+            description=(
+                "Body-motion metric-row inset: nonnegative from the top, negative "
+                "from the bottom."
+            ),
+        ),
         metric_center_offset_percent: float | None = Query(default=None, ge=0, le=45),
         reference_prompt_id: str | None = Query(default=None),
         target_prompt_ids: str | None = Query(default=None),

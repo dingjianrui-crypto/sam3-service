@@ -112,7 +112,6 @@ export function Player({ manifest }: Props) {
   const [exportExitEnabled, setExportExitEnabled] = useState(false);
   const [exportEventFreezeEnabled, setExportEventFreezeEnabled] = useState(false);
   const [exportEventHoldSeconds, setExportEventHoldSeconds] = useState(1.2);
-  const [exportEventMetricsEnabled, setExportEventMetricsEnabled] = useState(false);
   const bodyMotionAvailable = manifest.body_motion?.status === "completed";
   const [bodyMotionEnabled, setBodyMotionEnabled] = useState(bodyMotionAvailable);
   const [exportBodyMotionEnabled, setExportBodyMotionEnabled] =
@@ -538,7 +537,7 @@ export function Player({ manifest }: Props) {
           include_exit: exportExitEnabled,
           include_event_freeze: exportEventFreezeEnabled,
           event_hold_seconds: exportEventHoldSeconds,
-          include_event_metrics: exportEventMetricsEnabled,
+          include_event_metrics: false,
           include_body_motion: exportBodyMotionEnabled,
           metric_count: exportMetricCount,
           event_paddle_index:
@@ -571,7 +570,6 @@ export function Player({ manifest }: Props) {
     exportDegreeOffsetPercent,
     exportEventFreezeEnabled,
     exportEventHoldSeconds,
-    exportEventMetricsEnabled,
     exportBodyMotionEnabled,
     exportEventPaddleIndex,
     exportExitEnabled,
@@ -823,7 +821,6 @@ export function Player({ manifest }: Props) {
                   const nextValue =
                     event.target.value === "all" ? "all" : Number(event.target.value);
                   setExportEventPaddleIndex(nextValue);
-                  if (nextValue === "all") setExportEventMetricsEnabled(false);
                 }}
               >
                 <option value="all">ALL</option>
@@ -865,24 +862,9 @@ export function Player({ manifest }: Props) {
                 seconds
               </label>
             )}
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={exportEventMetricsEnabled}
-                disabled={!exportCatchEnabled && !exportExitEnabled}
-                onChange={(event) => {
-                  const enabled = event.target.checked;
-                  setExportEventMetricsEnabled(enabled);
-                  if (enabled && exportEventPaddleIndex === "all") {
-                    setExportEventPaddleIndex(1);
-                  }
-                }}
-              />
-              Event metrics
-            </label>
-            {exportEventMetricsEnabled && (
+            {exportBodyMotionEnabled && (
               <label className="event-metric-offset-control">
-                Center offset %
+                Body metric offset %
                 <input
                   type="number"
                   min="-45"
@@ -1307,8 +1289,7 @@ function drawBodyMotionOverlay(
   const connections: Array<[string, string]> = [
     ["wrist", "elbow"],
     ["elbow", "shoulder"],
-    ["shoulder", "hip"],
-    ["hip", "knee"]
+    ["shoulder", "hip"]
   ];
   const colors = { left: "#34D399", right: "#F472B6" } as const;
   const lineWidth = Math.max(3, Math.min(context.canvas.width, context.canvas.height) / 180);
@@ -1331,7 +1312,7 @@ function drawBodyMotionOverlay(
       context.lineTo(second[0], second[1]);
       context.stroke();
     }
-    for (const joint of ["wrist", "elbow", "shoulder", "hip", "knee"]) {
+    for (const joint of ["wrist", "elbow", "shoulder", "hip"]) {
       const point = visibleBodyPoint(frame, `${side}_${joint}`, context);
       if (!point) continue;
       context.beginPath();
@@ -1345,16 +1326,12 @@ function drawBodyMotionOverlay(
   }
 
   const side = frame.primary_side;
+  const metricEntries: Array<{ label: string; value: string; color: string }> = [];
   if (side === "left" || side === "right") {
-    const callouts: Array<{
-      anchor: [number, number];
-      vertex: [number, number];
-      value: number;
-    }> = [];
-    for (const joint of ["elbow", "shoulder", "hip"] as const) {
+    for (const joint of ["elbow", "shoulder"] as const) {
       const value = frame.metrics[`${side}_${joint}_deg`];
       if (!Number.isFinite(value)) continue;
-      const geometry = drawBodyJointArc(
+      drawBodyJointArc(
         context,
         frame,
         side,
@@ -1363,61 +1340,22 @@ function drawBodyMotionOverlay(
         jointRadius,
         lineWidth
       );
-      if (geometry) callouts.push({ ...geometry, value });
-    }
-    if (callouts.length) {
-      callouts.sort((first, second) => first.vertex[1] - second.vertex[1]);
-      const athleteX =
-        callouts.reduce((sum, callout) => sum + callout.vertex[0], 0) /
-        callouts.length;
-      const railOnRight = athleteX < context.canvas.width / 2;
-      const railX = context.canvas.width * (railOnRight ? 0.88 : 0.12);
-      const fontSize = Math.max(14, context.canvas.width / 58);
-      const spacing = Math.max(fontSize * 2, context.canvas.height * 0.07);
-      const averageY =
-        callouts.reduce((sum, callout) => sum + callout.vertex[1], 0) /
-        callouts.length;
-      const margin = fontSize * 1.5;
-      const startY = clamp(
-        averageY - (spacing * (callouts.length - 1)) / 2,
-        margin,
-        Math.max(margin, context.canvas.height - margin - spacing * (callouts.length - 1))
-      );
-      context.strokeStyle = colors[side];
-      context.lineWidth = Math.max(2, lineWidth / 2);
-      for (const [index, callout] of callouts.entries()) {
-        const labelY = startY + index * spacing;
-        const leaderEndX = railX + (railOnRight ? -jointRadius * 6 : jointRadius * 6);
-        context.beginPath();
-        context.moveTo(callout.anchor[0], callout.anchor[1]);
-        context.lineTo(leaderEndX, labelY);
-        context.stroke();
-        drawBodyMetricLabel(
-          context,
-          railX,
-          labelY,
-          `${Math.round(callout.value)}°`,
-          colors[side]
-        );
-      }
+      metricEntries.push({
+        label: joint === "elbow" ? "Elbow" : "Shoulder",
+        value: `${Math.round(value)}°`,
+        color: colors[side]
+      });
     }
   }
   const lean = frame.metrics.lean_deg;
-  const shoulderCenter = bodyMidpoint(
-    frame,
-    "left_shoulder",
-    "right_shoulder",
-    context
-  );
-  if (shoulderCenter && Number.isFinite(lean)) {
-    drawBodyMetricLabel(
-      context,
-      shoulderCenter[0],
-      shoulderCenter[1] - jointRadius * 6,
-      `${lean >= 0 ? "+" : ""}${lean.toFixed(1)}°`,
-      "#FFF2A8"
-    );
+  if (Number.isFinite(lean)) {
+    metricEntries.push({
+      label: "Lean",
+      value: `${lean >= 0 ? "+" : ""}${lean.toFixed(1)}°`,
+      color: "#FFF2A8"
+    });
   }
+  drawBodyMetricRow(context, metricEntries, 10);
   context.restore();
 }
 
@@ -1432,42 +1370,24 @@ function visibleBodyPoint(
   return [landmark.x * context.canvas.width, landmark.y * context.canvas.height];
 }
 
-function bodyMidpoint(
-  frame: BodyMotionFrame,
-  firstName: string,
-  secondName: string,
-  context: CanvasRenderingContext2D
-): [number, number] | null {
-  const points = [
-    visibleBodyPoint(frame, firstName, context),
-    visibleBodyPoint(frame, secondName, context)
-  ].filter((point): point is [number, number] => point != null);
-  if (!points.length) return null;
-  return [
-    points.reduce((sum, point) => sum + point[0], 0) / points.length,
-    points.reduce((sum, point) => sum + point[1], 0) / points.length
-  ];
-}
-
 function drawBodyJointArc(
   context: CanvasRenderingContext2D,
   frame: BodyMotionFrame,
   side: "left" | "right",
-  joint: "elbow" | "shoulder" | "hip",
+  joint: "elbow" | "shoulder",
   color: string,
   jointRadius: number,
   lineWidth: number
-): { anchor: [number, number]; vertex: [number, number] } | null {
+): void {
   const definitions = {
     elbow: ["shoulder", "elbow", "wrist"],
-    shoulder: ["elbow", "shoulder", "hip"],
-    hip: ["shoulder", "hip", "knee"]
+    shoulder: ["elbow", "shoulder", "hip"]
   } as const;
   const [firstName, vertexName, thirdName] = definitions[joint];
   const first = visibleBodyPoint(frame, `${side}_${firstName}`, context);
   const vertex = visibleBodyPoint(frame, `${side}_${vertexName}`, context);
   const third = visibleBodyPoint(frame, `${side}_${thirdName}`, context);
-  if (!first || !vertex || !third) return null;
+  if (!first || !vertex || !third) return;
   const firstLength = Math.hypot(first[0] - vertex[0], first[1] - vertex[1]);
   const thirdLength = Math.hypot(third[0] - vertex[0], third[1] - vertex[1]);
   const radius = clamp(
@@ -1486,37 +1406,53 @@ function drawBodyJointArc(
   context.lineWidth = Math.max(2, lineWidth * 0.7);
   context.arc(vertex[0], vertex[1], radius, startAngle, endAngle, delta < 0);
   context.stroke();
-  const midpoint = startAngle + delta / 2;
-  return {
-    vertex,
-    anchor: [
-      vertex[0] + Math.cos(midpoint) * radius,
-      vertex[1] + Math.sin(midpoint) * radius
-    ]
-  };
 }
 
-function drawBodyMetricLabel(
+function drawBodyMetricRow(
   context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  label: string,
-  color: string
+  entries: Array<{ label: string; value: string; color: string }>,
+  offsetPercent: number
 ) {
-  const fontSize = Math.max(14, context.canvas.width / 58);
-  context.font = `${fontSize}px ${OVERLAY_FONT_FAMILY}`;
+  if (!entries.length) return;
+  let fontSize = Math.max(14, context.canvas.width / 58);
   context.textAlign = "center";
   context.textBaseline = "middle";
-  const metrics = context.measureText(label);
-  context.fillStyle = "rgba(2, 5, 9, 0.8)";
-  context.fillRect(
-    x - metrics.width / 2 - 6,
-    y - fontSize * 0.7,
-    metrics.width + 12,
-    fontSize * 1.4
+  let gap = 0;
+  let items: Array<{
+    label: string;
+    value: string;
+    color: string;
+    text: string;
+    width: number;
+  }> = [];
+  let totalWidth = 0;
+  do {
+    context.font = `${fontSize}px ${OVERLAY_FONT_FAMILY}`;
+    gap = Math.max(6, fontSize * 0.7);
+    items = entries.map((entry) => ({
+      ...entry,
+      text: `${entry.label} ${entry.value}`,
+      width: context.measureText(`${entry.label} ${entry.value}`).width + 16
+    }));
+    totalWidth =
+      items.reduce((sum, item) => sum + item.width, 0) + gap * (items.length - 1);
+    if (totalWidth <= context.canvas.width * 0.94 || fontSize <= 10) break;
+    fontSize -= 1;
+  } while (true);
+  let x = (context.canvas.width - totalWidth) / 2;
+  const y = clamp(
+    (context.canvas.height * offsetPercent) / 100,
+    fontSize,
+    context.canvas.height - fontSize
   );
-  context.fillStyle = color;
-  context.fillText(label, x, y);
+  for (const item of items) {
+    const centerX = x + item.width / 2;
+    context.fillStyle = "rgba(2, 5, 9, 0.8)";
+    context.fillRect(x, y - fontSize * 0.75, item.width, fontSize * 1.5);
+    context.fillStyle = item.color;
+    context.fillText(item.text, centerX, y);
+    x += item.width + gap;
+  }
 }
 
 function recordTrackLabel(record: FrameMask) {

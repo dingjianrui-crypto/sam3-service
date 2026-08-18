@@ -115,18 +115,30 @@ class BodyMotionTest(unittest.TestCase):
 
         self.assertTrue(any(image[index] for index in range(0, len(image), 4)))
 
-    @patch("sam3_service.exporter._draw_small_degree_label")
-    def test_export_uses_callouts_without_showing_knee_angle(
-        self, draw_label: Mock
-    ) -> None:
+    @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_shows_only_upper_body_metrics(self, draw_row: Mock) -> None:
         record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
         image = bytearray([0, 0, 0, 255] * 200 * 120)
 
         _draw_body_motion_overlay(image, 200, 120, record)
 
-        labels = [call.args[5] for call in draw_label.call_args_list]
-        self.assertEqual(len(labels), 4)  # elbow, shoulder, hip, and lean
-        self.assertNotIn("180°", labels)
+        draw_row.assert_called_once()
+        entries = draw_row.call_args.args[3]
+        self.assertEqual([entry[0] for entry in entries], ["Elbow", "Shoulder", "Lean"])
+        self.assertEqual(draw_row.call_args.args[4], 10.0)
+        self.assertNotIn("Hip", [entry[0] for entry in entries])
+        self.assertNotIn("Knee", [entry[0] for entry in entries])
+
+    @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_passes_body_metric_offset(self, draw_row: Mock) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(
+            image, 200, 120, record, metric_offset_percent=-12.5
+        )
+
+        self.assertEqual(draw_row.call_args.args[4], -12.5)
 
 
 if __name__ == "__main__":

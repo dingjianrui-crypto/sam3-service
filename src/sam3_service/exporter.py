@@ -393,26 +393,6 @@ def export_centerline_video(
         max_events_per_moment=export_options.target_slot_count,
     )
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
-    event_metric_columns: tuple[EventMetricColumn, ...] = ()
-    if (
-        export_options.include_event_metrics
-        and export_options.event_paddle_index is not None
-        and export_options.target_slot_count > 0
-    ):
-        event_metric_columns = _build_event_metric_columns(
-            events,
-            frames,
-            frames_by_index,
-            frame_timestamps,
-            colors,
-            export_options,
-            width,
-            height,
-            scale_x,
-            scale_y,
-            fps,
-            result_tolerance_ms=result_tolerance_ms,
-        )
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = _event_freeze_frame_count(export_options, fps)
     has_audio = (
@@ -507,11 +487,7 @@ def export_centerline_video(
             # Event geometry is backdated to the actual waterline crossing and can
             # differ from the regular geometry stored for this source frame. Keep
             # a clean copy so a held event frame does not show both line sets.
-            event_image = (
-                bytearray(image)
-                if freeze_moment is not None and export_options.include_event_metrics
-                else None
-            )
+            event_image = bytearray(image) if freeze_moment is not None else None
             _draw_frame_overlay(
                 image,
                 width,
@@ -524,49 +500,41 @@ def export_centerline_video(
                 paddle_events=(),
             )
             if body_motion_record is not None:
-                _draw_body_motion_overlay(image, width, height, body_motion_record)
-            if event_metric_columns:
-                _draw_event_metric_table(
+                _draw_body_motion_overlay(
                     image,
                     width,
                     height,
-                    event_metric_columns,
-                    timestamp_ms,
-                    export_options,
+                    body_motion_record,
+                    metric_offset_percent=(
+                        export_options.event_metric_center_offset_percent
+                    ),
                 )
             if freeze_moment is not None:
-                if export_options.include_event_metrics:
-                    assert event_image is not None
-                    if body_motion_record is not None:
-                        _draw_body_motion_overlay(
-                            event_image, width, height, body_motion_record
-                        )
-                    if export_options.include_angles:
-                        _draw_event_companion_angles(
-                            event_image,
-                            width,
-                            height,
-                            scaled_records,
-                            colors,
-                            export_options,
-                            freeze_moment.events,
-                        )
-                    for event in freeze_moment.events:
-                        _draw_paddle_event_label(
-                            event_image, width, height, event, export_options
-                        )
-                    if event_metric_columns:
-                        _draw_event_metric_table(
-                            event_image,
-                            width,
-                            height,
-                            event_metric_columns,
-                            timestamp_ms,
-                            export_options,
-                        )
-                else:
-                    event_image = image
                 assert event_image is not None
+                if body_motion_record is not None:
+                    _draw_body_motion_overlay(
+                        event_image,
+                        width,
+                        height,
+                        body_motion_record,
+                        metric_offset_percent=(
+                            export_options.event_metric_center_offset_percent
+                        ),
+                    )
+                if export_options.include_angles:
+                    _draw_event_companion_angles(
+                        event_image,
+                        width,
+                        height,
+                        scaled_records,
+                        colors,
+                        export_options,
+                        freeze_moment.events,
+                    )
+                for event in freeze_moment.events:
+                    _draw_paddle_event_label(
+                        event_image, width, height, event, export_options
+                    )
                 for _ in range(freeze_frame_count):
                     encoder.stdin.write(event_image)
                     output_frame_index += 1
@@ -574,7 +542,6 @@ def export_centerline_video(
                 event_image
                 if freeze_moment is not None
                 and freeze_frame_count == 0
-                and export_options.include_event_metrics
                 else image
             )
             encoder.stdin.write(output_image)
@@ -4721,11 +4688,136 @@ def _draw_small_degree_label(
         x += len(glyph[0]) * scale + gap
 
 
+def _draw_body_metric_row(
+    image: bytearray,
+    width: int,
+    height: int,
+    entries: list[tuple[str, str, Color]],
+    signed_offset_percent: float,
+) -> None:
+    if not entries:
+        return
+    if _draw_body_metric_row_with_pillow(
+        image, width, height, entries, signed_offset_percent
+    ):
+        return
+
+    scale = max(2, round(width / 700))
+    glyph_gap = max(1, round(scale * 0.4))
+    item_gap = max(8, scale * 5)
+    padding_x = scale * 4
+    padding_y = scale * 2
+    abbreviated = [f"{label[0]} {value}" for label, value, _color in entries]
+    item_widths = [
+        sum(len(_glyph(character)[0]) * scale for character in text)
+        + glyph_gap * max(0, len(text) - 1)
+        + padding_x * 2
+        for text in abbreviated
+    ]
+    row_height = 7 * scale + padding_y * 2
+    total_width = sum(item_widths) + item_gap * max(0, len(entries) - 1)
+    left = round((width - total_width) / 2)
+    top = _event_metric_table_top(height, row_height, signed_offset_percent)
+    for text, item_width, (_label, _value, color) in zip(
+        abbreviated, item_widths, entries
+    ):
+        _fill_rect(
+            image,
+            width,
+            height,
+            left,
+            top,
+            item_width,
+            row_height,
+            (2, 5, 9, 205),
+        )
+        x = left + padding_x
+        for character in text:
+            glyph = _glyph(character)
+            _draw_bitmap(image, width, height, x, top + padding_y, glyph, scale, color)
+            x += len(glyph[0]) * scale + glyph_gap
+        left += item_width + item_gap
+
+
+def _draw_body_metric_row_with_pillow(
+    image: bytearray,
+    width: int,
+    height: int,
+    entries: list[tuple[str, str, Color]],
+    signed_offset_percent: float,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+
+    font_path = _find_export_font()
+    if font_path is None:
+        return False
+
+    font_size = max(14, round(width / 58))
+    measuring_surface = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(measuring_surface)
+    texts = [f"{label} {value}" for label, value, _color in entries]
+    gap = max(10, round(font_size * 0.7))
+    padding_x = max(8, round(font_size * 0.55))
+    padding_y = max(4, round(font_size * 0.3))
+    while True:
+        try:
+            font = ImageFont.truetype(str(font_path), font_size)
+        except OSError:
+            return False
+        boxes = [draw.textbbox((0, 0), text, font=font) for text in texts]
+        item_widths = [box[2] - box[0] + padding_x * 2 for box in boxes]
+        total_width = sum(item_widths) + gap * max(0, len(entries) - 1)
+        if total_width <= width * 0.94 or font_size <= 10:
+            break
+        font_size -= 1
+        gap = max(6, round(font_size * 0.7))
+        padding_x = max(6, round(font_size * 0.55))
+        padding_y = max(3, round(font_size * 0.3))
+
+    text_height = max(box[3] - box[1] for box in boxes)
+    row_height = text_height + padding_y * 2
+    top = _event_metric_table_top(height, row_height, signed_offset_percent)
+    row_width = round(total_width)
+    row_left = round((width - row_width) / 2)
+    overlay = Image.new("RGBA", (row_width, row_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    left = 0
+    corner_radius = max(3, round(font_size * 0.25))
+    for text, box, item_width, (_label, _value, color) in zip(
+        texts, boxes, item_widths, entries
+    ):
+        draw.rounded_rectangle(
+            (left, 0, left + item_width - 1, row_height - 1),
+            radius=corner_radius,
+            fill=(2, 5, 9, 205),
+        )
+        text_left = left + (item_width - (box[2] - box[0])) / 2 - box[0]
+        text_top = (row_height - (box[3] - box[1])) / 2 - box[1]
+        draw.text((text_left, text_top), text, font=font, fill=color)
+        left += item_width + gap
+    _blend_overlay_region(
+        image,
+        width,
+        height,
+        row_left,
+        top,
+        row_width,
+        row_height,
+        overlay.tobytes(),
+    )
+    return True
+
+
 def _draw_body_motion_overlay(
     image: bytearray,
     width: int,
     height: int,
     record: dict[str, Any],
+    *,
+    metric_offset_percent: float = 10.0,
 ) -> None:
     landmarks = record.get("landmarks")
     if not isinstance(landmarks, dict):
@@ -4736,7 +4828,6 @@ def _draw_body_motion_overlay(
         ("wrist", "elbow"),
         ("elbow", "shoulder"),
         ("shoulder", "hip"),
-        ("hip", "knee"),
     )
     for side, color in (("left", BODY_LEFT_COLOR), ("right", BODY_RIGHT_COLOR)):
         for first_name, second_name in connections:
@@ -4752,7 +4843,7 @@ def _draw_body_motion_overlay(
                 color,
                 thickness,
             )
-        for joint in ("wrist", "elbow", "shoulder", "hip", "knee"):
+        for joint in ("wrist", "elbow", "shoulder", "hip"):
             point = _body_point(landmarks.get(f"{side}_{joint}"), width, height)
             if point is not None:
                 _fill_circle(
@@ -4771,74 +4862,37 @@ def _draw_body_motion_overlay(
         definitions = {
             "elbow": ("shoulder", "elbow", "wrist"),
             "shoulder": ("elbow", "shoulder", "hip"),
-            "hip": ("shoulder", "hip", "knee"),
         }
-        callouts: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+        color = BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR
+        metric_entries: list[tuple[str, str, Color]] = []
         for joint, definition in definitions.items():
             value = metrics.get(f"{primary_side}_{joint}_deg")
             if not isinstance(value, (int, float)):
                 continue
-            geometry = _draw_body_joint_arc(
+            _draw_body_joint_arc(
                 image,
                 width,
                 height,
                 landmarks,
                 primary_side,
                 definition,
-                BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR,
+                color,
                 radius,
                 thickness,
             )
-            if geometry is not None:
-                anchor, vertex = geometry
-                callouts.append((anchor, vertex, float(value)))
-        if callouts:
-            callouts.sort(key=lambda callout: callout[1][1])
-            athlete_x = sum(callout[1][0] for callout in callouts) / len(callouts)
-            rail_on_right = athlete_x < width / 2
-            rail_x = width * (0.88 if rail_on_right else 0.12)
-            spacing = max(radius * 7.0, height * 0.07)
-            average_y = sum(callout[1][1] for callout in callouts) / len(callouts)
-            margin = radius * 4.0
-            start_y = _clamp(
-                average_y - spacing * (len(callouts) - 1) / 2,
-                margin,
-                max(margin, height - margin - spacing * (len(callouts) - 1)),
-            )
-            color = BODY_LEFT_COLOR if primary_side == "left" else BODY_RIGHT_COLOR
-            for index, (anchor, _vertex, value) in enumerate(callouts):
-                label_y = start_y + index * spacing
-                leader_end_x = rail_x + (-radius * 6 if rail_on_right else radius * 6)
-                _draw_line(
-                    image,
-                    width,
-                    height,
-                    (anchor[0], anchor[1], leader_end_x, label_y),
-                    color,
-                    max(2, round(thickness / 2)),
-                )
-                _draw_small_degree_label(
-                    image,
-                    width,
-                    height,
-                    rail_x,
-                    label_y,
-                    f"{round(value)}°",
-                    color,
-                )
+            metric_entries.append((joint.title(), f"{round(value)}°", color))
         lean = metrics.get("lean_deg")
-        shoulder_center = _body_landmark_midpoint(
-            landmarks, "left_shoulder", "right_shoulder", width, height
-        )
-        if shoulder_center is not None and isinstance(lean, (int, float)):
-            _draw_small_degree_label(
+        if isinstance(lean, (int, float)):
+            metric_entries.append(
+                ("Lean", f"{float(lean):+.1f}°", (255, 242, 168, 255))
+            )
+        if metric_entries:
+            _draw_body_metric_row(
                 image,
                 width,
                 height,
-                shoulder_center[0],
-                shoulder_center[1] - radius * 6,
-                f"{lean:+.0f}°",
-                (255, 242, 168, 255),
+                metric_entries,
+                metric_offset_percent,
             )
 
 
@@ -4852,13 +4906,13 @@ def _draw_body_joint_arc(
     color: Color,
     joint_radius: int,
     line_thickness: int,
-) -> tuple[tuple[float, float], tuple[float, float]] | None:
+) -> None:
     first_name, vertex_name, third_name = definition
     first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
     vertex = _body_point(landmarks.get(f"{side}_{vertex_name}"), width, height)
     third = _body_point(landmarks.get(f"{side}_{third_name}"), width, height)
     if first is None or vertex is None or third is None:
-        return None
+        return
     first_length = math.hypot(first[0] - vertex[0], first[1] - vertex[1])
     third_length = math.hypot(third[0] - vertex[0], third[1] - vertex[1])
     arc_radius = _clamp(
@@ -4893,12 +4947,6 @@ def _draw_body_joint_arc(
             max(2, round(line_thickness * 0.7)),
         )
         previous = current
-    midpoint = start_angle + delta / 2
-    anchor = (
-        vertex[0] + math.cos(midpoint) * arc_radius,
-        vertex[1] + math.sin(midpoint) * arc_radius,
-    )
-    return anchor, vertex
 
 
 def _body_point(
@@ -4997,7 +5045,9 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
     "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
     "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
     "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
     "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
@@ -5090,6 +5140,37 @@ def _blend_overlay(image: bytearray, width: int, overlay: bytes) -> None:
             pixel // width,
             (overlay[index], overlay[index + 1], overlay[index + 2], alpha),
         )
+
+
+def _blend_overlay_region(
+    image: bytearray,
+    width: int,
+    height: int,
+    left: int,
+    top: int,
+    overlay_width: int,
+    overlay_height: int,
+    overlay: bytes,
+) -> None:
+    for overlay_y in range(overlay_height):
+        image_y = top + overlay_y
+        if image_y < 0 or image_y >= height:
+            continue
+        for overlay_x in range(overlay_width):
+            image_x = left + overlay_x
+            if image_x < 0 or image_x >= width:
+                continue
+            index = (overlay_y * overlay_width + overlay_x) * 4
+            alpha = overlay[index + 3]
+            if alpha <= 0:
+                continue
+            _blend_pixel(
+                image,
+                width,
+                image_x,
+                image_y,
+                (overlay[index], overlay[index + 1], overlay[index + 2], alpha),
+            )
 
 
 

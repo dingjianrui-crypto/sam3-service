@@ -403,7 +403,7 @@ The player must account for letterboxing and device pixel ratio. If no result ti
 
 Body motion is stricter: the player and exporter first look up the exact normalized-video frame index and use only a half-frame timestamp fallback. Catch/exit analysis may insert an output freeze, but each duplicated freeze frame is rendered from the same source frame after its mask, event, and body overlays are complete. The pose timeline therefore never advances during inserted hold time. Ordinary UI playback uses the unchanged normalized review video and does not contain freezes. No charts are generated.
 
-The visual renderer draws angle arcs at the primary-side elbow, shoulder, and hip. Each arc is connected by a leader line to a vertically stacked callout rail placed on the emptier side of the athlete. Knee angles remain in body-motion data for compatibility and possible future analysis but are not displayed. Playback and export use the same geometry and placement rules.
+The visual renderer draws wrists, elbows, shoulders, hips, and the connecting upper-body segments; rendering stops at the hips even though knee and ankle landmarks remain in body-motion data for compatibility and possible future analysis. It draws angle arcs only at the primary-side elbow and shoulder, with no leader lines. A color-coded Elbow, Shoulder, and signed Lean row is placed at a fixed 10% top offset in playback. Export uses `event_metric_center_offset_percent` to position the same row. The former cumulative Event metrics table is not rendered, while catch/exit event geometry, labels, and freeze behavior remain independent and unchanged.
 
 ## 9. Domain model
 
