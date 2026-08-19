@@ -355,7 +355,6 @@ export default function App() {
             <section className="body-motion-panel" aria-labelledby="body-motion-heading">
               <div className="analysis-panel-heading">
                 <strong id="body-motion-heading">Body motion</strong>
-                <small>MediaPipe athlete pose detection and movement metrics</small>
               </div>
               <label className="checkbox body-motion-job-setting">
                 <input
@@ -369,7 +368,7 @@ export default function App() {
                     }))
                   }
                 />
-                Enable MediaPipe body detection
+                Enable
               </label>
               <label className="field">
                 <span>Paddling discipline</span>
@@ -386,7 +385,6 @@ export default function App() {
                   <option value="kayak">Kayak</option>
                   <option value="canoe">Canoe</option>
                 </select>
-                <small>Saved for discipline-specific body metric profiles.</small>
               </label>
             </section>
             {busy && (
