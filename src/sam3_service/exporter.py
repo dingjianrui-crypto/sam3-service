@@ -71,6 +71,8 @@ BODY_RIGHT_ELBOW_COLOR = (244, 114, 182, 255)
 BODY_TORSO_COLOR = (255, 242, 168, 255)
 BODY_LEFT_SHOULDER_COLOR = (56, 189, 248, 255)
 BODY_RIGHT_SHOULDER_COLOR = (251, 146, 60, 255)
+BODY_LEFT_KNEE_COLOR = (167, 139, 250, 255)
+BODY_RIGHT_KNEE_COLOR = (250, 204, 21, 255)
 
 
 @dataclass(frozen=True)
@@ -361,6 +363,9 @@ def export_centerline_video(
         if export_options.include_body_motion
         else {}
     )
+    body_motion_discipline = str(
+        manifest.get("body_motion", {}).get("discipline", "kayak")
+    )
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
@@ -510,6 +515,7 @@ def export_centerline_video(
                     width,
                     height,
                     body_motion_record,
+                    discipline=body_motion_discipline,
                     metric_offset_percent=(
                         export_options.event_metric_center_offset_percent
                     ),
@@ -522,6 +528,7 @@ def export_centerline_video(
                         width,
                         height,
                         body_motion_record,
+                        discipline=body_motion_discipline,
                         metric_offset_percent=(
                             export_options.event_metric_center_offset_percent
                         ),
@@ -4821,6 +4828,7 @@ def _draw_body_motion_overlay(
     height: int,
     record: dict[str, Any],
     *,
+    discipline: str = "kayak",
     metric_offset_percent: float = 10.0,
 ) -> None:
     landmarks = record.get("landmarks")
@@ -4918,6 +4926,15 @@ def _draw_body_motion_overlay(
         metric_entries.append(
             (label, f"{round(value)}°" if value is not None else "--", color)
         )
+    if discipline == "canoe":
+        for label, side, color in (
+            ("L Knee", "left", BODY_LEFT_KNEE_COLOR),
+            ("R Knee", "right", BODY_RIGHT_KNEE_COLOR),
+        ):
+            value = _finite_body_metric(metrics, f"{side}_knee_deg")
+            metric_entries.append(
+                (label, f"{round(value)}°" if value is not None else "--", color)
+            )
     _draw_body_metric_row(
         image,
         width,

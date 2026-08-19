@@ -243,7 +243,13 @@ export function Player({ manifest }: Props) {
               manifest.video.frame_count
             )
           : null;
-        if (bodyFrame) drawBodyMotionOverlay(context, bodyFrame);
+        if (bodyFrame) {
+          drawBodyMotionOverlay(
+            context,
+            bodyFrame,
+            manifest.body_motion?.discipline ?? "kayak"
+          );
+        }
       }
     },
     [
@@ -1284,7 +1290,8 @@ function drawOverlay(
 
 function drawBodyMotionOverlay(
   context: CanvasRenderingContext2D,
-  frame: BodyMotionFrame
+  frame: BodyMotionFrame,
+  discipline: "kayak" | "canoe"
 ) {
   const connections: Array<[string, string]> = [
     ["wrist", "elbow"],
@@ -1330,7 +1337,9 @@ function drawBodyMotionOverlay(
     rightElbow: "#F472B6",
     torso: "#FFF2A8",
     leftShoulder: "#38BDF8",
-    rightShoulder: "#FB923C"
+    rightShoulder: "#FB923C",
+    leftKnee: "#A78BFA",
+    rightKnee: "#FACC15"
   } as const;
   const jointMetrics = [
     {
@@ -1406,6 +1415,19 @@ function drawBodyMotionOverlay(
       value: Number.isFinite(value) ? `${Math.round(value)}°` : "--",
       color: metric.color
     });
+  }
+  if (discipline === "canoe") {
+    for (const metric of [
+      { label: "L Knee", side: "left", color: metricColors.leftKnee },
+      { label: "R Knee", side: "right", color: metricColors.rightKnee }
+    ] as const) {
+      const value = frame.metrics[`${metric.side}_knee_deg`];
+      metricEntries.push({
+        label: metric.label,
+        value: Number.isFinite(value) ? `${Math.round(value)}°` : "--",
+        color: metric.color
+      });
+    }
   }
   drawBodyMetricRow(context, metricEntries, 10);
   context.restore();

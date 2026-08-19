@@ -141,6 +141,50 @@ class BodyMotionTest(unittest.TestCase):
         self.assertNotIn("Knee", [entry[0] for entry in entries])
 
     @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_adds_left_and_right_knee_metrics_for_canoe(
+        self, draw_row: Mock
+    ) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(
+            image, 200, 120, record, discipline="canoe"
+        )
+
+        entries = draw_row.call_args.args[3]
+        self.assertEqual(
+            [entry[0] for entry in entries],
+            [
+                "L Elbow",
+                "R Elbow",
+                "Torso",
+                "L Shoulder",
+                "R Shoulder",
+                "L Knee",
+                "R Knee",
+            ],
+        )
+        values = {entry[0]: entry[1] for entry in entries}
+        self.assertEqual(values["L Knee"], "180°")
+        self.assertEqual(values["R Knee"], "180°")
+
+    @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_keeps_missing_canoe_knee_metric_in_fixed_slot(
+        self, draw_row: Mock
+    ) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        record["metrics"].pop("left_knee_deg")
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(
+            image, 200, 120, record, discipline="canoe"
+        )
+
+        values = {entry[0]: entry[1] for entry in draw_row.call_args.args[3]}
+        self.assertEqual(values["L Knee"], "--")
+        self.assertEqual(values["R Knee"], "180°")
+
+    @patch("sam3_service.exporter._draw_body_metric_row")
     def test_export_keeps_missing_body_metrics_in_fixed_slots(
         self, draw_row: Mock
     ) -> None:
