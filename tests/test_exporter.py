@@ -14,6 +14,7 @@ from sam3_service.exporter import (
     EventMetricColumn,
     ExportOptions,
     PaddleEvent,
+    PADDLE_ANGLE_TEXT_COLOR,
     SpmEstimator,
     _CanoePullInterval,
     _PaddleObservation,
@@ -26,6 +27,7 @@ from sam3_service.exporter import (
     _catch_phase_allowed,
     _consolidate_paddle_observations,
     _canoe_export_travel_direction,
+    _canoe_body_travel_direction,
     _canoe_directions,
     _canoe_boat_slot_tracks,
     _canoe_phase_catch,
@@ -131,6 +133,68 @@ def _axis_track(angles: list[float]) -> list[_TimedPaddleObservation]:
 
 class ExporterTest(unittest.TestCase):
     @staticmethod
+    def _canoe_direction_pose(
+        left_shoulder_x: float,
+        right_shoulder_x: float,
+        *,
+        left_hip_x: float = 0.4,
+        right_hip_x: float = 0.6,
+        confidence: float = 1.0,
+    ) -> dict[str, object]:
+        return {
+            "landmarks": {
+                name: {
+                    "x": x,
+                    "visibility": confidence,
+                    "presence": confidence,
+                }
+                for name, x in (
+                    ("left_shoulder", left_shoulder_x),
+                    ("right_shoulder", right_shoulder_x),
+                    ("left_hip", left_hip_x),
+                    ("right_hip", right_hip_x),
+                )
+            }
+        }
+
+    def test_canoe_body_direction_uses_bilateral_shoulder_hip_offsets(self) -> None:
+        frames = {
+            index: self._canoe_direction_pose(0.5, 0.7)
+            for index in range(7)
+        }
+        frames.update(
+            {
+                7: self._canoe_direction_pose(0.3, 0.5),
+                8: self._canoe_direction_pose(0.5, 0.5),
+                9: self._canoe_direction_pose(0.5, 0.7, confidence=0.1),
+            }
+        )
+
+        self.assertEqual(_canoe_body_travel_direction(frames), ("right", 0.875))
+
+    def test_canoe_body_direction_reports_left(self) -> None:
+        frames = {
+            index: self._canoe_direction_pose(0.3, 0.5)
+            for index in range(6)
+        }
+
+        self.assertEqual(_canoe_body_travel_direction(frames), ("left", 1.0))
+
+    def test_canoe_body_direction_accepts_simple_majority(self) -> None:
+        frames = {
+            index: self._canoe_direction_pose(0.5, 0.7)
+            for index in range(23)
+        }
+        frames.update(
+            {
+                index: self._canoe_direction_pose(0.3, 0.5)
+                for index in range(23, 35)
+            }
+        )
+
+        self.assertEqual(_canoe_body_travel_direction(frames), ("right", 0.657))
+
+    @staticmethod
     def _body_motion_overlay_record() -> dict[str, object]:
         landmarks: dict[str, dict[str, float]] = {}
         x_by_side = {"left": 0.25, "right": 0.75}
@@ -191,6 +255,9 @@ class ExporterTest(unittest.TestCase):
         self.assertTrue(all(x > 50 for x in circle_x_values))
         metric_entries = draw_metrics.call_args.args[3]
         self.assertEqual([entry[0] for entry in metric_entries], ["右肘", "躯干", "右肩", "右膝"])
+        self.assertTrue(
+            all(entry[2] == PADDLE_ANGLE_TEXT_COLOR for entry in metric_entries)
+        )
         self.assertIsNone(draw_metrics.call_args.kwargs["angle_label_font_size"])
         self.assertFalse(draw_metrics.call_args.kwargs["draw_background"])
 

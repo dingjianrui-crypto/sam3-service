@@ -75,11 +75,12 @@ PADDLE_EVENT_PADDLE_COLOR = (0, 229, 255, 255)
 PADDLE_EVENT_REFERENCE_COLOR = (255, 196, 61, 255)
 PADDLE_EVENT_CATCH_ANGLE_COLOR = (255, 82, 96, 255)
 PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
+PADDLE_ANGLE_TEXT_COLOR = (255, 242, 168, 255)
 BODY_LEFT_COLOR = (52, 211, 153, 235)
 BODY_RIGHT_COLOR = (244, 114, 182, 235)
 BODY_LEFT_ELBOW_COLOR = (52, 211, 153, 255)
 BODY_RIGHT_ELBOW_COLOR = (244, 114, 182, 255)
-BODY_TORSO_COLOR = (255, 242, 168, 255)
+BODY_TORSO_COLOR = PADDLE_ANGLE_TEXT_COLOR
 BODY_LEFT_SHOULDER_COLOR = (56, 189, 248, 255)
 BODY_RIGHT_SHOULDER_COLOR = (251, 146, 60, 255)
 BODY_LEFT_KNEE_COLOR = (167, 139, 250, 255)
@@ -406,11 +407,7 @@ def export_centerline_video(
     }
     frames = _load_frames_by_timestamp(chunk_paths)
     frames_by_index = _load_frames_by_index(chunk_paths)
-    body_motion_frames = (
-        load_body_motion_frames_by_index(body_motion_chunk_paths or [])
-        if export_options.include_body_motion
-        else {}
-    )
+    body_motion_frames = load_body_motion_frames_by_index(body_motion_chunk_paths or [])
     body_motion_discipline = str(
         manifest.get("body_motion", {}).get("discipline", "kayak")
     )
@@ -445,6 +442,7 @@ def export_centerline_video(
             discipline=str(
                 manifest.get("settings", {}).get("paddling_discipline", "kayak")
             ),
+            body_motion_frames=body_motion_frames,
             progress=progress,
         )
     freeze_moments = _freeze_moments(
@@ -455,6 +453,7 @@ def export_centerline_video(
     )
     canoe_travel_direction = _canoe_export_travel_direction(
         events,
+        body_motion_frames=body_motion_frames,
         frames=frames,
         options=export_options,
         width=width,
@@ -574,7 +573,7 @@ def export_centerline_video(
                 spm_estimator=spm_estimator,
                 paddle_events=(),
             )
-            if body_motion_record is not None:
+            if export_options.include_body_motion and body_motion_record is not None:
                 _draw_body_motion_overlay(
                     image,
                     width,
@@ -589,7 +588,7 @@ def export_centerline_video(
                 )
             if freeze_moment is not None:
                 assert event_image is not None
-                if body_motion_record is not None:
+                if export_options.include_body_motion and body_motion_record is not None:
                     _draw_body_motion_overlay(
                         event_image,
                         width,
@@ -1147,6 +1146,7 @@ def _records_for_timestamp(
 def _canoe_export_travel_direction(
     events: list[PaddleEvent],
     *,
+    body_motion_frames: dict[int, dict[str, Any]] | None = None,
     frames: dict[int, list[dict[str, Any]]] | None = None,
     options: ExportOptions | None = None,
     width: int | None = None,
@@ -1160,6 +1160,12 @@ def _canoe_export_travel_direction(
     for event in events:
         if event.discipline == "canoe" and event.travel_direction in {"left", "right"}:
             return event.travel_direction
+    if discipline == "canoe":
+        body_direction, _confidence = _canoe_body_travel_direction(
+            body_motion_frames or {}
+        )
+        if body_direction in {"left", "right"}:
+            return body_direction
     if (
         not needs_body_motion
         or discipline != "canoe"
@@ -1937,11 +1943,19 @@ def _detect_paddle_events_for_discipline(
     scale_x: float,
     scale_y: float,
     discipline: str,
+    body_motion_frames: dict[int, dict[str, Any]] | None = None,
     progress: Callable[[str, float, str], None] | None = None,
 ) -> list[PaddleEvent]:
     if discipline == "canoe":
         return _detect_canoe_paddle_events(
-            frames, options, width, height, scale_x, scale_y, progress
+            frames,
+            options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+            progress,
+            body_motion_frames=body_motion_frames,
         )
     return _detect_paddle_events(
         frames, options, width, height, scale_x, scale_y, progress
@@ -1956,11 +1970,23 @@ def _detect_canoe_paddle_events(
     scale_x: float,
     scale_y: float,
     progress: Callable[[str, float, str], None] | None = None,
+    *,
+    body_motion_frames: dict[int, dict[str, Any]] | None = None,
 ) -> list[PaddleEvent]:
     tracks = _track_paddle_observations(
         frames, options, width, height, scale_x, scale_y, progress
     )
     directions = _canoe_directions(tracks)
+    body_direction = _canoe_body_travel_direction(body_motion_frames or {})
+    if body_direction[0] in {"left", "right"}:
+        directions = {
+            reference_id: ("body_motion", body_direction[0], body_direction[1])
+            for reference_id in {
+                timed.observation.reference_id
+                for observations in tracks.values()
+                for timed in observations
+            }
+        }
     tracks = _stabilize_boat_reference_lengths(
         tracks,
         directions,
@@ -2638,6 +2664,52 @@ def _canoe_directions(
         else:
             results[reference_id] = ("canoe_axis", "left", round(consensus, 3))
     return results
+
+
+def _canoe_body_travel_direction(
+    body_motion_frames: dict[int, dict[str, Any]],
+) -> tuple[str | None, float]:
+    right_votes = 0
+    left_votes = 0
+    for record in body_motion_frames.values():
+        landmarks = record.get("landmarks")
+        if not isinstance(landmarks, dict):
+            continue
+        points: dict[str, float] = {}
+        for name in ("left_shoulder", "right_shoulder", "left_hip", "right_hip"):
+            landmark = landmarks.get(name)
+            if not isinstance(landmark, dict):
+                break
+            try:
+                x = float(landmark["x"])
+                visibility = float(landmark.get("visibility", 0))
+                presence = float(landmark.get("presence", 0))
+            except (KeyError, TypeError, ValueError):
+                break
+            if (
+                not math.isfinite(x)
+                or min(visibility, presence) < MIN_LANDMARK_CONFIDENCE
+            ):
+                break
+            points[name] = x
+        if len(points) != 4:
+            continue
+        left_offset = points["left_shoulder"] - points["left_hip"]
+        right_offset = points["right_shoulder"] - points["right_hip"]
+        if left_offset > 0 and right_offset > 0:
+            right_votes += 1
+        elif left_offset < 0 and right_offset < 0:
+            left_votes += 1
+    vote_count = right_votes + left_votes
+    if vote_count < CANOE_DIRECTION_MIN_VOTES:
+        return None, 0.0
+    consensus = max(right_votes, left_votes) / vote_count
+    if right_votes == left_votes:
+        return None, round(consensus, 3)
+    return (
+        "right" if right_votes > left_votes else "left",
+        round(consensus, 3),
+    )
 
 
 def _canoe_canonical_axis_angle(line: Line, reference_line: Line) -> float | None:
@@ -5158,7 +5230,7 @@ def _degree_label_entries(
             text_color = (
                 (255, 82, 96, 255)
                 if highlight_index is not None and index - 1 == highlight_index
-                else (255, 242, 168, 255)
+                else PADDLE_ANGLE_TEXT_COLOR
             )
         if text_color_overrides is not None and index - 1 in text_color_overrides:
             text_color = text_color_overrides[index - 1]
@@ -5898,8 +5970,8 @@ def _draw_body_motion_overlay(
         width,
         height,
         [
-            (_body_metric_label(label, discipline), value, color)
-            for label, value, color in metric_entries
+            (_body_metric_label(label, discipline), value, PADDLE_ANGLE_TEXT_COLOR)
+            for label, value, _color in metric_entries
         ],
         metric_offset_percent,
         angle_label_font_size=None,

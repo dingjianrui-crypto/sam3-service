@@ -13,7 +13,7 @@ from sam3_service.body_motion import (
     load_body_motion_frames_by_index,
     smooth_body_motion_records,
 )
-from sam3_service.exporter import _draw_body_motion_overlay
+from sam3_service.exporter import PADDLE_ANGLE_TEXT_COLOR, _draw_body_motion_overlay
 from sam3_service.schemas import JobSettings
 
 
@@ -135,7 +135,9 @@ class BodyMotionTest(unittest.TestCase):
             [entry[0] for entry in entries],
             ["L Elbow", "R Elbow", "Torso", "L Shoulder", "R Shoulder"],
         )
-        self.assertEqual(len({entry[2] for entry in entries}), 5)
+        self.assertTrue(
+            all(entry[2] == PADDLE_ANGLE_TEXT_COLOR for entry in entries)
+        )
         self.assertEqual(draw_row.call_args.args[4], 10.0)
         self.assertNotIn("Hip", [entry[0] for entry in entries])
         self.assertNotIn("Knee", [entry[0] for entry in entries])
@@ -156,18 +158,18 @@ class BodyMotionTest(unittest.TestCase):
         self.assertEqual(
             [entry[0] for entry in entries],
             [
-                "L Elbow",
-                "R Elbow",
-                "Torso",
-                "L Shoulder",
-                "R Shoulder",
-                "L Knee",
-                "R Knee",
+                "左肘",
+                "右肘",
+                "躯干",
+                "左肩",
+                "右肩",
+                "左膝",
+                "右膝",
             ],
         )
         values = {entry[0]: entry[1] for entry in entries}
-        self.assertEqual(values["L Knee"], "180°")
-        self.assertEqual(values["R Knee"], "180°")
+        self.assertEqual(values["左膝"], "180°")
+        self.assertEqual(values["右膝"], "180°")
         knee_calls = [
             call
             for call in draw_arc.call_args_list
@@ -188,8 +190,8 @@ class BodyMotionTest(unittest.TestCase):
         )
 
         values = {entry[0]: entry[1] for entry in draw_row.call_args.args[3]}
-        self.assertEqual(values["L Knee"], "--")
-        self.assertEqual(values["R Knee"], "180°")
+        self.assertEqual(values["左膝"], "--")
+        self.assertEqual(values["右膝"], "180°")
 
     @patch("sam3_service.exporter._draw_body_metric_row")
     def test_export_keeps_missing_body_metrics_in_fixed_slots(

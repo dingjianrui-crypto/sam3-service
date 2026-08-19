@@ -32,9 +32,11 @@ forward recovery -> catch -> sternward pull -> exit -> forward recovery
 
 The canoe pipeline must therefore not use the kayak rule that maps clockwise
 rotation to rightward travel and anticlockwise rotation to leftward travel. For
-the agreed upright, non-mirrored production camera convention, it infers travel
-from the paddle-axis half-plane relative to a screen-right canonicalized
-waterline: `0°-90°` indicates right travel and `90°-180°` indicates left travel.
+the agreed upright, non-mirrored production camera convention, it primarily
+infers travel from body pose. A vertical screen axis passes through each hip.
+When both shoulders lie to the right of their corresponding hip axes the frame
+votes right; when both lie to the left the frame votes left. Canonical
+paddle-axis evidence remains a fallback when completed pose data is unavailable.
 
 After direction bootstrap, the pipeline calculates a direction-normalized phase
 angle. One phase is small-to-large-to-small. Catch is the first rising
@@ -44,7 +46,8 @@ frame after persistent decreasing angle evidence confirms the reversal.
 The implementation is a buffered, two-pass analysis:
 
 1. Build boat-relative paddle observations without assuming travel direction.
-2. Infer canoe travel direction from canonical paddle-axis angle evidence.
+2. Infer canoe travel direction from bilateral shoulder-to-hip horizontal votes,
+   with canonical paddle-axis evidence as fallback.
 3. Orient the boat basis in the detected direction.
 4. Reprocess buffered observations to calculate signed angles and detect catch,
    pull, exit, and recovery.
@@ -251,6 +254,16 @@ Reject it when:
 
 ## 11. Canoe Travel-direction Bootstrap
 
+Use body-motion landmarks first. A frame is eligible only when left/right
+shoulders and left/right hips all pass the landmark confidence threshold. The
+frame votes right when both `shoulder.x - hip.x` values are positive and left
+when both are negative. Mixed-side frames cast no vote. Require at least five
+eligible frames and select the simple majority; an exact tie remains unknown.
+The winning share is reported as direction confidence.
+
+If completed pose frames are unavailable or do not produce a direction, use the
+following paddle-axis fallback.
+
 Canonicalize each waterline screen-left to screen-right. For every paddle line,
 calculate its undirected axis angle relative to that waterline in `[0°, 180°)`:
 
@@ -274,7 +287,7 @@ Direction output is:
 
 ```text
 travel_direction: left | right | null
-direction_method: canoe_axis
+direction_method: body_motion | canoe_axis
 direction_confidence: 0.0 to 1.0
 supporting_strokes: integer
 ```
@@ -558,9 +571,12 @@ The following decisions are aligned for implementation:
 1. Canoe uses a dedicated pipeline; it does not reuse kayak rotation direction.
 2. Direction is measured in boat-relative coordinates because the camera follows
    the boat.
-3. Travel direction is inferred from the canonical paddle-axis half-plane.
-4. Recovery motion confirms direction but is not mandatory for every vote.
-5. Direction requires multiple complete strokes and weighted consensus.
+3. Travel direction is primarily inferred from bilateral shoulder-to-hip
+   horizontal position over valid pose frames.
+4. Canonical paddle-axis half-plane voting is retained as fallback when pose
+   direction is unavailable.
+5. Body direction requires at least five eligible frames and a simple majority;
+   paddle fallback retains its weighted-consensus threshold.
 6. Early observations are buffered and reprocessed after direction bootstrap.
 7. Canoe paddle angle is signed and direction-normalized in `[-180°, 180°)`.
 8. Pull/recovery angular reversals are preserved; they are not kayak cycles.

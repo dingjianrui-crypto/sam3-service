@@ -539,19 +539,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         chunk_paths = [Path(row["path"]) for row in rows if Path(row["path"]).is_file()]
         body_motion_chunk_paths: list[Path] = []
-        if include_body_motion:
-            body_motion_result = manifest.get("body_motion")
+        body_motion_result = manifest.get("body_motion")
+        canoe_event_detection = (
+            job.get("settings", {}).get("paddling_discipline") == "canoe"
+            and (include_catch or include_exit)
+        )
+        if include_body_motion or canoe_event_detection:
             if (
                 not isinstance(body_motion_result, dict)
                 or body_motion_result.get("status") != "completed"
             ):
-                raise ServiceError(
-                    "BODY_MOTION_UNAVAILABLE",
-                    "This job does not contain completed body-motion results.",
-                    status_code=409,
-                )
-            body_motion_chunk_paths = storage.body_motion_chunk_paths(job_id)
-            if not body_motion_chunk_paths:
+                if canoe_event_detection and not include_body_motion:
+                    body_motion_result = None
+                else:
+                    raise ServiceError(
+                        "BODY_MOTION_UNAVAILABLE",
+                        "This job does not contain completed body-motion results.",
+                        status_code=409,
+                    )
+            if isinstance(body_motion_result, dict):
+                body_motion_chunk_paths = storage.body_motion_chunk_paths(job_id)
+            if include_body_motion and not body_motion_chunk_paths:
                 raise ServiceError(
                     "BODY_MOTION_UNAVAILABLE",
                     "Body-motion result chunks are unavailable.",
