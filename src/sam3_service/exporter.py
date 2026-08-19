@@ -5720,6 +5720,20 @@ def _draw_body_metric_row_with_pillow(
     return True
 
 
+def _body_metric_label(label: str, discipline: str) -> str:
+    if discipline != "canoe":
+        return label
+    return {
+        "L Elbow": "左肘",
+        "R Elbow": "右肘",
+        "Torso": "躯干",
+        "L Shoulder": "左肩",
+        "R Shoulder": "右肩",
+        "L Knee": "左膝",
+        "R Knee": "右膝",
+    }.get(label, label)
+
+
 def _draw_body_motion_overlay(
     image: bytearray,
     width: int,
@@ -5747,6 +5761,12 @@ def _draw_body_motion_overlay(
         if discipline == "canoe"
         else upper_body_connections
     )
+    hidden_body_side: str | None = None
+    if discipline == "canoe":
+        if canoe_travel_direction == "right":
+            hidden_body_side = "left"
+        elif canoe_travel_direction == "left":
+            hidden_body_side = "right"
     joint_colors = {
         ("left", "elbow"): BODY_LEFT_ELBOW_COLOR,
         ("right", "elbow"): BODY_RIGHT_ELBOW_COLOR,
@@ -5756,6 +5776,8 @@ def _draw_body_motion_overlay(
         ("right", "knee"): BODY_RIGHT_KNEE_COLOR,
     }
     for side, color in (("left", BODY_LEFT_COLOR), ("right", BODY_RIGHT_COLOR)):
+        if side == hidden_body_side:
+            continue
         for first_name, second_name in connections:
             first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
             second = _body_point(landmarks.get(f"{side}_{second_name}"), width, height)
@@ -5793,12 +5815,6 @@ def _draw_body_motion_overlay(
         "shoulder": ("elbow", "shoulder", "hip"),
         "knee": ("hip", "knee", "ankle"),
     }
-    hidden_metric_side: str | None = None
-    if discipline == "canoe":
-        if canoe_travel_direction == "right":
-            hidden_metric_side = "left"
-        elif canoe_travel_direction == "left":
-            hidden_metric_side = "right"
     joint_metrics = (
         ("L Elbow", "left", "elbow", BODY_LEFT_ELBOW_COLOR),
         ("R Elbow", "right", "elbow", BODY_RIGHT_ELBOW_COLOR),
@@ -5809,7 +5825,7 @@ def _draw_body_motion_overlay(
     )
     metric_entries: list[tuple[str, str, Color]] = []
     for label, side, joint, color in joint_metrics:
-        if side == hidden_metric_side:
+        if side == hidden_body_side:
             continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
         if value is not None:
@@ -5836,7 +5852,7 @@ def _draw_body_motion_overlay(
         )
     )
     for label, side, joint, color in shoulder_metrics:
-        if side == hidden_metric_side:
+        if side == hidden_body_side:
             continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
         if value is not None:
@@ -5859,7 +5875,7 @@ def _draw_body_motion_overlay(
             ("L Knee", "left", BODY_LEFT_KNEE_COLOR),
             ("R Knee", "right", BODY_RIGHT_KNEE_COLOR),
         ):
-            if side == hidden_metric_side:
+            if side == hidden_body_side:
                 continue
             value = _finite_body_metric(metrics, f"{side}_knee_deg")
             if value is not None:
@@ -5881,9 +5897,12 @@ def _draw_body_motion_overlay(
         image,
         width,
         height,
-        metric_entries,
+        [
+            (_body_metric_label(label, discipline), value, color)
+            for label, value, color in metric_entries
+        ],
         metric_offset_percent,
-        angle_label_font_size=angle_label_font_size if discipline == "canoe" else None,
+        angle_label_font_size=None,
         draw_background=discipline != "canoe",
     )
 

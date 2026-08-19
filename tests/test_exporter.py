@@ -39,6 +39,7 @@ from sam3_service.exporter import (
     _detect_canoe_paddle_events,
     _detect_paddle_events_for_discipline,
     _detect_paddle_events,
+    _draw_body_motion_overlay,
     _draw_frame_overlay,
     _draw_paddle_event_label,
     _degree_label_entries,
@@ -129,6 +130,70 @@ def _axis_track(angles: list[float]) -> list[_TimedPaddleObservation]:
 
 
 class ExporterTest(unittest.TestCase):
+    @staticmethod
+    def _body_motion_overlay_record() -> dict[str, object]:
+        landmarks: dict[str, dict[str, float]] = {}
+        x_by_side = {"left": 0.25, "right": 0.75}
+        y_by_joint = {
+            "wrist": 0.22,
+            "elbow": 0.30,
+            "shoulder": 0.38,
+            "hip": 0.50,
+            "knee": 0.64,
+            "ankle": 0.78,
+        }
+        for side, x in x_by_side.items():
+            for joint, y in y_by_joint.items():
+                landmarks[f"{side}_{joint}"] = {
+                    "x": x,
+                    "y": y,
+                    "visibility": 1.0,
+                    "presence": 1.0,
+                }
+        return {
+            "landmarks": landmarks,
+            "metrics": {
+                "left_elbow_deg": 80.0,
+                "right_elbow_deg": 82.0,
+                "left_shoulder_deg": 100.0,
+                "right_shoulder_deg": 102.0,
+                "left_knee_deg": 120.0,
+                "right_knee_deg": 122.0,
+                "lean_deg": 5.0,
+            },
+        }
+
+    def test_canoe_body_overlay_hides_non_travel_side_skeleton(self) -> None:
+        image = bytearray(100 * 100 * 4)
+        with (
+            patch("sam3_service.exporter._draw_line") as draw_line,
+            patch("sam3_service.exporter._fill_circle") as fill_circle,
+            patch("sam3_service.exporter._draw_body_metric_row") as draw_metrics,
+        ):
+            _draw_body_motion_overlay(
+                image,
+                100,
+                100,
+                self._body_motion_overlay_record(),
+                discipline="canoe",
+                canoe_travel_direction="right",
+            )
+
+        line_x_values = [
+            coordinate
+            for call in draw_line.call_args_list
+            for coordinate in (call.args[3][0], call.args[3][2])
+        ]
+        circle_x_values = [call.args[3] for call in fill_circle.call_args_list]
+        self.assertTrue(line_x_values)
+        self.assertTrue(circle_x_values)
+        self.assertTrue(all(x > 50 for x in line_x_values))
+        self.assertTrue(all(x > 50 for x in circle_x_values))
+        metric_entries = draw_metrics.call_args.args[3]
+        self.assertEqual([entry[0] for entry in metric_entries], ["右肘", "躯干", "右肩", "右膝"])
+        self.assertIsNone(draw_metrics.call_args.kwargs["angle_label_font_size"])
+        self.assertFalse(draw_metrics.call_args.kwargs["draw_background"])
+
     def test_export_frame_count_prefers_decoded_count_over_rounded_duration(self) -> None:
         metadata = {"frame_count": 563, "duration_ms": 18767}
 
