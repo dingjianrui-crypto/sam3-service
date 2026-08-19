@@ -140,9 +140,10 @@ class BodyMotionTest(unittest.TestCase):
         self.assertNotIn("Hip", [entry[0] for entry in entries])
         self.assertNotIn("Knee", [entry[0] for entry in entries])
 
+    @patch("sam3_service.exporter._draw_body_joint_arc")
     @patch("sam3_service.exporter._draw_body_metric_row")
     def test_export_adds_left_and_right_knee_metrics_for_canoe(
-        self, draw_row: Mock
+        self, draw_row: Mock, draw_arc: Mock
     ) -> None:
         record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
         image = bytearray([0, 0, 0, 255] * 200 * 120)
@@ -167,6 +168,12 @@ class BodyMotionTest(unittest.TestCase):
         values = {entry[0]: entry[1] for entry in entries}
         self.assertEqual(values["L Knee"], "180°")
         self.assertEqual(values["R Knee"], "180°")
+        knee_calls = [
+            call
+            for call in draw_arc.call_args_list
+            if call.args[5] == ("hip", "knee", "ankle")
+        ]
+        self.assertEqual(len(knee_calls), 2)
 
     @patch("sam3_service.exporter._draw_body_metric_row")
     def test_export_keeps_missing_canoe_knee_metric_in_fixed_slot(

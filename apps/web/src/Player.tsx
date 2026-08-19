@@ -1293,16 +1293,29 @@ function drawBodyMotionOverlay(
   frame: BodyMotionFrame,
   discipline: "kayak" | "canoe"
 ) {
-  const connections: Array<[string, string]> = [
+  const upperBodyConnections: Array<[string, string]> = [
     ["wrist", "elbow"],
     ["elbow", "shoulder"],
     ["shoulder", "hip"]
   ];
+  const connections =
+    discipline === "canoe"
+      ? [...upperBodyConnections, ["hip", "knee"], ["knee", "ankle"]]
+      : upperBodyConnections;
   const colors = { left: "#34D399", right: "#F472B6" } as const;
-  const lineWidth = Math.max(3, Math.min(context.canvas.width, context.canvas.height) / 180);
+  const metricColors = {
+    leftElbow: "#34D399",
+    rightElbow: "#F472B6",
+    torso: "#FFF2A8",
+    leftShoulder: "#38BDF8",
+    rightShoulder: "#FB923C",
+    leftKnee: "#A78BFA",
+    rightKnee: "#FACC15"
+  } as const;
+  const lineWidth = Math.max(1.5, Math.min(context.canvas.width, context.canvas.height) / 300);
   const jointRadius = Math.max(
-    4,
-    Math.min(context.canvas.width, context.canvas.height) / 125
+    3,
+    Math.min(context.canvas.width, context.canvas.height) / 170
   );
   context.save();
   context.lineCap = "round";
@@ -1319,28 +1332,30 @@ function drawBodyMotionOverlay(
       context.lineTo(second[0], second[1]);
       context.stroke();
     }
-    for (const joint of ["wrist", "elbow", "shoulder", "hip"]) {
+    const joints =
+      discipline === "canoe"
+        ? ["wrist", "elbow", "shoulder", "hip", "knee", "ankle"]
+        : ["wrist", "elbow", "shoulder", "hip"];
+    for (const joint of joints) {
       const point = visibleBodyPoint(frame, `${side}_${joint}`, context);
       if (!point) continue;
+      const metricColor =
+        joint === "elbow"
+          ? metricColors[`${side}Elbow`]
+          : joint === "shoulder"
+            ? metricColors[`${side}Shoulder`]
+            : joint === "knee"
+              ? metricColors[`${side}Knee`]
+              : colors[side];
       context.beginPath();
-      context.fillStyle = "rgba(255,255,255,0.96)";
+      context.fillStyle = metricColor;
       context.arc(point[0], point[1], jointRadius, 0, Math.PI * 2);
       context.fill();
-      context.strokeStyle = colors[side];
-      context.lineWidth = Math.max(2, lineWidth / 2);
+      context.strokeStyle = "rgba(255,255,255,0.9)";
+      context.lineWidth = Math.max(1, lineWidth / 2);
       context.stroke();
     }
   }
-
-  const metricColors = {
-    leftElbow: "#34D399",
-    rightElbow: "#F472B6",
-    torso: "#FFF2A8",
-    leftShoulder: "#38BDF8",
-    rightShoulder: "#FB923C",
-    leftKnee: "#A78BFA",
-    rightKnee: "#FACC15"
-  } as const;
   const jointMetrics = [
     {
       label: "L Elbow",
@@ -1422,6 +1437,17 @@ function drawBodyMotionOverlay(
       { label: "R Knee", side: "right", color: metricColors.rightKnee }
     ] as const) {
       const value = frame.metrics[`${metric.side}_knee_deg`];
+      if (Number.isFinite(value)) {
+        drawBodyJointArc(
+          context,
+          frame,
+          metric.side,
+          "knee",
+          metric.color,
+          jointRadius,
+          lineWidth
+        );
+      }
       metricEntries.push({
         label: metric.label,
         value: Number.isFinite(value) ? `${Math.round(value)}°` : "--",
@@ -1448,14 +1474,15 @@ function drawBodyJointArc(
   context: CanvasRenderingContext2D,
   frame: BodyMotionFrame,
   side: "left" | "right",
-  joint: "elbow" | "shoulder",
+  joint: "elbow" | "shoulder" | "knee",
   color: string,
   jointRadius: number,
   lineWidth: number
 ): void {
   const definitions = {
     elbow: ["shoulder", "elbow", "wrist"],
-    shoulder: ["elbow", "shoulder", "hip"]
+    shoulder: ["elbow", "shoulder", "hip"],
+    knee: ["hip", "knee", "ankle"]
   } as const;
   const [firstName, vertexName, thirdName] = definitions[joint];
   const first = visibleBodyPoint(frame, `${side}_${firstName}`, context);

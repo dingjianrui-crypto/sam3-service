@@ -65,7 +65,6 @@ PADDLE_EVENT_CATCH_ANGLE_COLOR = (255, 82, 96, 255)
 PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
 BODY_LEFT_COLOR = (52, 211, 153, 235)
 BODY_RIGHT_COLOR = (244, 114, 182, 235)
-BODY_JOINT_COLOR = (255, 255, 255, 245)
 BODY_LEFT_ELBOW_COLOR = (52, 211, 153, 255)
 BODY_RIGHT_ELBOW_COLOR = (244, 114, 182, 255)
 BODY_TORSO_COLOR = (255, 242, 168, 255)
@@ -4834,13 +4833,27 @@ def _draw_body_motion_overlay(
     landmarks = record.get("landmarks")
     if not isinstance(landmarks, dict):
         return
-    thickness = max(3, round(min(width, height) * 0.005))
-    radius = max(4, round(min(width, height) * 0.008))
-    connections = (
+    thickness = max(2, round(min(width, height) / 300))
+    radius = max(3, round(min(width, height) / 170))
+    upper_body_connections = (
         ("wrist", "elbow"),
         ("elbow", "shoulder"),
         ("shoulder", "hip"),
     )
+    connections = (
+        upper_body_connections
+        + (("hip", "knee"), ("knee", "ankle"))
+        if discipline == "canoe"
+        else upper_body_connections
+    )
+    joint_colors = {
+        ("left", "elbow"): BODY_LEFT_ELBOW_COLOR,
+        ("right", "elbow"): BODY_RIGHT_ELBOW_COLOR,
+        ("left", "shoulder"): BODY_LEFT_SHOULDER_COLOR,
+        ("right", "shoulder"): BODY_RIGHT_SHOULDER_COLOR,
+        ("left", "knee"): BODY_LEFT_KNEE_COLOR,
+        ("right", "knee"): BODY_RIGHT_KNEE_COLOR,
+    }
     for side, color in (("left", BODY_LEFT_COLOR), ("right", BODY_RIGHT_COLOR)):
         for first_name, second_name in connections:
             first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
@@ -4855,7 +4868,10 @@ def _draw_body_motion_overlay(
                 color,
                 thickness,
             )
-        for joint in ("wrist", "elbow", "shoulder", "hip"):
+        joints = ("wrist", "elbow", "shoulder", "hip")
+        if discipline == "canoe":
+            joints += ("knee", "ankle")
+        for joint in joints:
             point = _body_point(landmarks.get(f"{side}_{joint}"), width, height)
             if point is not None:
                 _fill_circle(
@@ -4865,7 +4881,7 @@ def _draw_body_motion_overlay(
                     round(point[0]),
                     round(point[1]),
                     radius,
-                    BODY_JOINT_COLOR,
+                    joint_colors.get((side, joint), color),
                 )
 
     metrics = record.get("metrics")
@@ -4874,6 +4890,7 @@ def _draw_body_motion_overlay(
     definitions = {
         "elbow": ("shoulder", "elbow", "wrist"),
         "shoulder": ("elbow", "shoulder", "hip"),
+        "knee": ("hip", "knee", "ankle"),
     }
     joint_metrics = (
         ("L Elbow", "left", "elbow", BODY_LEFT_ELBOW_COLOR),
@@ -4932,6 +4949,18 @@ def _draw_body_motion_overlay(
             ("R Knee", "right", BODY_RIGHT_KNEE_COLOR),
         ):
             value = _finite_body_metric(metrics, f"{side}_knee_deg")
+            if value is not None:
+                _draw_body_joint_arc(
+                    image,
+                    width,
+                    height,
+                    landmarks,
+                    side,
+                    definitions["knee"],
+                    color,
+                    radius,
+                    thickness,
+                )
             metric_entries.append(
                 (label, f"{round(value)}°" if value is not None else "--", color)
             )
