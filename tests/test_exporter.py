@@ -15,6 +15,7 @@ from sam3_service.exporter import (
     ExportOptions,
     PaddleEvent,
     SpmEstimator,
+    _CanoePullInterval,
     _PaddleObservation,
     _PaddleEventState,
     _TimedPaddleObservation,
@@ -24,7 +25,18 @@ from sam3_service.exporter import (
     _blade_waterline_overlaps,
     _catch_phase_allowed,
     _consolidate_paddle_observations,
+    _canoe_directions,
+    _canoe_boat_slot_tracks,
+    _canoe_phase_catch,
+    _canoe_phase_events,
+    _canoe_phase_samples,
+    _canoe_phase_segments,
+    _canoe_pull_intervals,
+    _canoe_samples,
+    _canoe_signed_angle,
     _dedupe_paddle_events,
+    _detect_canoe_paddle_events,
+    _detect_paddle_events_for_discipline,
     _detect_paddle_events,
     _draw_frame_overlay,
     _draw_paddle_event_label,
@@ -171,6 +183,577 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(anticlockwise[:2], ("anticlockwise", "left"))
         self.assertGreaterEqual(clockwise[2], 0.75)
         self.assertGreaterEqual(anticlockwise[2], 0.75)
+
+    def test_canoe_axis_angle_maps_to_travel_direction(self) -> None:
+        def stroke(offset: int, catch_x: float, exit_x: float) -> list[_TimedPaddleObservation]:
+            return [
+                _TimedPaddleObservation(
+                    offset + index * 100,
+                    "paddle:physical:1",
+                    _PaddleObservation(
+                        source_ids=("paddle:1",),
+                        reference_id="boat:1",
+                        line=line,
+                        raw_line=line,
+                        reference_line=(0.0, 50.0, 100.0, 50.0),
+                    ),
+                )
+                for index, line in enumerate(
+                    [
+                        (catch_x - 80.0, -10.0, catch_x, 50.0),
+                        (catch_x - 20.0, 10.0, catch_x, 50.0),
+                        (exit_x - 55.0, 0.0, exit_x, 50.0),
+                        (exit_x - 25.0, 20.0, exit_x, 50.0),
+                        (exit_x - 80.0, -10.0, exit_x, 50.0),
+                    ]
+                )
+            ]
+
+        observations = stroke(0, 80.0, 30.0) + stroke(1000, 78.0, 28.0)
+        directions = _canoe_directions({"paddle:physical:1": observations})
+
+        self.assertEqual(directions["boat:1"][:2], ("canoe_axis", "right"))
+
+    def test_canoe_direction_ignores_near_vertical_axis_angles(self) -> None:
+        observations = [
+            _TimedPaddleObservation(
+                index * 100,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            for index, line in enumerate(
+                [
+                    (50.0, 10.0, 50.0, 90.0),
+                    (51.0, 10.0, 51.0, 90.0),
+                    (49.0, 10.0, 49.0, 90.0),
+                    (50.0, 9.0, 50.0, 89.0),
+                    (50.0, 11.0, 50.0, 91.0),
+                ]
+            )
+        ]
+
+        self.assertEqual(_canoe_directions({"paddle:physical:1": observations}), {})
+
+    def test_canoe_direction_ignores_static_axis_angle_track(self) -> None:
+        observations = [
+            _TimedPaddleObservation(
+                index * 100,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=(10.0, 10.0, 90.0, 60.0),
+                    raw_line=(10.0, 10.0, 90.0, 60.0),
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            for index in range(6)
+        ]
+
+        self.assertEqual(_canoe_directions({"paddle:physical:1": observations}), {})
+
+    def test_canoe_signed_angle_is_mirrored_by_travel_direction(self) -> None:
+        right = _canoe_signed_angle(
+            (20.0, 20.0, 50.0, 50.0),
+            (0.0, 50.0, 100.0, 50.0),
+            1,
+            "right",
+        )
+        left = _canoe_signed_angle(
+            (80.0, 20.0, 50.0, 50.0),
+            (100.0, 50.0, 0.0, 50.0),
+            1,
+            "left",
+        )
+
+        self.assertAlmostEqual(right or 0.0, left or 0.0)
+        self.assertAlmostEqual(right or 0.0, 45.0)
+
+    def test_canoe_phase_selects_nearest_waterline_catch_and_peak_exit(self) -> None:
+        def observation(timestamp_ms: int, angle: float, waterline_y: float = 50.0):
+            radians = math.radians(angle)
+            dry = (50.0, 0.0)
+            active = (
+                dry[0] + 40 * math.cos(radians),
+                dry[1] + 40 * math.sin(radians),
+            )
+            line = (dry[0], dry[1], active[0], active[1])
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, waterline_y, 100.0, waterline_y),
+                ),
+            )
+
+        events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 10),
+                observation(100, 40, 25.7),
+                observation(200, 70),
+                observation(300, 110, 37.6),
+                observation(400, 95),
+                observation(500, 75),
+            ],
+            "right",
+            0.9,
+        )
+
+        self.assertEqual(
+            [(event.kind, event.timestamp_ms) for event in events],
+            [("catch", 100), ("exit", 300)],
+        )
+        self.assertTrue(all(event.discipline == "canoe" for event in events))
+
+    def test_canoe_phase_catch_restores_shortened_rising_paddle_length(self) -> None:
+        def observation(timestamp_ms: int, line: tuple[float, float, float, float]):
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        samples = _canoe_phase_samples(
+            [
+                observation(0, (50.0, 40.0, 100.0, 41.0)),
+                observation(100, (50.0, 49.0, 95.0, 50.0)),
+                observation(200, (50.0, 60.0, 100.0, 61.0)),
+            ],
+            "right",
+            50.0,
+        )
+
+        catch = _canoe_phase_catch(samples)
+
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        sample, restored_line = catch
+        self.assertEqual(sample.timed.timestamp_ms, 100)
+        self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
+
+    def test_canoe_initial_restore_peak_exit_requires_active_endpoint_near_waterline(self) -> None:
+        def observation(timestamp_ms: int, angle: float, waterline_y: float = 50.0):
+            radians = math.radians(angle)
+            dry = (50.0, 0.0)
+            active = (
+                dry[0] + 100 * math.cos(radians),
+                dry[1] + 100 * math.sin(radians),
+            )
+            line = (dry[0], dry[1], active[0], active[1])
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, waterline_y, 100.0, waterline_y),
+                ),
+            )
+
+        close_events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 120, 86.6),
+                observation(100, 100),
+                observation(200, 52),
+                observation(300, 70),
+            ],
+            "right",
+            0.9,
+        )
+        far_events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 120),
+                observation(100, 100),
+                observation(200, 52),
+                observation(300, 70),
+            ],
+            "right",
+            0.9,
+        )
+
+        self.assertEqual(
+            [(event.kind, event.timestamp_ms) for event in close_events],
+            [("exit", 0)],
+        )
+        self.assertEqual(far_events, [])
+
+    def test_canoe_later_peak_exit_does_not_require_active_endpoint_near_waterline(self) -> None:
+        def observation(timestamp_ms: int, angle: float):
+            radians = math.radians(angle)
+            dry = (50.0, 0.0)
+            active = (
+                dry[0] + 100 * math.cos(radians),
+                dry[1] + 100 * math.sin(radians),
+            )
+            line = (dry[0], dry[1], active[0], active[1])
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 52),
+                observation(100, 120),
+                observation(200, 100),
+                observation(300, 70),
+            ],
+            "right",
+            0.9,
+        )
+
+        self.assertEqual([(event.kind, event.timestamp_ms) for event in events], [("exit", 100)])
+
+    def test_canoe_phase_emits_at_most_one_catch_and_exit(self) -> None:
+        def observation(timestamp_ms: int, angle: float, waterline_y: float):
+            radians = math.radians(angle)
+            dry = (50.0, 0.0)
+            active = (
+                dry[0] + 40 * math.cos(radians),
+                dry[1] + 40 * math.sin(radians),
+            )
+            line = (dry[0], dry[1], active[0], active[1])
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, waterline_y, 100.0, waterline_y),
+                ),
+            )
+
+        events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 10, 10.0),
+                observation(100, 25, 17.0),
+                observation(200, 40, 30.0),
+                observation(300, 55, 30.0),
+                observation(400, 120, 34.6),
+                observation(500, 100, 50.0),
+                observation(600, 70, 50.0),
+            ],
+            "right",
+            0.9,
+        )
+
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
+        self.assertEqual(events[1].timestamp_ms, 400)
+        self.assertEqual(sum(event.kind == "catch" for event in events), 1)
+        self.assertEqual(sum(event.kind == "exit" for event in events), 1)
+
+    def test_canoe_phase_segments_accept_initial_partial_stroke(self) -> None:
+        def sample(frame: int, angle: float):
+            radians = math.radians(angle)
+            line = (0.0, 0.0, 100 * math.cos(radians), 100 * math.sin(radians))
+            timed = _TimedPaddleObservation(
+                frame * 100,
+                "slot:1",
+                _PaddleObservation(
+                    source_ids=("sam:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            return _canoe_phase_samples([timed], "right", 100)[0]
+
+        phases = _canoe_phase_segments(
+            [sample(0, 98), sample(1, 120), sample(2, 105), sample(3, 52), sample(4, 70)]
+        )
+
+        self.assertEqual(len(phases), 1)
+        self.assertTrue(phases[0].complete)
+        self.assertEqual(phases[0].start.timed.timestamp_ms, 0)
+        self.assertEqual(phases[0].peak.timed.timestamp_ms, 100)
+        self.assertEqual(phases[0].end.timed.timestamp_ms, 300)
+
+    def test_canoe_phase_segments_marks_initial_restore_partial(self) -> None:
+        def sample(frame: int, angle: float):
+            radians = math.radians(angle)
+            line = (0.0, 0.0, 100 * math.cos(radians), 100 * math.sin(radians))
+            timed = _TimedPaddleObservation(
+                frame * 100,
+                "slot:1",
+                _PaddleObservation(
+                    source_ids=("sam:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            return _canoe_phase_samples([timed], "right", 100)[0]
+
+        phases = _canoe_phase_segments(
+            [sample(0, 120), sample(1, 100), sample(2, 52), sample(3, 70)]
+        )
+
+        self.assertEqual(len(phases), 1)
+        self.assertFalse(phases[0].complete)
+        self.assertEqual(phases[0].peak.timed.timestamp_ms, 0)
+        self.assertEqual(phases[0].end.timed.timestamp_ms, 200)
+
+    def test_canoe_phase_segments_share_minimum_boundary(self) -> None:
+        def sample(frame: int, angle: float):
+            radians = math.radians(angle)
+            line = (0.0, 0.0, 100 * math.cos(radians), 100 * math.sin(radians))
+            timed = _TimedPaddleObservation(
+                frame * 100,
+                "slot:1",
+                _PaddleObservation(
+                    source_ids=("sam:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            return _canoe_phase_samples([timed], "right", 100)[0]
+
+        phases = _canoe_phase_segments(
+            [
+                sample(0, 50),
+                sample(1, 120),
+                sample(2, 90),
+                sample(3, 52),
+                sample(4, 70),
+                sample(5, 130),
+                sample(6, 80),
+                sample(7, 55),
+                sample(8, 75),
+            ]
+        )
+
+        self.assertEqual(
+            [
+                (
+                    phase.start.timed.timestamp_ms,
+                    phase.peak.timed.timestamp_ms,
+                    phase.end.timed.timestamp_ms,
+                    phase.complete,
+                )
+                for phase in phases
+            ],
+            [(0, 100, 300, True), (300, 500, 700, True)],
+        )
+
+    def test_canoe_phase_segments_waits_for_confirmed_minimum(self) -> None:
+        def sample(frame: int, angle: float):
+            radians = math.radians(angle)
+            line = (0.0, 0.0, 100 * math.cos(radians), 100 * math.sin(radians))
+            timed = _TimedPaddleObservation(
+                frame * 100,
+                "slot:1",
+                _PaddleObservation(
+                    source_ids=("sam:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+            return _canoe_phase_samples([timed], "right", 100)[0]
+
+        phases = _canoe_phase_segments(
+            [
+                sample(0, 50),
+                sample(1, 120),
+                sample(2, 100),
+                sample(3, 56),
+                sample(4, 58),
+                sample(5, 54),
+                sample(6, 70),
+            ]
+        )
+
+        self.assertEqual(len(phases), 1)
+        self.assertEqual(phases[0].start.timed.timestamp_ms, 0)
+        self.assertEqual(phases[0].peak.timed.timestamp_ms, 100)
+        self.assertEqual(phases[0].end.timed.timestamp_ms, 500)
+
+    def test_canoe_phase_angle_ignores_occasional_waterline_jitter(self) -> None:
+        def observation(frame: int, reference_line):
+            line = (50.0, 0.0, 100.0, 86.6)
+            return _TimedPaddleObservation(
+                frame * 100,
+                "slot:1",
+                _PaddleObservation(
+                    source_ids=("sam:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=reference_line,
+                ),
+            )
+
+        observations = [
+            observation(0, (0.0, 50.0, 100.0, 50.0)),
+            observation(1, (0.0, 50.0, 100.0, 50.0)),
+            observation(2, (0.0, 35.0, 100.0, 65.0)),
+            observation(3, (0.0, 50.0, 100.0, 50.0)),
+            observation(4, (0.0, 50.0, 100.0, 50.0)),
+        ]
+
+        samples = _canoe_phase_samples(observations, "right", 100)
+
+        self.assertEqual(len(samples), 5)
+        self.assertLess(max(sample.angle for sample in samples) - min(sample.angle for sample in samples), 0.01)
+
+    def test_canoe_phase_identity_uses_boat_slot_not_raw_track_id(self) -> None:
+        def timed(timestamp_ms: int, source_id: str, x: float):
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                source_id,
+                _PaddleObservation(
+                    source_ids=(source_id,),
+                    reference_id="boat:1",
+                    line=(x - 20.0, 10.0, x + 20.0, 50.0),
+                    raw_line=(x - 20.0, 10.0, x + 20.0, 50.0),
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        raw_tracks = {
+            "sam:1": [timed(0, "sam:1", 70.0)],
+            "sam:7": [timed(100, "sam:7", 71.0)],
+            "sam:12": [timed(200, "sam:12", 69.0)],
+        }
+        directions = {"boat:1": ("canoe_axis", "right", 0.9)}
+
+        slots = _canoe_boat_slot_tracks(raw_tracks, directions, 1, None)
+
+        self.assertEqual(list(slots), ["canoe:slot:boat:1:1"])
+        self.assertEqual(
+            [item.timestamp_ms for item in slots["canoe:slot:boat:1:1"]],
+            [0, 100, 200],
+        )
+        self.assertEqual(
+            {item.physical_id for item in slots["canoe:slot:boat:1:1"]},
+            {"canoe:slot:boat:1:1"},
+        )
+
+    @patch("sam3_service.exporter._detect_canoe_paddle_events")
+    @patch("sam3_service.exporter._detect_paddle_events")
+    def test_event_strategy_uses_persisted_discipline(
+        self, kayak_detector, canoe_detector
+    ) -> None:
+        options = ExportOptions()
+
+        _detect_paddle_events_for_discipline({}, options, 100, 100, 1, 1, "canoe")
+        _detect_paddle_events_for_discipline({}, options, 100, 100, 1, 1, "kayak")
+
+        canoe_detector.assert_called_once()
+        kayak_detector.assert_called_once()
+
+    @patch("sam3_service.exporter._canoe_phase_events")
+    @patch("sam3_service.exporter._track_paddle_observations")
+    def test_canoe_pipeline_emits_events_for_selected_slot(
+        self, track_observations, phase_events
+    ) -> None:
+        def stroke(offset: int, catch_x: float, exit_x: float):
+            return [
+                _TimedPaddleObservation(
+                    offset + index * 100,
+                    "paddle:physical:1",
+                    _PaddleObservation(
+                        source_ids=("paddle:1",),
+                        reference_id="boat:1",
+                        line=line,
+                        raw_line=line,
+                        reference_line=(0.0, 50.0, 100.0, 50.0),
+                    ),
+                )
+                for index, line in enumerate(
+                    [
+                        (catch_x - 80.0, -10.0, catch_x, 50.0),
+                        (catch_x - 20.0, 10.0, catch_x, 50.0),
+                        (exit_x - 55.0, 0.0, exit_x, 50.0),
+                        (exit_x - 25.0, 20.0, exit_x, 50.0),
+                        (exit_x - 80.0, -10.0, exit_x, 50.0),
+                    ]
+                )
+            ]
+
+        track_observations.return_value = {
+            "paddle:physical:1": (
+                stroke(0, 80.0, 30.0) + stroke(1000, 78.0, 28.0)
+            )
+        }
+        timed = track_observations.return_value["paddle:physical:1"][0]
+        phase_events.return_value = [
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=timed.timestamp_ms,
+                instance_id="paddle:slot:boat:1:1",
+                line=timed.observation.line,
+                confidence=0.9,
+                reference_line=timed.observation.reference_line,
+                travel_direction="right",
+                discipline="canoe",
+            ),
+            PaddleEvent(
+                kind="exit",
+                timestamp_ms=timed.timestamp_ms + 100,
+                instance_id="paddle:slot:boat:1:1",
+                line=timed.observation.line,
+                confidence=0.9,
+                reference_line=timed.observation.reference_line,
+                travel_direction="right",
+                discipline="canoe",
+            ),
+        ]
+
+        events = _detect_canoe_paddle_events(
+            {},
+            ExportOptions(
+                include_catch=True,
+                include_exit=True,
+                event_paddle_index=1,
+                target_slot_count=1,
+            ),
+            100,
+            100,
+            1.0,
+            1.0,
+        )
+
+        self.assertEqual([event.kind for event in events], ["catch", "exit"])
+        self.assertTrue(all(event.discipline == "canoe" for event in events))
+        self.assertTrue(all(event.travel_direction == "right" for event in events))
 
     def test_mirrored_travel_uses_the_same_normalized_phase_angle(self) -> None:
         for angle in [0, 30, 90, 180, 270, 350]:

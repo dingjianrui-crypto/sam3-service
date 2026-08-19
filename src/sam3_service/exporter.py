@@ -53,6 +53,18 @@ PADDLE_DIRECTION_MIN_DELTAS = 5
 PADDLE_DIRECTION_MIN_DISPLACEMENT_DEGREES = 45.0
 PADDLE_DIRECTION_MIN_CONSENSUS = 0.75
 PADDLE_DIRECTION_MAX_SAMPLE_GAP_MS = 400
+CANOE_DIRECTION_MIN_VOTES = 5
+CANOE_DIRECTION_MIN_CONSENSUS = 0.70
+CANOE_DIRECTION_RIGHT_MAX_DEGREES = 80.0
+CANOE_DIRECTION_LEFT_MIN_DEGREES = 100.0
+CANOE_DIRECTION_MIN_AXIS_SPAN_DEGREES = 8.0
+CANOE_PHASE_MIN_TREND_DEGREES = 3.0
+CANOE_PHASE_EXIT_CONFIRM_SAMPLES = 2
+CANOE_CATCH_LENGTH_RESTORE_TOLERANCE = 0.15
+CANOE_CONTACT_LENGTH_RATIO = 0.86
+CANOE_RELEASE_LENGTH_RATIO = 0.92
+CANOE_MIN_LENGTH_CHANGE_RATIO = 0.06
+CANOE_CONTACT_MIN_SAMPLES = 2
 PADDLE_PHASE_BACKTRACK_TOLERANCE_DEGREES = 15.0
 PADDLE_PHASE_ANCHOR_AGREEMENT_RELATIVE_TOLERANCE = 0.15
 PADDLE_PHASE_CANDIDATE_RELATIVE_TOLERANCE = 0.10
@@ -142,6 +154,7 @@ class PaddleEvent:
     active_blade: int | None = None
     rotation_direction: str | None = None
     travel_direction: str | None = None
+    discipline: str = "kayak"
 
 
 @dataclass(frozen=True)
@@ -174,6 +187,42 @@ class _TimedPaddleObservation:
     timestamp_ms: int
     physical_id: str
     observation: _PaddleObservation
+
+
+@dataclass(frozen=True)
+class _CanoeSample:
+    timed: _TimedPaddleObservation
+    blade: int
+    blade_position: float
+    air_length_ratio: float
+    contact: bool
+
+
+@dataclass(frozen=True)
+class _CanoePullInterval:
+    physical_id: str
+    reference_id: str
+    entry: _CanoeSample
+    exit: _CanoeSample
+    release: _CanoeSample
+    minimum_air_length_ratio: float
+
+
+@dataclass(frozen=True)
+class _CanoePhaseSample:
+    timed: _TimedPaddleObservation
+    line: Line
+    restored_line: Line
+    blade: int
+    angle: float
+
+
+@dataclass(frozen=True)
+class _CanoePhase:
+    start: _CanoePhaseSample
+    peak: _CanoePhaseSample
+    end: _CanoePhaseSample
+    complete: bool
 
 
 @dataclass
@@ -386,14 +435,17 @@ def export_centerline_video(
     events: list[PaddleEvent] = []
     if export_options.include_catch or export_options.include_exit:
         _report_progress(progress, "analyzing_events", 5, "Analyzing paddle events")
-        events = _detect_paddle_events(
+        events = _detect_paddle_events_for_discipline(
             frames,
             export_options,
             width,
             height,
             scale_x,
             scale_y,
-            progress,
+            discipline=str(
+                manifest.get("settings", {}).get("paddling_discipline", "kayak")
+            ),
+            progress=progress,
         )
     freeze_moments = _freeze_moments(
         events,
@@ -1812,6 +1864,756 @@ def _degree_slots(labels: list[DegreeLabel], options: ExportOptions) -> list[Deg
         )
         for track_id in options.target_track_ids
     ]
+
+
+def _detect_paddle_events_for_discipline(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+    discipline: str,
+    progress: Callable[[str, float, str], None] | None = None,
+) -> list[PaddleEvent]:
+    if discipline == "canoe":
+        return _detect_canoe_paddle_events(
+            frames, options, width, height, scale_x, scale_y, progress
+        )
+    return _detect_paddle_events(
+        frames, options, width, height, scale_x, scale_y, progress
+    )
+
+
+def _detect_canoe_paddle_events(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+    progress: Callable[[str, float, str], None] | None = None,
+) -> list[PaddleEvent]:
+    tracks = _track_paddle_observations(
+        frames, options, width, height, scale_x, scale_y, progress
+    )
+    directions = _canoe_directions(tracks)
+    tracks = _stabilize_boat_reference_lengths(
+        tracks,
+        directions,
+        _event_boat_reference_lines(
+            frames,
+            options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+        ),
+    )
+    slot_count = max(
+        1, options.target_slot_count, options.event_paddle_index or 0
+    )
+    selected_tracks = _canoe_boat_slot_tracks(
+        tracks, directions, slot_count, options.event_paddle_index
+    )
+    detected: list[PaddleEvent] = []
+    for physical_id, observations in selected_tracks.items():
+        reference_id = _dominant_reference_id(observations)
+        _, travel_direction, confidence = directions.get(
+            reference_id, (None, None, 0.0)
+        )
+        if travel_direction not in {"left", "right"}:
+            continue
+        detected.extend(
+            _canoe_phase_events(
+                physical_id, observations, travel_direction, confidence
+            )
+        )
+    deduplicated = _dedupe_paddle_events(detected, width, height)
+    return [
+        event
+        for event in deduplicated
+        if (event.kind == "catch" and options.include_catch)
+        or (event.kind == "exit" and options.include_exit)
+    ]
+
+
+def _canoe_boat_slot_tracks(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+    directions: dict[str, tuple[str | None, str | None, float]],
+    slot_count: int,
+    selected_slot: int | None,
+) -> dict[str, list[_TimedPaddleObservation]]:
+    """Re-identify canoe paddles by stable positions on each boat.
+
+    Raw SAM track IDs remain candidate evidence only. The boat-relative slot is
+    the event identity, matching the kayak pipeline's front-to-back selection.
+    """
+    anchors_by_reference = _event_paddle_slot_anchors_by_reference(
+        tracks, directions, slot_count
+    )
+    observations_by_reference: dict[
+        str, dict[int, list[_TimedPaddleObservation]]
+    ] = {}
+    for observations in tracks.values():
+        for timed in observations:
+            observations_by_reference.setdefault(
+                timed.observation.reference_id, {}
+            ).setdefault(timed.timestamp_ms, []).append(timed)
+
+    slot_tracks: dict[str, list[_TimedPaddleObservation]] = {}
+    for reference_id, by_timestamp in observations_by_reference.items():
+        _, travel_direction, _ = directions.get(reference_id, (None, None, 0.0))
+        anchors = anchors_by_reference.get(reference_id, [])
+        if travel_direction not in {"left", "right"} or not anchors:
+            continue
+        requested_indices = (
+            (selected_slot - 1,)
+            if selected_slot is not None
+            else tuple(range(len(anchors)))
+        )
+        for slot_index in requested_indices:
+            if slot_index < 0 or slot_index >= len(anchors):
+                continue
+            slot_id = f"canoe:slot:{reference_id}:{slot_index + 1}"
+            for timestamp_ms, candidates in sorted(by_timestamp.items()):
+                assigned = _assign_event_paddle_slots(
+                    candidates, anchors, travel_direction
+                )
+                timed = assigned.get(slot_index)
+                if timed is None:
+                    continue
+                raw_line = timed.observation.raw_line or timed.observation.line
+                slot_tracks.setdefault(slot_id, []).append(
+                    replace(
+                        timed,
+                        physical_id=slot_id,
+                        observation=replace(
+                            timed.observation,
+                            line=raw_line,
+                            raw_line=raw_line,
+                            phase_length_restored=False,
+                        ),
+                    )
+                )
+    return slot_tracks
+
+
+def _canoe_phase_events(
+    physical_id: str,
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+    direction_confidence: float,
+) -> list[PaddleEvent]:
+    """Detect one catch and exit per small-to-large-to-small canoe phase.
+
+    A phase uses the blade-oriented, travel-normalized paddle angle. The longest
+    observed line is a phase-length seed; restoring only the blade endpoint
+    preserves the dry endpoint while allowing water-shortened geometry to cross
+    the waterline.
+    """
+    if not observations:
+        return []
+    full_length = max(
+        _line_length(timed.observation.raw_line or timed.observation.line)
+        for timed in observations
+    )
+    if full_length < 1:
+        return []
+    samples = _canoe_phase_samples(observations, travel_direction, full_length)
+    phases = _canoe_phase_segments(samples)
+    events: list[PaddleEvent] = []
+    for phase in phases:
+        start_index = samples.index(phase.start)
+        peak_index = samples.index(phase.peak)
+        end_index = samples.index(phase.end)
+        phase_samples = samples[start_index : end_index + 1]
+        rising_samples = phase_samples[: peak_index - start_index + 1]
+        catch = _canoe_phase_catch(rising_samples) if peak_index > start_index else None
+        if catch is not None:
+            catch_sample, catch_line = catch
+            events.append(
+                _canoe_phase_event(
+                    "catch", physical_id, catch_sample.timed, catch_line,
+                    catch_sample.blade, catch_sample.angle, travel_direction, direction_confidence
+                )
+            )
+        # A peak is an exit only when the restore direction has been confirmed.
+        if (
+            phase.peak.angle - phase.end.angle >= CANOE_PHASE_MIN_TREND_DEGREES
+            and (
+                peak_index > start_index
+                or _canoe_exit_endpoint_close_to_waterline(phase.peak)
+            )
+        ):
+            events.append(
+                _canoe_phase_event(
+                    "exit", physical_id, phase.peak.timed, phase.peak.line,
+                    phase.peak.blade, phase.peak.angle, travel_direction, direction_confidence
+                )
+            )
+    return events
+
+
+def _canoe_phase_samples(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+    full_length: float,
+) -> list[_CanoePhaseSample]:
+    samples: list[_CanoePhaseSample] = []
+    phase_forward = _canoe_phase_reference_forward(observations, travel_direction)
+    for timed in observations:
+        line = timed.observation.raw_line or timed.observation.line
+        phase_reference_line = _canoe_phase_reference_line(
+            timed.observation.reference_line, phase_forward
+        )
+        depths = _endpoint_signed_depths(line, phase_reference_line)
+        blade = 0 if depths[0] >= depths[1] else 1
+        angle = _canoe_phase_angle(
+            line, phase_reference_line, blade, travel_direction
+        )
+        if angle is None:
+            continue
+        samples.append(
+            _CanoePhaseSample(
+                timed=timed,
+                line=line,
+                restored_line=_canoe_restore_blade_length(line, full_length, blade),
+                blade=blade,
+                angle=angle,
+            )
+        )
+    return samples
+
+
+def _canoe_phase_reference_forward(
+    observations: list[_TimedPaddleObservation],
+    travel_direction: str,
+) -> tuple[float, float] | None:
+    vectors: list[tuple[float, float]] = []
+    for timed in observations:
+        geometry = _boat_reference_head_geometry(
+            timed.observation.reference_line, travel_direction
+        )
+        if geometry is None:
+            continue
+        _head, forward, _observed_length = geometry
+        vectors.append(forward)
+    if not vectors:
+        return None
+    x = _median([vector[0] for vector in vectors])
+    y = _median([vector[1] for vector in vectors])
+    if x is None or y is None:
+        return None
+    return _normalize((x, y))
+
+
+def _canoe_phase_reference_line(
+    reference_line: Line,
+    phase_forward: tuple[float, float] | None,
+) -> Line:
+    if phase_forward is None:
+        return reference_line
+    center = _line_center(reference_line)
+    half_length = _line_length(reference_line) / 2
+    return (
+        center[0] - phase_forward[0] * half_length,
+        center[1] - phase_forward[1] * half_length,
+        center[0] + phase_forward[0] * half_length,
+        center[1] + phase_forward[1] * half_length,
+    )
+
+
+def _canoe_phase_segments(samples: list[_CanoePhaseSample]) -> list[_CanoePhase]:
+    """Split a slot into minimum-to-peak-to-minimum canoe phases.
+
+    A local minimum closes the previous phase and is reused as the start of the
+    next phase. The first and last segment may be partial because a video can
+    start or end during either the stroke or restore period.
+    """
+    if len(samples) < 3:
+        return []
+    phases: list[_CanoePhase] = []
+    start_index = 0
+    peak_index = 0
+    trough_index = 0
+    state = "unknown"
+    falling_count = 0
+    initial_restore = False
+    for index in range(1, len(samples)):
+        delta = samples[index].angle - samples[index - 1].angle
+        if state == "unknown":
+            if delta >= CANOE_PHASE_MIN_TREND_DEGREES:
+                state = "rising"
+                peak_index = index
+            elif -delta >= CANOE_PHASE_MIN_TREND_DEGREES:
+                state = "falling"
+                peak_index = start_index
+                trough_index = index
+                initial_restore = True
+            elif samples[index].angle < samples[start_index].angle:
+                start_index = index
+                peak_index = index
+            elif samples[index].angle > samples[peak_index].angle:
+                peak_index = index
+            continue
+        if state == "rising":
+            if samples[index].angle >= samples[peak_index].angle:
+                peak_index = index
+                falling_count = 0
+            elif samples[peak_index].angle - samples[index].angle >= CANOE_PHASE_MIN_TREND_DEGREES:
+                falling_count += 1
+                if falling_count >= CANOE_PHASE_EXIT_CONFIRM_SAMPLES:
+                    state = "falling"
+                    trough_index = index
+            continue
+        if samples[index].angle <= samples[trough_index].angle:
+            trough_index = index
+            continue
+        if samples[index].angle - samples[trough_index].angle >= CANOE_PHASE_MIN_TREND_DEGREES:
+            end_index = trough_index
+            phases.append(
+                _CanoePhase(
+                    samples[start_index],
+                    samples[peak_index],
+                    samples[end_index],
+                    not initial_restore,
+                )
+            )
+            start_index = end_index
+            peak_index = max(
+                range(start_index, index + 1),
+                key=lambda sample_index: samples[sample_index].angle,
+            )
+            state = "rising"
+            falling_count = 0
+            initial_restore = False
+    if state == "falling" and peak_index >= start_index and trough_index > peak_index:
+        phases.append(
+            _CanoePhase(
+                samples[start_index], samples[peak_index], samples[trough_index], False
+            )
+        )
+    return phases
+
+
+def _canoe_phase_angle(
+    line: Line, reference_line: Line, blade: int, travel_direction: str
+) -> float | None:
+    # Start from the waterline ray pointing in canoe travel direction and use
+    # the dry-to-water-facing blade vector, yielding a 0-180 degree phase.
+    forward = _normalize(
+        (reference_line[2] - reference_line[0], reference_line[3] - reference_line[1])
+    )
+    if forward is None:
+        return None
+    if (travel_direction == "right" and forward[0] < 0) or (
+        travel_direction == "left" and forward[0] > 0
+    ):
+        forward = (-forward[0], -forward[1])
+    down = (-forward[1], forward[0])
+    if down[1] < 0:
+        down = (-down[0], -down[1])
+    dry = (line[2], line[3]) if blade == 0 else (line[0], line[1])
+    active = (line[0], line[1]) if blade == 0 else (line[2], line[3])
+    vector = _normalize((active[0] - dry[0], active[1] - dry[1]))
+    if vector is None:
+        return None
+    angle = math.degrees(math.atan2(_dot(vector, down), _dot(vector, forward)))
+    return round(angle if angle >= 0 else angle + 180.0, 3)
+
+
+def _canoe_restore_blade_length(line: Line, full_length: float, blade: int) -> Line:
+    if _line_length(line) >= full_length:
+        return line
+    dry = (line[2], line[3]) if blade == 0 else (line[0], line[1])
+    active = (line[0], line[1]) if blade == 0 else (line[2], line[3])
+    direction = _normalize((active[0] - dry[0], active[1] - dry[1]))
+    if direction is None:
+        return line
+    restored_active = (
+        dry[0] + direction[0] * full_length,
+        dry[1] + direction[1] * full_length,
+    )
+    return (
+        restored_active[0],
+        restored_active[1],
+        dry[0],
+        dry[1],
+    ) if blade == 0 else (
+        dry[0],
+        dry[1],
+        restored_active[0],
+        restored_active[1],
+    )
+
+
+def _canoe_line_crosses_waterline(
+    line: Line, reference_line: Line, blade: int
+) -> bool:
+    depths = _endpoint_signed_depths(line, reference_line)
+    return depths[blade] >= 0 and depths[1 - blade] <= 0
+
+
+def _canoe_phase_catch(
+    rising_samples: list[_CanoePhaseSample],
+) -> tuple[_CanoePhaseSample, Line] | None:
+    restored = _canoe_phase_catch_restored_lines(rising_samples)
+    if len(restored) < 2:
+        return None
+    candidates: list[tuple[_CanoePhaseSample, Line]] = []
+    for previous, current in zip(restored, restored[1:]):
+        previous_sample, previous_line = previous
+        current_sample, current_line = current
+        previous_crosses = _canoe_line_crosses_waterline(
+            previous_line,
+            previous_sample.timed.observation.reference_line,
+            previous_sample.blade,
+        )
+        current_crosses = _canoe_line_crosses_waterline(
+            current_line,
+            current_sample.timed.observation.reference_line,
+            current_sample.blade,
+        )
+        if previous_crosses == current_crosses:
+            continue
+        candidates.extend((previous, current))
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda entry: _canoe_active_endpoint_waterline_distance(entry[0], entry[1]),
+    )
+
+
+def _canoe_phase_catch_restored_lines(
+    rising_samples: list[_CanoePhaseSample],
+) -> list[tuple[_CanoePhaseSample, Line]]:
+    if not rising_samples:
+        return []
+    inherited_length = _line_length(rising_samples[0].line)
+    if inherited_length < 1:
+        return []
+    restored: list[tuple[_CanoePhaseSample, Line]] = []
+    for sample in rising_samples:
+        if sample.angle > 90:
+            break
+        line = sample.line
+        current_length = _line_length(line)
+        if current_length < 1:
+            continue
+        if current_length >= inherited_length:
+            inherited_length = current_length
+        elif (
+            inherited_length - current_length
+        ) / inherited_length <= CANOE_CATCH_LENGTH_RESTORE_TOLERANCE:
+            line = _canoe_restore_length_from_active_endpoint(
+                line, inherited_length, sample.blade
+            )
+        else:
+            continue
+        restored.append((sample, line))
+    return restored
+
+
+def _canoe_restore_length_from_active_endpoint(
+    line: Line, target_length: float, blade: int
+) -> Line:
+    active = (line[0], line[1]) if blade == 0 else (line[2], line[3])
+    dry = (line[2], line[3]) if blade == 0 else (line[0], line[1])
+    direction = _normalize((dry[0] - active[0], dry[1] - active[1]))
+    if direction is None:
+        return line
+    restored_dry = (
+        active[0] + direction[0] * target_length,
+        active[1] + direction[1] * target_length,
+    )
+    return (
+        active[0],
+        active[1],
+        restored_dry[0],
+        restored_dry[1],
+    ) if blade == 0 else (
+        restored_dry[0],
+        restored_dry[1],
+        active[0],
+        active[1],
+    )
+
+
+def _canoe_active_endpoint_waterline_distance(
+    sample: _CanoePhaseSample, line: Line | None = None
+) -> float:
+    candidate = line or sample.line
+    depths = _endpoint_signed_depths(
+        candidate, sample.timed.observation.reference_line
+    )
+    reference_length = max(_line_length(sample.timed.observation.reference_line), 1.0)
+    return abs(depths[sample.blade]) / reference_length + sample.angle * 1e-6
+
+
+def _canoe_exit_endpoint_close_to_waterline(sample: _CanoePhaseSample) -> bool:
+    return (
+        _canoe_active_endpoint_waterline_distance(sample, sample.line)
+        <= PADDLE_EXIT_DEPTH_RATIO
+    )
+
+
+def _canoe_phase_event(
+    kind: str,
+    physical_id: str,
+    timed: _TimedPaddleObservation,
+    line: Line,
+    blade: int,
+    phase_angle: float,
+    travel_direction: str,
+    confidence: float,
+) -> PaddleEvent:
+    return PaddleEvent(
+        kind=kind,
+        timestamp_ms=timed.timestamp_ms,
+        instance_id=physical_id,
+        line=line,
+        reference_line=timed.observation.reference_line,
+        confidence=confidence,
+        degree=_acute_line_angle_degrees(line, timed.observation.reference_line),
+        phase_angle=phase_angle,
+        active_blade=blade,
+        travel_direction=travel_direction,
+        discipline="canoe",
+    )
+
+
+def _canoe_samples(
+    observations: list[_TimedPaddleObservation],
+) -> list[_CanoeSample]:
+    if not observations:
+        return []
+    full_length = max(
+        (
+            _line_length(timed.observation.raw_line or timed.observation.line)
+            for timed in observations
+        ),
+        default=0.0,
+    )
+    if full_length < 1:
+        return []
+    samples: list[_CanoeSample] = []
+    for timed in observations:
+        observation = timed.observation
+        line = observation.raw_line or observation.line
+        depths = _endpoint_signed_depths(line, observation.reference_line)
+        blade = 0 if depths[0] >= depths[1] else 1
+        air_length = _canoe_visible_air_length(line, observation.reference_line, blade)
+        if air_length is None:
+            continue
+        ratio = _clamp(air_length / full_length, 0.0, 1.25)
+        samples.append(
+            _CanoeSample(
+                timed=replace(
+                    timed,
+                    observation=replace(observation, line=line),
+                ),
+                blade=blade,
+                blade_position=_canoe_canonical_position(
+                    (line[0], line[1]) if blade == 0 else (line[2], line[3]),
+                    observation.reference_line,
+                ),
+                air_length_ratio=ratio,
+                contact=ratio <= CANOE_CONTACT_LENGTH_RATIO,
+            )
+        )
+    return samples
+
+
+def _canoe_visible_air_length(
+    line: Line, reference_line: Line, blade: int
+) -> float | None:
+    depths = _endpoint_signed_depths(line, reference_line)
+    blade_depth = depths[blade]
+    dry_depth = depths[1 - blade]
+    length = _line_length(line)
+    if length < 1:
+        return None
+    if max(depths) < 0:
+        return length
+    denominator = blade_depth - dry_depth
+    if dry_depth < 0 <= blade_depth and abs(denominator) > 1e-9:
+        dry_to_intersection = -dry_depth / denominator
+        return length * _clamp(dry_to_intersection, 0.0, 1.0)
+    # SAM commonly truncates the submerged blade at the waterline. In that
+    # case the detected line itself is the visible dry-side length.
+    if abs(blade_depth) <= max(2.0, length * 0.05) and dry_depth < 0:
+        return length
+    return None
+
+
+def _canoe_canonical_position(point: tuple[float, float], reference_line: Line) -> float:
+    forward = _normalize(
+        (reference_line[2] - reference_line[0], reference_line[3] - reference_line[1])
+    )
+    if forward is None:
+        return 0.0
+    if forward[0] < 0:
+        forward = (-forward[0], -forward[1])
+    origin = _line_center(reference_line)
+    length = max(_line_length(reference_line), 1.0)
+    return _dot((point[0] - origin[0], point[1] - origin[1]), forward) / length
+
+
+def _canoe_pull_intervals(
+    physical_id: str, samples: list[_CanoeSample]
+) -> list[_CanoePullInterval]:
+    intervals: list[_CanoePullInterval] = []
+    entry: _CanoeSample | None = None
+    minimum: _CanoeSample | None = None
+    exit_candidate: _CanoeSample | None = None
+    contact_samples = 0
+    for sample in samples:
+        if entry is not None and (
+            sample.timed.timestamp_ms - entry.timed.timestamp_ms
+            > PADDLE_EVENT_TRACK_GAP_MS
+            or sample.timed.observation.reference_id
+            != entry.timed.observation.reference_id
+        ):
+            entry = minimum = exit_candidate = None
+            contact_samples = 0
+        if sample.contact:
+            if entry is None:
+                entry = minimum = sample
+                exit_candidate = None
+                contact_samples = 1
+                continue
+            contact_samples += 1
+            assert minimum is not None
+            if sample.air_length_ratio < minimum.air_length_ratio:
+                minimum = sample
+                exit_candidate = None
+            elif (
+                sample.air_length_ratio - minimum.air_length_ratio
+                >= CANOE_MIN_LENGTH_CHANGE_RATIO
+                and exit_candidate is None
+            ):
+                exit_candidate = sample
+            continue
+        if entry is None:
+            continue
+        assert minimum is not None
+        if (
+            contact_samples >= CANOE_CONTACT_MIN_SAMPLES
+            and exit_candidate is not None
+            and sample.air_length_ratio >= CANOE_RELEASE_LENGTH_RATIO
+        ):
+            intervals.append(
+                _CanoePullInterval(
+                    physical_id=physical_id,
+                    reference_id=entry.timed.observation.reference_id,
+                    entry=entry,
+                    exit=exit_candidate,
+                    release=sample,
+                    minimum_air_length_ratio=minimum.air_length_ratio,
+                )
+            )
+        entry = minimum = exit_candidate = None
+        contact_samples = 0
+    return intervals
+
+
+def _canoe_directions(
+    tracks: dict[str, list[_TimedPaddleObservation]],
+) -> dict[str, tuple[str | None, str | None, float]]:
+    votes: dict[str, list[float]] = {}
+    for observations in tracks.values():
+        angle_samples = [
+            (
+                timed,
+                _canoe_canonical_axis_angle(
+                    timed.observation.raw_line or timed.observation.line,
+                    timed.observation.reference_line,
+                ),
+            )
+            for timed in observations
+        ]
+        valid_angles = [angle for _, angle in angle_samples if angle is not None]
+        if (
+            not valid_angles
+            or max(valid_angles) - min(valid_angles)
+            < CANOE_DIRECTION_MIN_AXIS_SPAN_DEGREES
+        ):
+            continue
+        for timed, angle in angle_samples:
+            observation = timed.observation
+            if angle is None:
+                continue
+            if angle <= CANOE_DIRECTION_RIGHT_MAX_DEGREES:
+                direction = 1.0
+            elif angle >= CANOE_DIRECTION_LEFT_MIN_DEGREES:
+                direction = -1.0
+            else:
+                continue
+            # Votes farther from the vertical dead band and from longer lines
+            # are more robust to waterline and short-fragment noise.
+            boundary_distance = min(abs(angle - 90.0), 90.0) / 90.0
+            weight = max(0.05, boundary_distance) * max(
+                _line_length(observation.raw_line or observation.line), 1.0
+            )
+            votes.setdefault(observation.reference_id, []).append(direction * weight)
+    results: dict[str, tuple[str | None, str | None, float]] = {}
+    for reference_id, values in votes.items():
+        if len(values) < CANOE_DIRECTION_MIN_VOTES:
+            results[reference_id] = (None, None, 0.0)
+            continue
+        right_weight = sum(abs(value) for value in values if value > 0)
+        left_weight = sum(abs(value) for value in values if value < 0)
+        consensus = max(right_weight, left_weight) / max(
+            right_weight + left_weight, 1e-9
+        )
+        if consensus < CANOE_DIRECTION_MIN_CONSENSUS:
+            results[reference_id] = (None, None, round(consensus, 3))
+        elif right_weight > left_weight:
+            results[reference_id] = ("canoe_axis", "right", round(consensus, 3))
+        else:
+            results[reference_id] = ("canoe_axis", "left", round(consensus, 3))
+    return results
+
+
+def _canoe_canonical_axis_angle(line: Line, reference_line: Line) -> float | None:
+    reference = _normalize(
+        (reference_line[2] - reference_line[0], reference_line[3] - reference_line[1])
+    )
+    paddle = _normalize((line[2] - line[0], line[3] - line[1]))
+    if reference is None or paddle is None:
+        return None
+    if reference[0] < 0:
+        reference = (-reference[0], -reference[1])
+    angle = math.degrees(math.atan2(paddle[1], paddle[0]) - math.atan2(reference[1], reference[0]))
+    return angle % 180.0
+
+
+def _canoe_signed_angle(
+    line: Line, reference_line: Line, blade: int, travel_direction: str
+) -> float | None:
+    forward = _normalize(
+        (reference_line[2] - reference_line[0], reference_line[3] - reference_line[1])
+    )
+    if forward is None:
+        return None
+    if (travel_direction == "right" and forward[0] < 0) or (
+        travel_direction == "left" and forward[0] > 0
+    ):
+        forward = (-forward[0], -forward[1])
+    down = (-forward[1], forward[0])
+    if down[1] < 0:
+        down = (-down[0], -down[1])
+    dry = (line[2], line[3]) if blade == 0 else (line[0], line[1])
+    active = (line[0], line[1]) if blade == 0 else (line[2], line[3])
+    blade_vector = _normalize((active[0] - dry[0], active[1] - dry[1]))
+    if blade_vector is None:
+        return None
+    angle = math.degrees(
+        math.atan2(_dot(blade_vector, down), _dot(blade_vector, forward))
+    )
+    return round(angle, 3)
 
 
 def _detect_paddle_events(
@@ -4083,7 +4885,11 @@ def _draw_event_angle_marker(
     if event.phase_angle is not None and event.travel_direction in {"left", "right"}:
         display_angle = _event_display_angle(event)
         assert display_angle is not None
-        if event.kind == "exit" and 0 <= event.phase_angle <= 180:
+        if (
+            event.discipline != "canoe"
+            and event.kind == "exit"
+            and 0 <= event.phase_angle <= 180
+        ):
             reference_vector = (-reference_vector[0], -reference_vector[1])
             display_radians = math.radians(display_angle)
             delta = -display_radians if event.travel_direction == "right" else display_radians
@@ -4163,6 +4969,8 @@ def _draw_event_angle_marker(
 def _event_display_angle(event: PaddleEvent) -> float | None:
     if event.phase_angle is None:
         return event.degree
+    if event.discipline == "canoe":
+        return event.phase_angle
     if event.kind == "exit" and 0 <= event.phase_angle <= 180:
         return 180 - event.phase_angle
     return event.phase_angle
@@ -4170,7 +4978,11 @@ def _event_display_angle(event: PaddleEvent) -> float | None:
 
 def _event_label_text(event: PaddleEvent) -> str:
     angle = _event_display_angle(event)
-    return f"{round(angle) % 360}°" if angle is not None else ""
+    if angle is None:
+        return ""
+    if event.discipline == "canoe":
+        return f"{round(angle):+d}°"
+    return f"{round(angle) % 360}°"
 
 
 def _paddle_event_angle_color(event: PaddleEvent) -> Color:

@@ -489,3 +489,5 @@ The tests generate a small video with FFmpeg, normalize it, claim a SQLite job, 
 
 - [Product requirements](./PRD.md)
 - [Technical design](./TECHNICAL_DESIGN.md)
+- [Kayak paddle-event detection design](./PADDLE_EVENT_DETECTION_TECHNICAL_DESIGN.md)
+- [Canoe event-detection design](./CANOE_EVENT_DETECTION_TECHNICAL_DESIGN.md)
