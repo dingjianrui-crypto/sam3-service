@@ -153,7 +153,8 @@ Request:
     "max_detections_per_frame": 13,
     "dedupe_iou_threshold": 0.6,
     "boat_reference_line": "centerline",
-    "body_motion": true
+    "body_motion": true,
+    "paddling_discipline": "kayak"
   }
 }
 ```
@@ -170,6 +171,7 @@ Fields:
 | `settings.dedupe_iou_threshold` | number | Same-frame box IoU above which lower-scored duplicate detections are dropped |
 | `settings.boat_reference_line` | `centerline` or `waterline` | Boat geometry used as the paddle-angle reference; defaults to `centerline`. The web upload card exposes this choice. |
 | `settings.body_motion` | boolean | Run the optional single-athlete MediaPipe pose pass; defaults to `false`, so omitted requests retain existing behavior. |
+| `settings.paddling_discipline` | `kayak` or `canoe` | Body-motion metric profile selector; defaults to `kayak`. The Canoe value is persisted now for future canoe-specific measurements. |
 | `settings.include_boxes` | boolean | Reserved client preference; current chunks include boxes |
 | `settings.working_max_dimension` | integer | Accepted range `320` to `1920`; reserved for processing-size control |
 
@@ -189,7 +191,7 @@ Mode semantics:
 - Values above `1` re-ground on periodic anchor frames, for example `10` means frame `0, 10, 20, ...`.
 - `max_detections_per_frame` is applied per prompt after same-frame de-duplication. The service rejects values above `SAM3_MAX_DETECTIONS_PER_FRAME`.
 
-When `body_motion` is enabled, the worker analyzes the normalized review video after segmentation. This does not add a new durable job state: the job remains in `postprocessing` while `progress.stage` can report `body_motion`. Pose failure does not discard successful masks; the completed manifest instead reports body motion as failed and includes a warning.
+When `body_motion` is enabled, the worker analyzes the normalized review video after segmentation. The web upload card presents this in a separate Body motion section rather than among Segmentation controls. The section also selects Kayak or Canoe; this release records the choice but does not yet add canoe-only derived measurements. This does not add a new durable job state: the job remains in `postprocessing` while `progress.stage` can report `body_motion`. Pose failure does not discard successful masks; the completed manifest instead reports body motion as failed and includes a warning.
 
 For paddle scenes with up to four paddlers, the recall-first default is `max_detections_per_frame: 13`: up to three visible paddle parts per paddler, plus room for a boat/reference prompt when used separately. Increase the service-side SAM3 object cap above this, for example `SAM3_MAX_TRACKED_OBJECTS=16` or `24`, so duplicate candidates do not consume all model slots before API de-duplication.
 
@@ -310,6 +312,7 @@ Only available when the job state is `completed`.
   "body_motion": {
     "schema_version": 1,
     "status": "completed",
+    "discipline": "kayak",
     "model_name": "mediapipe-pose-landmarker:pose_landmarker_full.task",
     "reference_axis": "video_vertical",
     "direction_reference": "centerline",

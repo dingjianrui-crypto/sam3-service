@@ -282,7 +282,7 @@ Cancellation latency depends on where the upstream predictor yields control and 
 
 ### 7.5 MediaPipe Pose Landmarker
 
-Body motion is an optional worker pass selected by `settings.body_motion`. The implementation uses MediaPipe Pose Landmarker in VIDEO mode with `num_poses=1` and an explicit CPU delegate, so the feature intentionally follows one primary kayaker without competing with SAM for GPU memory. The model asset is deployed separately and configured through `SAM3_POSE_MODEL_PATH`; the optional Python runtime is installed with the `pose` dependency extra.
+Body motion is an optional worker pass selected by `settings.body_motion`; it is presented separately from SAM segmentation settings in the upload UI. `settings.paddling_discipline` accepts `kayak` or `canoe` and defaults to `kayak`. The value is carried into both successful and failed body-motion manifest entries so later metric derivation can select a discipline-specific profile. This iteration records the Canoe choice but does not yet derive additional canoe-only measurements. The implementation uses MediaPipe Pose Landmarker in VIDEO mode with `num_poses=1` and an explicit CPU delegate, so the feature intentionally follows one primary paddler without competing with SAM for GPU memory. The model asset is deployed separately and configured through `SAM3_POSE_MODEL_PATH`; the optional Python runtime is installed with the `pose` dependency extra.
 
 The pass emits exact normalized-video `frame_index` and `timestamp_ms` values. It retains left/right wrists, elbows, shoulders, hips, knees, and ankles. Ankles are internal inputs for knee angles and are not rendered. Derived measurements are:
 
@@ -330,6 +330,7 @@ Pose inference is not a new durable job state. The job remains in `postprocessin
   "body_motion": {
     "schema_version": 1,
     "status": "completed",
+    "discipline": "kayak",
     "model_name": "mediapipe-pose-landmarker:pose_landmarker_full.task",
     "reference_axis": "video_vertical",
     "direction_reference": "centerline",
@@ -553,7 +554,8 @@ Request:
     "working_max_dimension": 1280,
     "include_boxes": true,
     "score_threshold": 0.5,
-    "body_motion": true
+    "body_motion": true,
+    "paddling_discipline": "kayak"
   }
 }
 ```
@@ -570,7 +572,7 @@ Response: `202 Accepted`
 
 Only allowlisted settings are accepted. Server policy can lower limits regardless of the submitted values.
 
-`body_motion` is optional and defaults to `false`. Adding it does not change existing job states, mask chunks, or export defaults. The body chunk route and `include_body_motion` export query are additive; older clients and completed jobs remain usable.
+`body_motion` is optional and defaults to `false`. `paddling_discipline` is independently optional and defaults to `kayak`, so older clients and stored jobs retain the Kayak behavior. Adding these fields does not change existing job states, mask chunks, or export defaults. The body chunk route and `include_body_motion` export query are additive; older clients and completed jobs remain usable.
 
 ### 10.3 Status
 

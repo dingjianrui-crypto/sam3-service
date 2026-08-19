@@ -40,6 +40,7 @@ class JobSettings(BaseModel):
     dedupe_iou_threshold: float | None = Field(default=None, ge=0, le=1)
     boat_reference_line: Literal["centerline", "waterline"] = "centerline"
     body_motion: bool = False
+    paddling_discipline: Literal["kayak", "canoe"] = "kayak"
 
 
 class JobCreate(BaseModel):

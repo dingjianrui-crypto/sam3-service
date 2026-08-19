@@ -27,6 +27,7 @@ export type JobSettings = {
   dedupe_iou_threshold: number;
   boat_reference_line: "centerline" | "waterline";
   body_motion?: boolean;
+  paddling_discipline?: "kayak" | "canoe";
 };
 
 export type BodyLandmark = {
@@ -91,7 +92,10 @@ export type ResultManifest = {
     frame_count: number;
   };
   prompts: Prompt[];
-  settings?: Pick<JobSettings, "boat_reference_line" | "body_motion">;
+  settings?: Pick<
+    JobSettings,
+    "boat_reference_line" | "body_motion" | "paddling_discipline"
+  >;
   instances: { id: string; prompt_id: string; color: string }[];
   chunks: {
     sequence: number;
@@ -107,6 +111,7 @@ export type ResultManifest = {
     reference_axis?: "video_vertical";
     direction_reference?: "centerline" | "waterline";
     athlete_count?: number;
+    discipline?: "kayak" | "canoe";
     error?: { code: string; message: string; retryable: boolean };
     chunks: {
       sequence: number;

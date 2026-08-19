@@ -154,7 +154,8 @@ export default function App() {
       setJobSettings((current) => ({
         ...DETECTION_PRESETS[mode],
         boat_reference_line: current.boat_reference_line,
-        body_motion: current.body_motion
+        body_motion: current.body_motion,
+        paddling_discipline: current.paddling_discipline ?? "kayak"
       }));
     }
   }
@@ -245,6 +246,10 @@ export default function App() {
               <small>Separate up to three prompts with commas.</small>
             </label>
             <div className="settings-panel">
+              <div className="analysis-panel-heading">
+                <strong>Segmentation</strong>
+                <small>SAM detection and tracking settings</small>
+              </div>
               <label className="field">
                 <span>Detection mode</span>
                 <select
@@ -275,20 +280,6 @@ export default function App() {
                   <option value="centerline">Centerline</option>
                   <option value="waterline">Waterline</option>
                 </select>
-              </label>
-              <label className="checkbox body-motion-job-setting">
-                <input
-                  type="checkbox"
-                  checked={Boolean(jobSettings.body_motion)}
-                  disabled={busy}
-                  onChange={(event) =>
-                    setJobSettings((current) => ({
-                      ...current,
-                      body_motion: event.target.checked
-                    }))
-                  }
-                />
-                Body motion
               </label>
               <div className="settings-grid">
                 <label className="field">
@@ -361,6 +352,43 @@ export default function App() {
                 </label>
               </div>
             </div>
+            <section className="body-motion-panel" aria-labelledby="body-motion-heading">
+              <div className="analysis-panel-heading">
+                <strong id="body-motion-heading">Body motion</strong>
+                <small>MediaPipe athlete pose detection and movement metrics</small>
+              </div>
+              <label className="checkbox body-motion-job-setting">
+                <input
+                  type="checkbox"
+                  checked={Boolean(jobSettings.body_motion)}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setJobSettings((current) => ({
+                      ...current,
+                      body_motion: event.target.checked
+                    }))
+                  }
+                />
+                Enable MediaPipe body detection
+              </label>
+              <label className="field">
+                <span>Paddling discipline</span>
+                <select
+                  value={jobSettings.paddling_discipline ?? "kayak"}
+                  disabled={busy || !jobSettings.body_motion}
+                  onChange={(event) =>
+                    setJobSettings((current) => ({
+                      ...current,
+                      paddling_discipline: event.target.value as "kayak" | "canoe"
+                    }))
+                  }
+                >
+                  <option value="kayak">Kayak</option>
+                  <option value="canoe">Canoe</option>
+                </select>
+                <small>Saved for discipline-specific body metric profiles.</small>
+              </label>
+            </section>
             {busy && (
               <div className="upload-progress">
                 <span style={{ width: `${uploadProgress}%` }} />

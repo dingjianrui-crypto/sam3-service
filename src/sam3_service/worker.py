@@ -88,6 +88,7 @@ class Worker:
             )
             settings = json.loads(job["settings_json"])
             body_motion_requested = bool(settings.get("body_motion", False))
+            paddling_discipline = str(settings.get("paddling_discipline", "kayak"))
             total_passes = len(prompts) + (1 if body_motion_requested else 0)
             prompt_entries = []
             instances: dict[str, dict[str, Any]] = {}
@@ -151,6 +152,7 @@ class Worker:
                     body_motion_manifest = {
                         "schema_version": 1,
                         "status": "failed",
+                        "discipline": paddling_discipline,
                         "error": {
                             "code": error.code,
                             "message": error.message,
@@ -293,6 +295,7 @@ class Worker:
             "settings": {
                 "boat_reference_line": settings.get("boat_reference_line", "centerline"),
                 "body_motion": bool(settings.get("body_motion", False)),
+                "paddling_discipline": settings.get("paddling_discipline", "kayak"),
             },
             "instances": [
                 {**entry, "color": colors.get(entry["prompt_id"], "#35C2FF")}
@@ -398,6 +401,7 @@ class Worker:
         return {
             "schema_version": 1,
             "status": "completed",
+            "discipline": settings.get("paddling_discipline", "kayak"),
             "model_name": self.body_motion_analyzer.model_name,
             "reference_axis": "video_vertical",
             "direction_reference": reference_mode,

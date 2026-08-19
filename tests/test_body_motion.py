@@ -47,7 +47,14 @@ def _frame(shoulder_x: float = 0.6) -> BodyMotionFrame:
 
 class BodyMotionTest(unittest.TestCase):
     def test_job_setting_is_backward_compatible_and_disabled_by_default(self) -> None:
-        self.assertFalse(JobSettings().body_motion)
+        settings = JobSettings()
+
+        self.assertFalse(settings.body_motion)
+        self.assertEqual(settings.paddling_discipline, "kayak")
+        self.assertEqual(
+            JobSettings(paddling_discipline="canoe").paddling_discipline,
+            "canoe",
+        )
 
     def test_derives_joint_angles_and_signed_vertical_lean(self) -> None:
         record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))

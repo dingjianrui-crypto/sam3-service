@@ -88,6 +88,8 @@ The initial user is a researcher, coach, or developer reviewing paddle-sport foo
 - Use resumable or multipart upload when files exceed the configured threshold.
 - Transcode unsupported browser codecs to a review-compatible MP4 while preserving timing.
 - Store the original frame rate and timing metadata needed to align masks.
+- Present SAM detection/tracking controls in a Segmentation section and MediaPipe controls in a separate Body motion section.
+- The Body motion section provides an enable switch and a Kayak/Canoe paddling-discipline selector. Kayak is the default for backward compatibility; the selection is retained for discipline-specific metric profiles.
 
 Initial limits, subject to the T4 benchmark:
 
@@ -118,6 +120,7 @@ Initial limits, subject to the T4 benchmark:
 - Persist model/checkpoint version, prompt, inference settings, input metadata, and timestamps with every result.
 - Fail safely on GPU out-of-memory, corrupt video, unsupported codec, missing checkpoint access, or worker restart.
 - When `body_motion` is true, run MediaPipe Pose Landmarker as an optional post-segmentation pass against the normalized review video.
+- Persist `paddling_discipline` as `kayak` or `canoe` with the job and body-motion result. This iteration does not infer additional canoe-only measurements; it establishes the input contract for them.
 - A body-motion failure must not discard otherwise successful segmentation. Complete the job with a body-motion warning and unavailable body controls.
 
 ### 6.4 Segmentation result
@@ -137,6 +140,7 @@ Optional body-motion results use separate time-based chunks and retain:
 
 - exact normalized-video frame index and timestamp;
 - one primary athlete identifier;
+- selected paddling discipline (`kayak` or `canoe`);
 - normalized coordinates, visibility, and presence for left/right wrists, elbows, shoulders, hips, knees, and internal ankle points;
 - elbow, shoulder, hip, and knee angles for each sufficiently visible side;
 - signed torso lean in degrees relative to the video vertical axis;
