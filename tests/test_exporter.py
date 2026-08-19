@@ -25,6 +25,7 @@ from sam3_service.exporter import (
     _blade_waterline_overlaps,
     _catch_phase_allowed,
     _consolidate_paddle_observations,
+    _canoe_export_travel_direction,
     _canoe_directions,
     _canoe_boat_slot_tracks,
     _canoe_phase_catch,
@@ -1400,6 +1401,44 @@ class ExporterTest(unittest.TestCase):
         )
 
         self.assertEqual(_event_label_text(event), "29°")
+
+    def test_canoe_exit_event_label_uses_complementary_phase_angle(self) -> None:
+        event = PaddleEvent(
+            kind="exit",
+            timestamp_ms=100,
+            instance_id="canoe:slot:boat:1",
+            line=(0, 0, 30, 40),
+            confidence=1.0,
+            phase_angle=151,
+            degree=29,
+            discipline="canoe",
+        )
+
+        self.assertEqual(_event_label_text(event), "+29°")
+
+    def test_canoe_export_travel_direction_uses_canoe_event_direction(self) -> None:
+        events = [
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=100,
+                instance_id="kayak:1",
+                line=(0, 0, 30, 40),
+                confidence=1.0,
+                travel_direction="left",
+                discipline="kayak",
+            ),
+            PaddleEvent(
+                kind="catch",
+                timestamp_ms=200,
+                instance_id="canoe:slot:boat:1",
+                line=(0, 0, 30, 40),
+                confidence=1.0,
+                travel_direction="right",
+                discipline="canoe",
+            ),
+        ]
+
+        self.assertEqual(_canoe_export_travel_direction(events), "right")
 
     def test_opposite_blade_is_ignored_and_next_360_cycle_resets_catch(self) -> None:
         state = _PaddleEventState(

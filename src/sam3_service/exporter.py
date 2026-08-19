@@ -453,6 +453,20 @@ def export_centerline_video(
         frame_count,
         max_events_per_moment=export_options.target_slot_count,
     )
+    canoe_travel_direction = _canoe_export_travel_direction(
+        events,
+        frames=frames,
+        options=export_options,
+        width=width,
+        height=height,
+        scale_x=scale_x,
+        scale_y=scale_y,
+        discipline=str(
+            manifest.get("settings", {}).get("paddling_discipline", "kayak")
+        ),
+        needs_body_motion=export_options.include_body_motion,
+        progress=progress,
+    )
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
     freeze_frame_count = _event_freeze_frame_count(export_options, fps)
@@ -567,6 +581,8 @@ def export_centerline_video(
                     height,
                     body_motion_record,
                     discipline=body_motion_discipline,
+                    canoe_travel_direction=canoe_travel_direction,
+                    angle_label_font_size=export_options.angle_label_font_size,
                     metric_offset_percent=(
                         export_options.event_metric_center_offset_percent
                     ),
@@ -580,6 +596,8 @@ def export_centerline_video(
                         height,
                         body_motion_record,
                         discipline=body_motion_discipline,
+                        canoe_travel_direction=canoe_travel_direction,
+                        angle_label_font_size=export_options.angle_label_font_size,
                         metric_offset_percent=(
                             export_options.event_metric_center_offset_percent
                         ),
@@ -1124,6 +1142,51 @@ def _records_for_timestamp(
     if abs(nearest_timestamp - timestamp_ms) > tolerance_ms:
         return []
     return frames[nearest_timestamp]
+
+
+def _canoe_export_travel_direction(
+    events: list[PaddleEvent],
+    *,
+    frames: dict[int, list[dict[str, Any]]] | None = None,
+    options: ExportOptions | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    scale_x: float = 1.0,
+    scale_y: float = 1.0,
+    discipline: str = "kayak",
+    needs_body_motion: bool = False,
+    progress: Callable[[str, float, str], None] | None = None,
+) -> str | None:
+    for event in events:
+        if event.discipline == "canoe" and event.travel_direction in {"left", "right"}:
+            return event.travel_direction
+    if (
+        not needs_body_motion
+        or discipline != "canoe"
+        or frames is None
+        or options is None
+        or width is None
+        or height is None
+    ):
+        return None
+    tracks = _track_paddle_observations(
+        frames,
+        options,
+        width,
+        height,
+        scale_x,
+        scale_y,
+        progress,
+    )
+    direction_votes: dict[str, float] = {}
+    for _reference_id, (_source, direction, confidence) in _canoe_directions(
+        tracks
+    ).items():
+        if direction in {"left", "right"}:
+            direction_votes[direction] = direction_votes.get(direction, 0.0) + confidence
+    if not direction_votes:
+        return None
+    return max(direction_votes, key=direction_votes.get)
 
 
 def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dict[str, Any]:
@@ -4969,6 +5032,8 @@ def _draw_event_angle_marker(
 def _event_display_angle(event: PaddleEvent) -> float | None:
     if event.phase_angle is None:
         return event.degree
+    if event.discipline == "canoe" and event.kind == "exit" and 0 <= event.phase_angle <= 180:
+        return 180 - event.phase_angle
     if event.discipline == "canoe":
         return event.phase_angle
     if event.kind == "exit" and 0 <= event.phase_angle <= 180:
@@ -5506,19 +5571,32 @@ def _draw_body_metric_row(
     height: int,
     entries: list[tuple[str, str, Color]],
     signed_offset_percent: float,
+    *,
+    angle_label_font_size: int | None = None,
+    draw_background: bool = True,
 ) -> None:
     if not entries:
         return
     if _draw_body_metric_row_with_pillow(
-        image, width, height, entries, signed_offset_percent
+        image,
+        width,
+        height,
+        entries,
+        signed_offset_percent,
+        angle_label_font_size=angle_label_font_size,
+        draw_background=draw_background,
     ):
         return
 
-    scale = max(2, round(width / 700))
+    scale = (
+        max(2, round(angle_label_font_size / 7))
+        if angle_label_font_size is not None
+        else max(2, round(width / 700))
+    )
     glyph_gap = max(1, round(scale * 0.4))
     item_gap = max(8, scale * 5)
-    padding_x = scale * 4
-    padding_y = scale * 2
+    padding_x = scale * 4 if draw_background else 0
+    padding_y = scale * 2 if draw_background else 0
     abbreviations = {
         "L Elbow": "LE",
         "R Elbow": "RE",
@@ -5543,16 +5621,17 @@ def _draw_body_metric_row(
     for text, item_width, (_label, _value, color) in zip(
         abbreviated, item_widths, entries
     ):
-        _fill_rect(
-            image,
-            width,
-            height,
-            left,
-            top,
-            item_width,
-            row_height,
-            (2, 5, 9, 205),
-        )
+        if draw_background:
+            _fill_rect(
+                image,
+                width,
+                height,
+                left,
+                top,
+                item_width,
+                row_height,
+                (2, 5, 9, 205),
+            )
         x = left + padding_x
         for character in text:
             glyph = _glyph(character)
@@ -5567,6 +5646,9 @@ def _draw_body_metric_row_with_pillow(
     height: int,
     entries: list[tuple[str, str, Color]],
     signed_offset_percent: float,
+    *,
+    angle_label_font_size: int | None = None,
+    draw_background: bool = True,
 ) -> bool:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -5577,13 +5659,17 @@ def _draw_body_metric_row_with_pillow(
     if font_path is None:
         return False
 
-    font_size = max(14, round(width / 58))
+    font_size = (
+        int(angle_label_font_size)
+        if angle_label_font_size is not None
+        else max(14, round(width / 58))
+    )
     measuring_surface = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     draw = ImageDraw.Draw(measuring_surface)
     texts = [f"{label} {value}" for label, value, _color in entries]
     gap = max(10, round(font_size * 0.7))
-    padding_x = max(8, round(font_size * 0.55))
-    padding_y = max(4, round(font_size * 0.3))
+    padding_x = max(8, round(font_size * 0.55)) if draw_background else 0
+    padding_y = max(4, round(font_size * 0.3)) if draw_background else 0
     while True:
         try:
             font = ImageFont.truetype(str(font_path), font_size)
@@ -5596,8 +5682,8 @@ def _draw_body_metric_row_with_pillow(
             break
         font_size -= 1
         gap = max(6, round(font_size * 0.7))
-        padding_x = max(6, round(font_size * 0.55))
-        padding_y = max(3, round(font_size * 0.3))
+        padding_x = max(6, round(font_size * 0.55)) if draw_background else 0
+        padding_y = max(3, round(font_size * 0.3)) if draw_background else 0
 
     text_height = max(box[3] - box[1] for box in boxes)
     row_height = text_height + padding_y * 2
@@ -5611,11 +5697,12 @@ def _draw_body_metric_row_with_pillow(
     for text, box, item_width, (_label, _value, color) in zip(
         texts, boxes, item_widths, entries
     ):
-        draw.rounded_rectangle(
-            (left, 0, left + item_width - 1, row_height - 1),
-            radius=corner_radius,
-            fill=(2, 5, 9, 205),
-        )
+        if draw_background:
+            draw.rounded_rectangle(
+                (left, 0, left + item_width - 1, row_height - 1),
+                radius=corner_radius,
+                fill=(2, 5, 9, 205),
+            )
         text_left = left + (item_width - (box[2] - box[0])) / 2 - box[0]
         text_top = (row_height - (box[3] - box[1])) / 2 - box[1]
         draw.text((text_left, text_top), text, font=font, fill=color)
@@ -5640,6 +5727,8 @@ def _draw_body_motion_overlay(
     record: dict[str, Any],
     *,
     discipline: str = "kayak",
+    canoe_travel_direction: str | None = None,
+    angle_label_font_size: int | None = None,
     metric_offset_percent: float = 10.0,
 ) -> None:
     landmarks = record.get("landmarks")
@@ -5704,6 +5793,12 @@ def _draw_body_motion_overlay(
         "shoulder": ("elbow", "shoulder", "hip"),
         "knee": ("hip", "knee", "ankle"),
     }
+    hidden_metric_side: str | None = None
+    if discipline == "canoe":
+        if canoe_travel_direction == "right":
+            hidden_metric_side = "left"
+        elif canoe_travel_direction == "left":
+            hidden_metric_side = "right"
     joint_metrics = (
         ("L Elbow", "left", "elbow", BODY_LEFT_ELBOW_COLOR),
         ("R Elbow", "right", "elbow", BODY_RIGHT_ELBOW_COLOR),
@@ -5714,6 +5809,8 @@ def _draw_body_motion_overlay(
     )
     metric_entries: list[tuple[str, str, Color]] = []
     for label, side, joint, color in joint_metrics:
+        if side == hidden_metric_side:
+            continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
         if value is not None:
             _draw_body_joint_arc(
@@ -5739,6 +5836,8 @@ def _draw_body_motion_overlay(
         )
     )
     for label, side, joint, color in shoulder_metrics:
+        if side == hidden_metric_side:
+            continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
         if value is not None:
             _draw_body_joint_arc(
@@ -5760,6 +5859,8 @@ def _draw_body_motion_overlay(
             ("L Knee", "left", BODY_LEFT_KNEE_COLOR),
             ("R Knee", "right", BODY_RIGHT_KNEE_COLOR),
         ):
+            if side == hidden_metric_side:
+                continue
             value = _finite_body_metric(metrics, f"{side}_knee_deg")
             if value is not None:
                 _draw_body_joint_arc(
@@ -5782,6 +5883,8 @@ def _draw_body_motion_overlay(
         height,
         metric_entries,
         metric_offset_percent,
+        angle_label_font_size=angle_label_font_size if discipline == "canoe" else None,
+        draw_background=discipline != "canoe",
     )
 
 
