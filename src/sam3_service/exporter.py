@@ -414,6 +414,9 @@ def export_centerline_video(
     frame_timestamps = sorted(frames)
     scale_x = width / manifest_width if manifest_width > 0 else 1.0
     scale_y = height / manifest_height if manifest_height > 0 else 1.0
+    discipline = str(
+        manifest.get("settings", {}).get("paddling_discipline", "kayak")
+    )
     if (
         export_options.target_slot_count == 0
         and (export_options.selection_rect is not None or export_options.selection_keyframes)
@@ -439,9 +442,7 @@ def export_centerline_video(
             height,
             scale_x,
             scale_y,
-            discipline=str(
-                manifest.get("settings", {}).get("paddling_discipline", "kayak")
-            ),
+            discipline=discipline,
             body_motion_frames=body_motion_frames,
             progress=progress,
         )
@@ -460,11 +461,23 @@ def export_centerline_video(
         height=height,
         scale_x=scale_x,
         scale_y=scale_y,
-        discipline=str(
-            manifest.get("settings", {}).get("paddling_discipline", "kayak")
-        ),
+        discipline=discipline,
         needs_body_motion=export_options.include_body_motion,
         progress=progress,
+    )
+    overlay_reference_lines = (
+        _canoe_overlay_reference_lines(
+            frames,
+            export_options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+            body_motion_frames,
+            progress,
+        )
+        if discipline == "canoe"
+        else {}
     )
     result_tolerance_ms = max(1000 / max(fps, 1), 500 / max(manifest_fps, 1), 40)
     freeze_by_frame = {moment.frame_index: moment for moment in freeze_moments}
@@ -572,6 +585,7 @@ def export_centerline_video(
                 timestamp_ms=timestamp_ms,
                 spm_estimator=spm_estimator,
                 paddle_events=(),
+                reference_lines_by_track=overlay_reference_lines,
             )
             if export_options.include_body_motion and body_motion_record is not None:
                 _draw_body_motion_overlay(
@@ -610,6 +624,8 @@ def export_centerline_video(
                         colors,
                         export_options,
                         freeze_moment.events,
+                        timestamp_ms=timestamp_ms,
+                        reference_lines_by_track=overlay_reference_lines,
                     )
                 for event in freeze_moment.events:
                     _draw_paddle_event_label(
@@ -1195,6 +1211,49 @@ def _canoe_export_travel_direction(
     return max(direction_votes, key=direction_votes.get)
 
 
+def _canoe_overlay_reference_lines(
+    frames: dict[int, list[dict[str, Any]]],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    scale_x: float,
+    scale_y: float,
+    body_motion_frames: dict[int, dict[str, Any]],
+    progress: Callable[[str, float, str], None] | None = None,
+) -> dict[tuple[str, int], Line]:
+    tracks = _track_paddle_observations(
+        frames,
+        options,
+        width,
+        height,
+        scale_x,
+        scale_y,
+        progress,
+    )
+    directions = _canoe_directions(tracks)
+    body_direction = _canoe_body_travel_direction(body_motion_frames)
+    if body_direction[0] in {"left", "right"}:
+        directions = {
+            reference_id: ("body_motion", body_direction[0], body_direction[1])
+            for reference_id in {
+                timed.observation.reference_id
+                for observations in tracks.values()
+                for timed in observations
+            }
+        }
+    return _stabilized_event_reference_lines(
+        _event_boat_reference_lines(
+            frames,
+            options,
+            width,
+            height,
+            scale_x,
+            scale_y,
+        ),
+        directions,
+    )
+
+
 def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dict[str, Any]:
     if abs(scale_x - 1) < 1e-6 and abs(scale_y - 1) < 1e-6:
         return record
@@ -1223,14 +1282,18 @@ def _draw_frame_overlay(
     timestamp_ms: int,
     spm_estimator: SpmEstimator,
     paddle_events: tuple[PaddleEvent, ...] = (),
+    reference_lines_by_track: dict[tuple[str, int], Line] | None = None,
 ) -> None:
     centerlines: list[Centerline] = []
     for record in records:
-        use_waterline = (
-            export_options.reference_line_mode == "waterline"
-            and record.get("prompt_id") == export_options.reference_prompt_id
+        line = _display_record_line(
+            record,
+            export_options,
+            width,
+            height,
+            timestamp_ms,
+            reference_lines_by_track,
         )
-        line = _record_line(record, width, height, use_waterline=use_waterline)
         if line is None:
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
@@ -1263,17 +1326,23 @@ def _draw_event_companion_angles(
     colors: dict[str, Color],
     options: ExportOptions,
     events: tuple[PaddleEvent, ...],
+    *,
+    timestamp_ms: int,
+    reference_lines_by_track: dict[tuple[str, int], Line] | None = None,
 ) -> None:
     """Draw all paddle angles in the top/bottom block on an event frame."""
     if not events:
         return
     centerlines: list[Centerline] = []
     for record in records:
-        use_waterline = (
-            options.reference_line_mode == "waterline"
-            and record.get("prompt_id") == options.reference_prompt_id
+        line = _display_record_line(
+            record,
+            options,
+            width,
+            height,
+            timestamp_ms,
+            reference_lines_by_track,
         )
-        line = _record_line(record, width, height, use_waterline=use_waterline)
         if line is None:
             continue
         centerlines.append(
@@ -1381,6 +1450,7 @@ def _build_event_metric_columns(
     scale_y: float,
     fps: float,
     result_tolerance_ms: float,
+    reference_lines_by_track: dict[tuple[str, int], Line] | None = None,
 ) -> tuple[EventMetricColumn, ...]:
     """Precompute the fixed event-table columns before rendering any frames."""
     columns: list[EventMetricColumn] = []
@@ -1414,6 +1484,8 @@ def _build_event_metric_columns(
             options,
             width,
             height,
+            event.timestamp_ms,
+            reference_lines_by_track,
         )
         columns.append(
             EventMetricColumn(
@@ -1430,14 +1502,19 @@ def _centerlines_for_records(
     options: ExportOptions,
     width: int,
     height: int,
+    timestamp_ms: int | None = None,
+    reference_lines_by_track: dict[tuple[str, int], Line] | None = None,
 ) -> list[Centerline]:
     centerlines: list[Centerline] = []
     for record in records:
-        use_waterline = (
-            options.reference_line_mode == "waterline"
-            and record.get("prompt_id") == options.reference_prompt_id
+        line = _display_record_line(
+            record,
+            options,
+            width,
+            height,
+            timestamp_ms,
+            reference_lines_by_track,
         )
-        line = _record_line(record, width, height, use_waterline=use_waterline)
         if line is None:
             continue
         centerlines.append(
@@ -1448,6 +1525,27 @@ def _centerlines_for_records(
             )
         )
     return centerlines
+
+
+def _display_record_line(
+    record: dict[str, Any],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    timestamp_ms: int | None = None,
+    reference_lines_by_track: dict[tuple[str, int], Line] | None = None,
+) -> Line | None:
+    is_reference = record.get("prompt_id") == options.reference_prompt_id
+    if is_reference and timestamp_ms is not None and reference_lines_by_track:
+        line = reference_lines_by_track.get((_record_track_id(record), timestamp_ms))
+        if line is not None:
+            return line
+    return _record_line(
+        record,
+        width,
+        height,
+        use_waterline=is_reference and options.reference_line_mode == "waterline",
+    )
 
 
 def _event_metric_values(
@@ -1762,6 +1860,50 @@ def _record_line(
     if geometry == "waterline":
         line = _extend_waterline_to_boat_span(record, line, width, height)
     return line  # type: ignore[return-value]
+
+
+def _record_geometry_line(
+    record: dict[str, Any],
+    width: int,
+    height: int,
+    geometry: str,
+) -> Line | None:
+    values = record.get(f"{geometry}_line_xyxy")
+    if not values or len(values) != 4:
+        return None
+    try:
+        scale_x, scale_y = _line_coordinate_scale(record, width, height, geometry)
+        line = (
+            float(values[0]) * scale_x,
+            float(values[1]) * scale_y,
+            float(values[2]) * scale_x,
+            float(values[3]) * scale_y,
+        )
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in line):
+        return None
+    if geometry == "waterline":
+        line = _extend_waterline_to_boat_span(record, line, width, height)
+    return line
+
+
+def _event_reference_line(
+    record: dict[str, Any],
+    options: ExportOptions,
+    width: int,
+    height: int,
+    last_reference_lines: dict[str, Line],
+) -> Line | None:
+    geometry = (
+        "waterline" if options.reference_line_mode == "waterline" else "centerline"
+    )
+    reference_id = _record_track_id(record)
+    line = _record_geometry_line(record, width, height, geometry)
+    if line is None:
+        return last_reference_lines.get(reference_id)
+    last_reference_lines[reference_id] = line
+    return line
 
 
 def _extend_waterline_to_boat_span(
@@ -2350,7 +2492,6 @@ def _canoe_phase_catch(
     restored = _canoe_phase_catch_restored_lines(rising_samples)
     if len(restored) < 2:
         return None
-    candidates: list[tuple[_CanoePhaseSample, Line]] = []
     for previous, current in zip(restored, restored[1:]):
         previous_sample, previous_line = previous
         current_sample, current_line = current
@@ -2366,13 +2507,13 @@ def _canoe_phase_catch(
         )
         if previous_crosses == current_crosses:
             continue
-        candidates.extend((previous, current))
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda entry: _canoe_active_endpoint_waterline_distance(entry[0], entry[1]),
-    )
+        return min(
+            (previous, current),
+            key=lambda entry: _canoe_active_endpoint_waterline_distance(
+                entry[0], entry[1]
+            ),
+        )
+    return None
 
 
 def _canoe_phase_catch_restored_lines(
@@ -2983,6 +3124,7 @@ def _track_paddle_observations(
     tracks: dict[str, list[_TimedPaddleObservation]] = {}
     timestamps = sorted(frames)
     target_prompt_ids = set(options.target_prompt_ids)
+    last_reference_lines: dict[str, Line] = {}
     for index, timestamp_ms in enumerate(timestamps):
         records = [_scale_record(record, scale_x, scale_y) for record in frames[timestamp_ms]]
         records = [
@@ -2994,12 +3136,12 @@ def _track_paddle_observations(
         targets: list[Centerline] = []
         for record in records:
             is_reference = record.get("prompt_id") == options.reference_prompt_id
-            line = _record_line(
-                record,
-                width,
-                height,
-                use_waterline=is_reference and options.reference_line_mode == "waterline",
-            )
+            if is_reference:
+                line = _event_reference_line(
+                    record, options, width, height, last_reference_lines
+                )
+            else:
+                line = _record_line(record, width, height)
             if line is None:
                 continue
             centerline = Centerline(record=record, line=line, color=(255, 255, 255, 255))
@@ -3182,22 +3324,7 @@ def _stabilize_boat_reference_lengths(
                 timed.observation.reference_line,
             )
 
-    corrected: dict[tuple[str, int], Line] = {}
-    for reference_id, lines_by_timestamp in reference_lines.items():
-        if reference_id not in directions:
-            continue
-        _, travel_direction, _ = directions[reference_id]
-        if travel_direction not in {"left", "right"}:
-            continue
-        corrected.update(
-            {
-                (reference_id, timestamp_ms): line
-                for timestamp_ms, line in _kalman_stabilized_boat_reference_lines(
-                    lines_by_timestamp,
-                    travel_direction,
-                ).items()
-            }
-        )
+    corrected = _stabilized_event_reference_lines(reference_lines, directions)
 
     if not corrected:
         return tracks
@@ -3222,6 +3349,29 @@ def _stabilize_boat_reference_lengths(
     return stabilized
 
 
+def _stabilized_event_reference_lines(
+    lines_by_reference: dict[str, dict[int, Line]],
+    directions: dict[str, tuple[str | None, str | None, float]],
+) -> dict[tuple[str, int], Line]:
+    corrected: dict[tuple[str, int], Line] = {}
+    for reference_id, lines_by_timestamp in lines_by_reference.items():
+        if reference_id not in directions:
+            continue
+        _, travel_direction, _ = directions[reference_id]
+        if travel_direction not in {"left", "right"}:
+            continue
+        corrected.update(
+            {
+                (reference_id, timestamp_ms): line
+                for timestamp_ms, line in _kalman_stabilized_boat_reference_lines(
+                    lines_by_timestamp,
+                    travel_direction,
+                ).items()
+            }
+        )
+    return corrected
+
+
 def _event_boat_reference_lines(
     frames: dict[int, list[dict[str, Any]]],
     options: ExportOptions,
@@ -3232,6 +3382,7 @@ def _event_boat_reference_lines(
 ) -> dict[str, dict[int, Line]]:
     """Collect every selected boat observation, including frames without a paddle."""
     lines: dict[str, dict[int, Line]] = {}
+    last_reference_lines: dict[str, Line] = {}
     for timestamp_ms, frame_records in frames.items():
         for raw_record in frame_records:
             record = _scale_record(raw_record, scale_x, scale_y)
@@ -3245,11 +3396,8 @@ def _event_boat_reference_lines(
                 timestamp_ms,
             ):
                 continue
-            line = _record_line(
-                record,
-                width,
-                height,
-                use_waterline=options.reference_line_mode == "waterline",
+            line = _event_reference_line(
+                record, options, width, height, last_reference_lines
             )
             if line is None:
                 continue

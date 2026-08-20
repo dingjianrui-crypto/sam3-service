@@ -66,6 +66,7 @@ from sam3_service.exporter import (
     _line_length,
     _load_frames_by_index,
     _kalman_stabilized_boat_reference_lines,
+    _centerlines_for_records,
     _metric_label_top,
     _maximum_target_count_in_selection,
     _normalize_export_options,
@@ -408,7 +409,7 @@ class ExporterTest(unittest.TestCase):
         self.assertAlmostEqual(right or 0.0, left or 0.0)
         self.assertAlmostEqual(right or 0.0, 45.0)
 
-    def test_canoe_phase_selects_nearest_waterline_catch_and_peak_exit(self) -> None:
+    def test_canoe_phase_selects_first_crossing_catch_and_peak_exit(self) -> None:
         def observation(timestamp_ms: int, angle: float, waterline_y: float = 50.0):
             radians = math.radians(angle)
             dry = (50.0, 0.0)
@@ -433,6 +434,7 @@ class ExporterTest(unittest.TestCase):
             "paddle:physical:1",
             [
                 observation(0, 10),
+                observation(50, 35, 22.0),
                 observation(100, 40, 25.7),
                 observation(200, 70),
                 observation(300, 110, 37.6),
@@ -445,7 +447,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [(event.kind, event.timestamp_ms) for event in events],
-            [("catch", 100), ("exit", 300)],
+            [("catch", 50), ("exit", 300)],
         )
         self.assertTrue(all(event.discipline == "canoe" for event in events))
 
@@ -2614,6 +2616,94 @@ class ExporterTest(unittest.TestCase):
             ),
             (0.0, 20.0, 100.0, 20.0),
         )
+
+    def test_event_boat_reference_lines_carry_forward_selected_geometry(self) -> None:
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            reference_line_mode="waterline",
+        )
+        frames = {
+            0: [
+                {
+                    "prompt_id": "boat",
+                    "track_id": "boat:track:1",
+                    "centerline_line_xyxy": [0, 20, 100, 20],
+                    "waterline_line_xyxy": [0, 50, 100, 50],
+                }
+            ],
+            100: [
+                {
+                    "prompt_id": "boat",
+                    "track_id": "boat:track:1",
+                    "centerline_line_xyxy": [0, 25, 100, 25],
+                }
+            ],
+        }
+
+        lines = _event_boat_reference_lines(frames, options, 100, 100, 1.0, 1.0)
+
+        self.assertEqual(
+            lines["boat:track:1"],
+            {
+                0: (0.0, 50.0, 100.0, 50.0),
+                100: (0.0, 50.0, 100.0, 50.0),
+            },
+        )
+
+    def test_event_boat_reference_lines_carry_forward_centerline(self) -> None:
+        options = ExportOptions(
+            reference_prompt_id="boat",
+            reference_line_mode="centerline",
+        )
+        frames = {
+            0: [
+                {
+                    "prompt_id": "boat",
+                    "track_id": "boat:track:1",
+                    "centerline_line_xyxy": [0, 20, 100, 20],
+                    "waterline_line_xyxy": [0, 50, 100, 50],
+                }
+            ],
+            100: [
+                {
+                    "prompt_id": "boat",
+                    "track_id": "boat:track:1",
+                    "waterline_line_xyxy": [0, 55, 100, 55],
+                }
+            ],
+        }
+
+        lines = _event_boat_reference_lines(frames, options, 100, 100, 1.0, 1.0)
+
+        self.assertEqual(
+            lines["boat:track:1"],
+            {
+                0: (0.0, 20.0, 100.0, 20.0),
+                100: (0.0, 20.0, 100.0, 20.0),
+            },
+        )
+
+    def test_centerlines_for_records_uses_event_reference_override(self) -> None:
+        record = {
+            "prompt_id": "boat",
+            "track_id": "boat:track:1",
+            "centerline_line_xyxy": [0, 20, 100, 20],
+            "waterline_line_xyxy": [0, 50, 100, 50],
+        }
+
+        centerlines = _centerlines_for_records(
+            [record],
+            {"boat": (255, 181, 71, 255)},
+            ExportOptions(reference_prompt_id="boat", reference_line_mode="waterline"),
+            100,
+            100,
+            timestamp_ms=100,
+            reference_lines_by_track={
+                ("boat:track:1", 100): (0.0, 60.0, 100.0, 60.0),
+            },
+        )
+
+        self.assertEqual(centerlines[0].line, (0.0, 60.0, 100.0, 60.0))
 
     def test_waterline_is_extended_to_the_boat_centerline_span(self) -> None:
         record = {
