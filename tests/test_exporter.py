@@ -482,6 +482,12 @@ class ExporterTest(unittest.TestCase):
         sample, restored_line = catch
         self.assertEqual(sample.timed.timestamp_ms, 100)
         self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
+        if sample.blade == 0:
+            self.assertEqual(restored_line[2:], sample.line[2:])
+            self.assertNotEqual(restored_line[:2], sample.line[:2])
+        else:
+            self.assertEqual(restored_line[:2], sample.line[:2])
+            self.assertNotEqual(restored_line[2:], sample.line[2:])
 
     def test_canoe_phase_catch_keeps_large_shortened_crossing_frame(self) -> None:
         def observation(timestamp_ms: int, line: tuple[float, float, float, float]):
@@ -515,7 +521,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(sample.timed.timestamp_ms, 100)
         self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
 
-    def test_canoe_phase_catch_uses_overlay_line_tolerance(self) -> None:
+    def test_canoe_phase_catch_requires_strict_crossing(self) -> None:
         def observation(timestamp_ms: int, active_y: float):
             line = (50.0, 0.0, 90.0, active_y)
             return _TimedPaddleObservation(
@@ -539,14 +545,9 @@ class ExporterTest(unittest.TestCase):
             60.0,
         )
 
-        catch = _canoe_phase_catch(samples, tolerance_pixels=4.0)
+        self.assertIsNone(_canoe_phase_catch(samples))
 
-        self.assertIsNotNone(catch)
-        assert catch is not None
-        sample, _restored_line = catch
-        self.assertEqual(sample.timed.timestamp_ms, 100)
-
-    def test_canoe_phase_catch_selects_closest_neighbor_after_tolerance_crossing(self) -> None:
+    def test_canoe_phase_catch_selects_closest_neighbor_after_strict_crossing(self) -> None:
         def observation(timestamp_ms: int, active_y: float):
             line = (50.0, 0.0, 90.0, active_y)
             return _TimedPaddleObservation(
@@ -565,14 +566,14 @@ class ExporterTest(unittest.TestCase):
             [
                 observation(0, 35.0),
                 observation(100, 45.0),
-                observation(200, 47.0),
-                observation(300, 49.5),
+                observation(200, 51.5),
+                observation(300, 50.5),
             ],
             "right",
             70.0,
         )
 
-        catch = _canoe_phase_catch(samples, tolerance_pixels=4.0)
+        catch = _canoe_phase_catch(samples)
 
         self.assertIsNotNone(catch)
         assert catch is not None

@@ -61,7 +61,6 @@ CANOE_DIRECTION_MIN_AXIS_SPAN_DEGREES = 8.0
 CANOE_PHASE_MIN_TREND_DEGREES = 3.0
 CANOE_PHASE_EXIT_CONFIRM_SAMPLES = 2
 CANOE_CATCH_LENGTH_RESTORE_TOLERANCE = 0.15
-CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS = 4.0
 CANOE_CONTACT_LENGTH_RATIO = 0.86
 CANOE_RELEASE_LENGTH_RATIO = 0.92
 CANOE_MIN_LENGTH_CHANGE_RATIO = 0.06
@@ -2169,11 +2168,7 @@ def _detect_canoe_paddle_events(
             continue
         detected.extend(
             _canoe_phase_events(
-                physical_id,
-                observations,
-                travel_direction,
-                confidence,
-                catch_tolerance_pixels=_overlay_reference_line_width(width, height),
+                physical_id, observations, travel_direction, confidence
             )
         )
     deduplicated = _dedupe_paddle_events(detected, width, height)
@@ -2251,8 +2246,6 @@ def _canoe_phase_events(
     observations: list[_TimedPaddleObservation],
     travel_direction: str,
     direction_confidence: float,
-    *,
-    catch_tolerance_pixels: float = CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS,
 ) -> list[PaddleEvent]:
     """Detect one catch and exit per small-to-large-to-small canoe phase.
 
@@ -2279,10 +2272,7 @@ def _canoe_phase_events(
         phase_samples = samples[start_index : end_index + 1]
         rising_samples = phase_samples[: peak_index - start_index + 1]
         catch = (
-            _canoe_phase_catch(
-                rising_samples,
-                tolerance_pixels=catch_tolerance_pixels,
-            )
+            _canoe_phase_catch(rising_samples)
             if peak_index > start_index
             else None
         )
@@ -2518,17 +2508,13 @@ def _canoe_line_crosses_waterline(
     line: Line,
     reference_line: Line,
     blade: int,
-    *,
-    tolerance_pixels: float = 0.0,
 ) -> bool:
     depths = _endpoint_signed_depths(line, reference_line)
-    return depths[blade] >= -tolerance_pixels and depths[1 - blade] <= tolerance_pixels
+    return depths[blade] >= 0 and depths[1 - blade] <= 0
 
 
 def _canoe_phase_catch(
     rising_samples: list[_CanoePhaseSample],
-    *,
-    tolerance_pixels: float = CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS,
 ) -> tuple[_CanoePhaseSample, Line] | None:
     restored = _canoe_phase_catch_restored_lines(rising_samples)
     if len(restored) < 2:
@@ -2540,20 +2526,27 @@ def _canoe_phase_catch(
             previous_line,
             previous_sample.timed.observation.reference_line,
             previous_sample.blade,
-            tolerance_pixels=tolerance_pixels,
         )
         current_crosses = _canoe_line_crosses_waterline(
             current_line,
             current_sample.timed.observation.reference_line,
             current_sample.blade,
-            tolerance_pixels=tolerance_pixels,
         )
         if previous_crosses == current_crosses:
             continue
         start = max(0, index - 1)
         end = min(len(restored), index + 3)
+        candidates = [
+            entry
+            for entry in restored[start:end]
+            if _canoe_line_crosses_waterline(
+                entry[1],
+                entry[0].timed.observation.reference_line,
+                entry[0].blade,
+            )
+        ]
         return min(
-            restored[start:end],
+            candidates or restored[start:end],
             key=lambda entry: _canoe_active_endpoint_waterline_distance(
                 entry[0], entry[1]
             ),
@@ -2578,7 +2571,7 @@ def _canoe_phase_catch_restored_lines(
         if current_length < 1:
             continue
         if current_length < inherited_length:
-            line = _canoe_restore_length_from_active_endpoint(
+            line = _canoe_restore_blade_length(
                 line, inherited_length, sample.blade
             )
         elif (
@@ -2586,36 +2579,11 @@ def _canoe_phase_catch_restored_lines(
         ) / inherited_length <= CANOE_CATCH_LENGTH_RESTORE_TOLERANCE:
             inherited_length = current_length
         else:
-            line = _canoe_restore_length_from_active_endpoint(
+            line = _canoe_restore_blade_length(
                 line, inherited_length, sample.blade
             )
         restored.append((sample, line))
     return restored
-
-
-def _canoe_restore_length_from_active_endpoint(
-    line: Line, target_length: float, blade: int
-) -> Line:
-    active = (line[0], line[1]) if blade == 0 else (line[2], line[3])
-    dry = (line[2], line[3]) if blade == 0 else (line[0], line[1])
-    direction = _normalize((dry[0] - active[0], dry[1] - active[1]))
-    if direction is None:
-        return line
-    restored_dry = (
-        active[0] + direction[0] * target_length,
-        active[1] + direction[1] * target_length,
-    )
-    return (
-        active[0],
-        active[1],
-        restored_dry[0],
-        restored_dry[1],
-    ) if blade == 0 else (
-        restored_dry[0],
-        restored_dry[1],
-        active[0],
-        active[1],
-    )
 
 
 def _canoe_active_endpoint_waterline_distance(
