@@ -5894,33 +5894,55 @@ def _draw_body_metric_row_with_pillow(
     if font_path is None:
         return False
 
-    font_size = (
+    value_font_size = (
         int(angle_label_font_size)
         if angle_label_font_size is not None
         else max(14, round(width / 58))
     )
+    label_font_size = max(12, round(value_font_size * 0.72))
     measuring_surface = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     draw = ImageDraw.Draw(measuring_surface)
-    texts = [f"{label} {value}" for label, value, _color in entries]
-    gap = max(10, round(font_size * 0.7))
-    padding_x = max(8, round(font_size * 0.55)) if draw_background else 0
-    padding_y = max(4, round(font_size * 0.3)) if draw_background else 0
+    gap = max(10, round(value_font_size * 0.7))
+    label_value_gap = max(4, round(value_font_size * 0.25))
+    padding_x = max(8, round(value_font_size * 0.55)) if draw_background else 0
+    padding_y = max(4, round(value_font_size * 0.3)) if draw_background else 0
     while True:
         try:
-            font = ImageFont.truetype(str(font_path), font_size)
+            value_font = ImageFont.truetype(str(font_path), value_font_size)
+            label_font = ImageFont.truetype(str(font_path), label_font_size)
         except OSError:
             return False
-        boxes = [draw.textbbox((0, 0), text, font=font) for text in texts]
-        item_widths = [box[2] - box[0] + padding_x * 2 for box in boxes]
+        label_boxes = [
+            draw.textbbox((0, 0), label, font=label_font)
+            for label, _value, _color in entries
+        ]
+        value_boxes = [
+            draw.textbbox((0, 0), value, font=value_font)
+            for _label, value, _color in entries
+        ]
+        item_widths = [
+            label_box[2]
+            - label_box[0]
+            + label_value_gap
+            + value_box[2]
+            - value_box[0]
+            + padding_x * 2
+            for label_box, value_box in zip(label_boxes, value_boxes)
+        ]
         total_width = sum(item_widths) + gap * max(0, len(entries) - 1)
-        if total_width <= width * 0.94 or font_size <= 10:
+        if total_width <= width * 0.94 or value_font_size <= 10:
             break
-        font_size -= 1
-        gap = max(6, round(font_size * 0.7))
-        padding_x = max(6, round(font_size * 0.55)) if draw_background else 0
-        padding_y = max(3, round(font_size * 0.3)) if draw_background else 0
+        value_font_size -= 1
+        label_font_size = max(10, round(value_font_size * 0.72))
+        gap = max(6, round(value_font_size * 0.7))
+        label_value_gap = max(3, round(value_font_size * 0.25))
+        padding_x = max(6, round(value_font_size * 0.55)) if draw_background else 0
+        padding_y = max(3, round(value_font_size * 0.3)) if draw_background else 0
 
-    text_height = max(box[3] - box[1] for box in boxes)
+    text_height = max(
+        max(label_box[3] - label_box[1], value_box[3] - value_box[1])
+        for label_box, value_box in zip(label_boxes, value_boxes)
+    )
     row_height = text_height + padding_y * 2
     top = _event_metric_table_top(height, row_height, signed_offset_percent)
     row_width = round(total_width)
@@ -5928,9 +5950,10 @@ def _draw_body_metric_row_with_pillow(
     overlay = Image.new("RGBA", (row_width, row_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     left = 0
-    corner_radius = max(3, round(font_size * 0.25))
-    for text, box, item_width, (_label, _value, color) in zip(
-        texts, boxes, item_widths, entries
+    corner_radius = max(3, round(value_font_size * 0.25))
+    stroke_width = max(1, round(value_font_size * 0.05))
+    for label_box, value_box, item_width, (label, value, color) in zip(
+        label_boxes, value_boxes, item_widths, entries
     ):
         if draw_background:
             draw.rounded_rectangle(
@@ -5938,9 +5961,39 @@ def _draw_body_metric_row_with_pillow(
                 radius=corner_radius,
                 fill=(2, 5, 9, 205),
             )
-        text_left = left + (item_width - (box[2] - box[0])) / 2 - box[0]
-        text_top = (row_height - (box[3] - box[1])) / 2 - box[1]
-        draw.text((text_left, text_top), text, font=font, fill=color)
+        content_width = (
+            label_box[2]
+            - label_box[0]
+            + label_value_gap
+            + value_box[2]
+            - value_box[0]
+        )
+        label_left = left + (item_width - content_width) / 2 - label_box[0]
+        label_top = (row_height - (label_box[3] - label_box[1])) / 2 - label_box[1]
+        value_left = (
+            label_left
+            + label_box[2]
+            - label_box[0]
+            + label_value_gap
+            - value_box[0]
+        )
+        value_top = (row_height - (value_box[3] - value_box[1])) / 2 - value_box[1]
+        draw.text(
+            (label_left, label_top),
+            label,
+            font=label_font,
+            fill=color,
+            stroke_width=stroke_width,
+            stroke_fill=(2, 5, 9, 255),
+        )
+        draw.text(
+            (value_left, value_top),
+            value,
+            font=value_font,
+            fill=color,
+            stroke_width=stroke_width,
+            stroke_fill=(2, 5, 9, 255),
+        )
         left += item_width + gap
     _blend_overlay_region(
         image,
@@ -6137,7 +6190,7 @@ def _draw_body_motion_overlay(
             for label, value, _color in metric_entries
         ],
         metric_offset_percent,
-        angle_label_font_size=None,
+        angle_label_font_size=angle_label_font_size,
         draw_background=discipline != "canoe",
     )
 

@@ -13,7 +13,11 @@ from sam3_service.body_motion import (
     load_body_motion_frames_by_index,
     smooth_body_motion_records,
 )
-from sam3_service.exporter import PADDLE_ANGLE_TEXT_COLOR, _draw_body_motion_overlay
+from sam3_service.exporter import (
+    PADDLE_ANGLE_TEXT_COLOR,
+    _draw_body_metric_row,
+    _draw_body_motion_overlay,
+)
 from sam3_service.schemas import JobSettings
 
 
@@ -219,6 +223,53 @@ class BodyMotionTest(unittest.TestCase):
         )
 
         self.assertEqual(draw_row.call_args.args[4], -12.5)
+
+    @patch("sam3_service.exporter._draw_body_metric_row")
+    def test_export_passes_angle_font_size_to_body_metrics(
+        self, draw_row: Mock
+    ) -> None:
+        record = build_body_motion_record(_frame(), (0.1, 0.7, 0.9, 0.7))
+        image = bytearray([0, 0, 0, 255] * 200 * 120)
+
+        _draw_body_motion_overlay(
+            image,
+            200,
+            120,
+            record,
+            discipline="canoe",
+            angle_label_font_size=32,
+        )
+
+        self.assertEqual(draw_row.call_args.kwargs["angle_label_font_size"], 32)
+
+    def test_body_metric_row_uses_angle_title_and_value_font_sizes(self) -> None:
+        try:
+            from PIL import ImageFont
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        image = bytearray([0, 0, 0, 255] * 400 * 120)
+        default_font = ImageFont.load_default()
+        requested_sizes: list[int] = []
+
+        def fake_truetype(_path: str, size: int):
+            requested_sizes.append(size)
+            return default_font
+
+        with (
+            patch("sam3_service.exporter._find_export_font", return_value=Path("font.ttf")),
+            patch("PIL.ImageFont.truetype", side_effect=fake_truetype),
+        ):
+            _draw_body_metric_row(
+                image,
+                400,
+                120,
+                [("左肘", "80°", PADDLE_ANGLE_TEXT_COLOR)],
+                10.0,
+                angle_label_font_size=32,
+                draw_background=False,
+            )
+
+        self.assertEqual(requested_sizes[:2], [32, 23])
 
 
 if __name__ == "__main__":
