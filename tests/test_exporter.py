@@ -447,7 +447,7 @@ class ExporterTest(unittest.TestCase):
 
         self.assertEqual(
             [(event.kind, event.timestamp_ms) for event in events],
-            [("catch", 50), ("exit", 300)],
+            [("catch", 100), ("exit", 300)],
         )
         self.assertTrue(all(event.discipline == "canoe" for event in events))
 
@@ -514,6 +514,108 @@ class ExporterTest(unittest.TestCase):
         sample, restored_line = catch
         self.assertEqual(sample.timed.timestamp_ms, 100)
         self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
+
+    def test_canoe_phase_catch_uses_overlay_line_tolerance(self) -> None:
+        def observation(timestamp_ms: int, active_y: float):
+            line = (50.0, 0.0, 90.0, active_y)
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        samples = _canoe_phase_samples(
+            [
+                observation(0, 40.0),
+                observation(100, 47.0),
+            ],
+            "right",
+            60.0,
+        )
+
+        catch = _canoe_phase_catch(samples, tolerance_pixels=4.0)
+
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        sample, _restored_line = catch
+        self.assertEqual(sample.timed.timestamp_ms, 100)
+
+    def test_canoe_phase_catch_selects_closest_neighbor_after_tolerance_crossing(self) -> None:
+        def observation(timestamp_ms: int, active_y: float):
+            line = (50.0, 0.0, 90.0, active_y)
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        samples = _canoe_phase_samples(
+            [
+                observation(0, 35.0),
+                observation(100, 45.0),
+                observation(200, 47.0),
+                observation(300, 49.5),
+            ],
+            "right",
+            70.0,
+        )
+
+        catch = _canoe_phase_catch(samples, tolerance_pixels=4.0)
+
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        sample, _restored_line = catch
+        self.assertEqual(sample.timed.timestamp_ms, 300)
+
+    def test_canoe_trailing_rising_phase_emits_catch_without_exit(self) -> None:
+        def observation(timestamp_ms: int, angle: float):
+            radians = math.radians(angle)
+            dry = (50.0, 0.0)
+            active = (
+                dry[0] + 100 * math.cos(radians),
+                dry[1] + 100 * math.sin(radians),
+            )
+            line = (dry[0], dry[1], active[0], active[1])
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        events = _canoe_phase_events(
+            "paddle:physical:1",
+            [
+                observation(0, 20),
+                observation(100, 35),
+                observation(200, 55),
+                observation(300, 65),
+            ],
+            "right",
+            0.9,
+        )
+
+        self.assertEqual(
+            [(event.kind, event.timestamp_ms) for event in events],
+            [("catch", 100)],
+        )
 
     def test_canoe_initial_restore_peak_exit_requires_active_endpoint_near_waterline(self) -> None:
         def observation(timestamp_ms: int, angle: float, waterline_y: float = 50.0):

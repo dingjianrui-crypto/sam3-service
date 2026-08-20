@@ -61,6 +61,7 @@ CANOE_DIRECTION_MIN_AXIS_SPAN_DEGREES = 8.0
 CANOE_PHASE_MIN_TREND_DEGREES = 3.0
 CANOE_PHASE_EXIT_CONFIRM_SAMPLES = 2
 CANOE_CATCH_LENGTH_RESTORE_TOLERANCE = 0.15
+CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS = 4.0
 CANOE_CONTACT_LENGTH_RATIO = 0.86
 CANOE_RELEASE_LENGTH_RATIO = 0.92
 CANOE_MIN_LENGTH_CHANGE_RATIO = 0.06
@@ -1271,6 +1272,10 @@ def _scale_record(record: dict[str, Any], scale_x: float, scale_y: float) -> dic
     return scaled
 
 
+def _overlay_reference_line_width(width: int, height: int) -> int:
+    return max(3, round(min(width, height) * 0.006))
+
+
 def _draw_frame_overlay(
     image: bytearray,
     width: int,
@@ -1298,7 +1303,14 @@ def _draw_frame_overlay(
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
         centerlines.append(Centerline(record=record, line=line, color=color))
-        _draw_line(image, width, height, line, color, max(3, round(min(width, height) * 0.006)))
+        _draw_line(
+            image,
+            width,
+            height,
+            line,
+            color,
+            _overlay_reference_line_width(width, height),
+        )
 
     labels = _degree_labels(centerlines, export_options)
     displayed_labels = _degree_slots(labels, export_options)
@@ -1355,7 +1367,7 @@ def _draw_event_companion_angles(
     slots = _event_frame_degree_slots(centerlines, options, events)
     if not any(slot.degree is not None for slot in slots):
         return
-    line_width = max(3, round(min(width, height) * 0.006))
+    line_width = _overlay_reference_line_width(width, height)
     for entry in _degree_label_entries(slots):
         if entry.label.degree is None or entry.label.line is None:
             continue
@@ -2157,7 +2169,11 @@ def _detect_canoe_paddle_events(
             continue
         detected.extend(
             _canoe_phase_events(
-                physical_id, observations, travel_direction, confidence
+                physical_id,
+                observations,
+                travel_direction,
+                confidence,
+                catch_tolerance_pixels=_overlay_reference_line_width(width, height),
             )
         )
     deduplicated = _dedupe_paddle_events(detected, width, height)
@@ -2235,6 +2251,8 @@ def _canoe_phase_events(
     observations: list[_TimedPaddleObservation],
     travel_direction: str,
     direction_confidence: float,
+    *,
+    catch_tolerance_pixels: float = CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS,
 ) -> list[PaddleEvent]:
     """Detect one catch and exit per small-to-large-to-small canoe phase.
 
@@ -2260,7 +2278,14 @@ def _canoe_phase_events(
         end_index = samples.index(phase.end)
         phase_samples = samples[start_index : end_index + 1]
         rising_samples = phase_samples[: peak_index - start_index + 1]
-        catch = _canoe_phase_catch(rising_samples) if peak_index > start_index else None
+        catch = (
+            _canoe_phase_catch(
+                rising_samples,
+                tolerance_pixels=catch_tolerance_pixels,
+            )
+            if peak_index > start_index
+            else None
+        )
         if catch is not None:
             catch_sample, catch_line = catch
             events.append(
@@ -2425,6 +2450,16 @@ def _canoe_phase_segments(samples: list[_CanoePhaseSample]) -> list[_CanoePhase]
                 samples[start_index], samples[peak_index], samples[trough_index], False
             )
         )
+    elif (
+        state == "rising"
+        and peak_index > start_index
+        and len(samples) - start_index >= CANOE_PHASE_EXIT_CONFIRM_SAMPLES + 1
+    ):
+        phases.append(
+            _CanoePhase(
+                samples[start_index], samples[peak_index], samples[-1], False
+            )
+        )
     return phases
 
 
@@ -2480,35 +2515,45 @@ def _canoe_restore_blade_length(line: Line, full_length: float, blade: int) -> L
 
 
 def _canoe_line_crosses_waterline(
-    line: Line, reference_line: Line, blade: int
+    line: Line,
+    reference_line: Line,
+    blade: int,
+    *,
+    tolerance_pixels: float = 0.0,
 ) -> bool:
     depths = _endpoint_signed_depths(line, reference_line)
-    return depths[blade] >= 0 and depths[1 - blade] <= 0
+    return depths[blade] >= -tolerance_pixels and depths[1 - blade] <= tolerance_pixels
 
 
 def _canoe_phase_catch(
     rising_samples: list[_CanoePhaseSample],
+    *,
+    tolerance_pixels: float = CANOE_CATCH_REFERENCE_LINE_TOLERANCE_PIXELS,
 ) -> tuple[_CanoePhaseSample, Line] | None:
     restored = _canoe_phase_catch_restored_lines(rising_samples)
     if len(restored) < 2:
         return None
-    for previous, current in zip(restored, restored[1:]):
+    for index, (previous, current) in enumerate(zip(restored, restored[1:])):
         previous_sample, previous_line = previous
         current_sample, current_line = current
         previous_crosses = _canoe_line_crosses_waterline(
             previous_line,
             previous_sample.timed.observation.reference_line,
             previous_sample.blade,
+            tolerance_pixels=tolerance_pixels,
         )
         current_crosses = _canoe_line_crosses_waterline(
             current_line,
             current_sample.timed.observation.reference_line,
             current_sample.blade,
+            tolerance_pixels=tolerance_pixels,
         )
         if previous_crosses == current_crosses:
             continue
+        start = max(0, index - 1)
+        end = min(len(restored), index + 3)
         return min(
-            (previous, current),
+            restored[start:end],
             key=lambda entry: _canoe_active_endpoint_waterline_distance(
                 entry[0], entry[1]
             ),
