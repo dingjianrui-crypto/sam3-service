@@ -392,10 +392,11 @@ length distinguish them.
 Detect catch independently inside each broken-down phase. During the rising
 portion from phase start to peak, seed paddle length from the phase-start
 minimum-angle observation. Until the phase angle exceeds `90°`, a later shorter
-detection inherits the previous phase length only when the required stretch is
-within `15%`; larger losses are ignored for catch selection. Restoration anchors
-the active endpoint and stretches the dry endpoint backward along the detected
-centerline. Catch candidates are the before/after frames around a restored
+detection inherits the previous phase length. A longer detection updates the
+inherited length only when the growth is within `15%`; larger jumps inherit the
+previous length as well. Restoration anchors the active endpoint and stretches
+the dry endpoint backward along the detected centerline. Catch candidates are
+the before/after frames around a restored
 centerline-waterline crossing, and the selected catch is the candidate whose
 active endpoint is closest to the local event-frame waterline.
 

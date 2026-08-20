@@ -481,6 +481,38 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(sample.timed.timestamp_ms, 100)
         self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
 
+    def test_canoe_phase_catch_keeps_large_shortened_crossing_frame(self) -> None:
+        def observation(timestamp_ms: int, line: tuple[float, float, float, float]):
+            return _TimedPaddleObservation(
+                timestamp_ms,
+                "paddle:physical:1",
+                _PaddleObservation(
+                    source_ids=("paddle:1",),
+                    reference_id="boat:1",
+                    line=line,
+                    raw_line=line,
+                    reference_line=(0.0, 50.0, 100.0, 50.0),
+                ),
+            )
+
+        samples = _canoe_phase_samples(
+            [
+                observation(0, (50.0, 40.0, 100.0, 41.0)),
+                observation(100, (50.0, 49.0, 95.0, 50.0)),
+                observation(200, (50.0, 60.0, 75.0, 60.5)),
+            ],
+            "right",
+            50.0,
+        )
+
+        catch = _canoe_phase_catch(samples)
+
+        self.assertIsNotNone(catch)
+        assert catch is not None
+        sample, restored_line = catch
+        self.assertEqual(sample.timed.timestamp_ms, 100)
+        self.assertAlmostEqual(_line_length(restored_line), _line_length(samples[0].line))
+
     def test_canoe_initial_restore_peak_exit_requires_active_endpoint_near_waterline(self) -> None:
         def observation(timestamp_ms: int, angle: float, waterline_y: float = 50.0):
             radians = math.radians(angle)

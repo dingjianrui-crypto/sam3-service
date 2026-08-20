@@ -2391,16 +2391,18 @@ def _canoe_phase_catch_restored_lines(
         current_length = _line_length(line)
         if current_length < 1:
             continue
-        if current_length >= inherited_length:
-            inherited_length = current_length
-        elif (
-            inherited_length - current_length
-        ) / inherited_length <= CANOE_CATCH_LENGTH_RESTORE_TOLERANCE:
+        if current_length < inherited_length:
             line = _canoe_restore_length_from_active_endpoint(
                 line, inherited_length, sample.blade
             )
+        elif (
+            current_length - inherited_length
+        ) / inherited_length <= CANOE_CATCH_LENGTH_RESTORE_TOLERANCE:
+            inherited_length = current_length
         else:
-            continue
+            line = _canoe_restore_length_from_active_endpoint(
+                line, inherited_length, sample.blade
+            )
         restored.append((sample, line))
     return restored
 
