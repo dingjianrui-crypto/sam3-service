@@ -582,6 +582,13 @@ def run() -> None:
     body_motion_analyzer = create_body_motion_analyzer(
         settings.body_motion_analyzer,
         settings.pose_model_path,
+        sapiens2_checkpoint_path=settings.sapiens2_checkpoint_path,
+        sapiens2_detector_path=settings.sapiens2_detector_path,
+        sapiens2_config_path=settings.sapiens2_config_path,
+        sapiens2_device=settings.sapiens2_device,
+        sapiens2_keypoint_threshold=settings.sapiens2_keypoint_threshold,
+        sapiens2_bbox_threshold=settings.sapiens2_bbox_threshold,
+        sapiens2_nms_threshold=settings.sapiens2_nms_threshold,
     )
     worker = Worker(settings, database, storage, segmenter, body_motion_analyzer)
     logger.info("worker %s started with %s", worker.worker_id, segmenter.model_name)

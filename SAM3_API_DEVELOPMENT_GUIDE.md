@@ -906,7 +906,10 @@ Common status codes:
 - Results are chunked by time; default chunk duration is controlled by `SAM3_RESULT_CHUNK_SECONDS`.
 - Upload chunk size is controlled by `SAM3_UPLOAD_CHUNK_BYTES`.
 - The real worker uses `SAM3_SEGMENTER=sam3`; local development can use `SAM3_SEGMENTER=mock`.
-- Body motion uses `SAM3_BODY_MOTION_ANALYZER=mediapipe` and requires `SAM3_POSE_MODEL_PATH`; tests can use `SAM3_BODY_MOTION_ANALYZER=mock`.
+- Body motion uses the worker-level `SAM3_BODY_MOTION_ANALYZER` setting. `mediapipe` requires
+  `SAM3_POSE_MODEL_PATH`; `sapiens2` requires local Sapiens2 1B and DETR assets configured with
+  `SAM3_SAPIENS2_CHECKPOINT_PATH` and `SAM3_SAPIENS2_DETECTOR_PATH`; tests can use `mock`. All
+  analyzers emit the same canonical body-motion result contract.
 - The job setting and export query are both opt-in and default to `false`. Existing request bodies, result chunks, jobs, and clients remain valid.
 - `SAM3_CENTERLINE_THICKNESS_PIXELS` controls the thickness of generated centerline masks, not the `centerline_line_xyxy` endpoints.
 - Always treat `centerline_*` fields as optional. Some masks may be too small or too ambiguous to fit a line.

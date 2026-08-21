@@ -143,6 +143,36 @@ MediaPipe runs in video mode with one pose. Body motion is opt-in per job and de
 
 MediaPipe declares `opencv-contrib-python` while the SAM extra declares `opencv-python-headless`; the lockfile pins both to 4.11.0.86. After installing both extras on the target Linux host, verify `uv run python -c "import cv2; print(cv2.__version__)"` prints `4.11.0`. Do not partially upgrade either OpenCV distribution. Also run one real body-motion job on the deployment host before enabling the checkbox for users.
 
+#### Sapiens2 1B alternative
+
+For personal testing, body motion can instead use the Sapiens2 1B 308-keypoint pose model. The
+adapter retains only shoulders, elbows, wrists, hips, knees, and ankles and converts them to the same
+provider-neutral body-motion records used by MediaPipe. The model and DETR person detector must be
+downloaded separately; the service never downloads them at runtime. See
+[SAPIENS2_BODY_MOTION_DESIGN.md](SAPIENS2_BODY_MOTION_DESIGN.md) for the complete design and
+limitations.
+
+Install the pinned Sapiens2 runtime alongside SAM:
+
+```bash
+UV_CACHE_DIR=/tmp/sam3-uv-cache uv sync --extra sam3 --extra sapiens2
+```
+
+Configure the worker with local assets:
+
+```bash
+SAM3_BODY_MOTION_ANALYZER=sapiens2 \
+SAM3_SAPIENS2_CHECKPOINT_PATH=/opt/models/sapiens2_1b_pose.safetensors \
+SAM3_SAPIENS2_DETECTOR_PATH=/opt/models/detr-resnet-101-dc5 \
+SAM3_SAPIENS2_DEVICE=cuda:0 \
+uv run sam3-worker
+```
+
+Sapiens2 is loaded lazily on the first job that requests body motion and remains resident in the
+worker. Its 1B model is much heavier than MediaPipe, so validate peak GPU memory and throughput with
+the configured SAM model on the target host. Sapiens2 declares `opencv-python`; verify the final
+`cv2` installation when combining it with the SAM extra's headless OpenCV package.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -153,8 +183,15 @@ MediaPipe declares `opencv-contrib-python` while the SAM extra declares `opencv-
 | `SAM3_SEGMENTER` | `mock` | `mock` or `sam3` |
 | `SAM3_CHECKPOINT_PATH` | unset | Local SAM 3.1 checkpoint; skips automatic download |
 | `SAM3_OFFLINE` | `0` | Require local checkpoint and disable Hugging Face network access |
-| `SAM3_BODY_MOTION_ANALYZER` | `mediapipe` | `mediapipe` for production or `mock` for local/test pose output |
+| `SAM3_BODY_MOTION_ANALYZER` | `mediapipe` | `mediapipe`, `sapiens2`, or `mock` |
 | `SAM3_POSE_MODEL_PATH` | unset | MediaPipe Pose Landmarker `.task` model used when a job enables Body motion |
+| `SAM3_SAPIENS2_CHECKPOINT_PATH` | unset | Local Sapiens2 1B pose `.safetensors` checkpoint |
+| `SAM3_SAPIENS2_DETECTOR_PATH` | unset | Local Hugging Face DETR ResNet-101 DC5 model directory |
+| `SAM3_SAPIENS2_CONFIG_PATH` | bundled | Optional Sapiens2 1B 308-keypoint config override |
+| `SAM3_SAPIENS2_DEVICE` | `cuda:0` | Torch device used by Sapiens2 pose and person detection |
+| `SAM3_SAPIENS2_KEYPOINT_THRESHOLD` | `0.5` | Minimum retained body-joint score |
+| `SAM3_SAPIENS2_BBOX_THRESHOLD` | `0.3` | DETR person detection threshold |
+| `SAM3_SAPIENS2_NMS_THRESHOLD` | `0.3` | Person-box non-maximum suppression IoU threshold |
 | `SAM3_OFFLOAD_VIDEO_TO_CPU` | `1` | Keep decoded video frames in CPU memory to reduce GPU use |
 | `SAM3_MAX_TRACKED_OBJECTS` | `16` | Cap tracked instances to reduce inference memory |
 | `SAM3_GROUNDING_BATCH_SIZE` | `1` | Frames processed together during grounding; higher values need more VRAM |

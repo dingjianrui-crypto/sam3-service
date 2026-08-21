@@ -280,9 +280,9 @@ Cancellation is cooperative:
 
 Cancellation latency depends on where the upstream predictor yields control and must be measured.
 
-### 7.5 MediaPipe Pose Landmarker
+### 7.5 Body-motion analyzers
 
-Body motion is an optional worker pass selected by `settings.body_motion`; it is presented separately from SAM segmentation settings in the upload UI. `settings.paddling_discipline` accepts `kayak` or `canoe` and defaults to `kayak`. The value is carried into both successful and failed body-motion manifest entries so later metric derivation can select a discipline-specific profile. This iteration records the Canoe choice but does not yet derive additional canoe-only measurements. The implementation uses MediaPipe Pose Landmarker in VIDEO mode with `num_poses=1` and an explicit CPU delegate, so the feature intentionally follows one primary paddler without competing with SAM for GPU memory. The model asset is deployed separately and configured through `SAM3_POSE_MODEL_PATH`; the optional Python runtime is installed with the `pose` dependency extra.
+Body motion is an optional worker pass selected by `settings.body_motion`; it is presented separately from SAM segmentation settings in the upload UI. `settings.paddling_discipline` accepts `kayak` or `canoe` and defaults to `kayak`. The value is carried into both successful and failed body-motion manifest entries so later metric derivation can select a discipline-specific profile. The worker-level `SAM3_BODY_MOTION_ANALYZER` selects MediaPipe, Sapiens2, or the deterministic mock. MediaPipe uses Pose Landmarker in VIDEO mode with `num_poses=1` and an explicit CPU delegate. Sapiens2 uses the 1B 308-keypoint top-down model plus a local DETR person detector on the configured Torch device, retains only the canonical body joints, and keeps its lazily loaded models resident. Both real implementations follow one primary paddler and emit the same provider-neutral records. The detailed Sapiens2 design is in `SAPIENS2_BODY_MOTION_DESIGN.md`.
 
 The pass emits exact normalized-video `frame_index` and `timestamp_ms` values. It retains left/right wrists, elbows, shoulders, hips, knees, and ankles. Ankles are internal inputs for knee angles and are not rendered. Derived measurements are:
 

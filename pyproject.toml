@@ -29,6 +29,9 @@ sam3 = [
 pose = [
   "mediapipe>=0.10,<1",
 ]
+sapiens2 = [
+  "sapiens @ git+https://github.com/facebookresearch/sapiens2.git@7e5bae88456ac418ff0e58e74106c9fe192055d4",
+]
 
 [project.scripts]
 sam3-api = "sam3_service.main:run"

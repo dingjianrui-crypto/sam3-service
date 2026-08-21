@@ -4,15 +4,22 @@ import json
 import math
 import tempfile
 import unittest
+from os import environ
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from sam3_service.body_motion import (
     BodyMotionFrame,
+    Sapiens2BodyMotionAnalyzer,
+    _select_primary_bbox,
+    _sapiens2_selected_landmarks,
     build_body_motion_record,
+    create_body_motion_analyzer,
     load_body_motion_frames_by_index,
     smooth_body_motion_records,
 )
+from sam3_service.config import Settings
+from sam3_service.errors import ServiceError
 from sam3_service.exporter import (
     PADDLE_ANGLE_TEXT_COLOR,
     _draw_body_metric_row,
@@ -98,6 +105,86 @@ class BodyMotionTest(unittest.TestCase):
 
         self.assertEqual(records[1]["metrics"]["lean_deg"], 3.5)
         self.assertEqual(records[2]["metrics"]["lean_deg"], 20.0)
+
+    def test_sapiens2_maps_named_body_joints_and_discards_low_scores(self) -> None:
+        names = {
+            "left_shoulder": 5,
+            "right_shoulder": 6,
+            "left_elbow": 7,
+            "right_elbow": 8,
+            "left_hip": 9,
+            "right_hip": 10,
+            "left_knee": 11,
+            "right_knee": 12,
+            "left_ankle": 13,
+            "right_ankle": 14,
+            "right_wrist": 41,
+            "left_wrist": 62,
+        }
+        keypoints = [[float(index), float(index * 2)] for index in range(308)]
+        scores = [0.9] * 308
+        scores[41] = 0.49
+
+        landmarks = _sapiens2_selected_landmarks(
+            keypoints, scores, names, width=100, height=200, threshold=0.5
+        )
+
+        self.assertEqual(set(landmarks), set(names) - {"right_wrist"})
+        self.assertEqual(landmarks["left_wrist"]["x"], 0.62)
+        self.assertEqual(landmarks["left_wrist"]["y"], 0.62)
+        self.assertEqual(landmarks["left_wrist"]["z"], 0.0)
+        self.assertEqual(landmarks["left_wrist"]["visibility"], 0.9)
+
+    def test_sapiens2_primary_bbox_prefers_area_then_previous_overlap(self) -> None:
+        boxes = [[5, 5, 25, 25], [40, 20, 90, 90]]
+        first = _select_primary_bbox(boxes, None, (100, 100))
+        continued = _select_primary_bbox(boxes, [0, 0, 30, 30], (100, 100))
+
+        self.assertEqual(first, boxes[1])
+        self.assertEqual(continued, boxes[0])
+        self.assertIsNone(_select_primary_bbox([], None, (100, 100)))
+
+    def test_sapiens2_analyzer_requires_local_assets(self) -> None:
+        analyzer = Sapiens2BodyMotionAnalyzer(None, None)
+
+        with self.assertRaises(ServiceError) as raised:
+            list(analyzer.analyze(Path("missing.mp4"), {}, Mock(), lambda: False))
+
+        self.assertEqual(raised.exception.code, "POSE_MODEL_UNAVAILABLE")
+
+    def test_factory_selects_sapiens2_without_loading_the_model(self) -> None:
+        analyzer = create_body_motion_analyzer(
+            "sapiens2",
+            None,
+            sapiens2_checkpoint_path=Path("pose.safetensors"),
+            sapiens2_detector_path=Path("detector"),
+        )
+
+        self.assertIsInstance(analyzer, Sapiens2BodyMotionAnalyzer)
+        self.assertEqual(analyzer.model_name, "sapiens2-pose-1b:pose.safetensors")
+
+    def test_sapiens2_settings_are_read_from_environment(self) -> None:
+        values = {
+            "SAM3_SAPIENS2_CHECKPOINT_PATH": "models/pose.safetensors",
+            "SAM3_SAPIENS2_DETECTOR_PATH": "models/detector",
+            "SAM3_SAPIENS2_CONFIG_PATH": "models/config.py",
+            "SAM3_SAPIENS2_DEVICE": "cuda:1",
+            "SAM3_SAPIENS2_KEYPOINT_THRESHOLD": "0.6",
+            "SAM3_SAPIENS2_BBOX_THRESHOLD": "0.4",
+            "SAM3_SAPIENS2_NMS_THRESHOLD": "0.2",
+        }
+        with patch.dict(environ, values, clear=False):
+            settings = Settings.from_env()
+
+        self.assertEqual(
+            settings.sapiens2_checkpoint_path, Path("models/pose.safetensors").resolve()
+        )
+        self.assertEqual(settings.sapiens2_detector_path, Path("models/detector").resolve())
+        self.assertEqual(settings.sapiens2_config_path, Path("models/config.py").resolve())
+        self.assertEqual(settings.sapiens2_device, "cuda:1")
+        self.assertEqual(settings.sapiens2_keypoint_threshold, 0.6)
+        self.assertEqual(settings.sapiens2_bbox_threshold, 0.4)
+        self.assertEqual(settings.sapiens2_nms_threshold, 0.2)
 
     def test_body_chunks_load_by_exact_source_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

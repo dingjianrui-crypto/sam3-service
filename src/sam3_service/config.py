@@ -26,6 +26,13 @@ class Settings:
     cors_allow_origins: tuple[str, ...] = ()
     body_motion_analyzer: str = "mediapipe"
     pose_model_path: Path | None = None
+    sapiens2_checkpoint_path: Path | None = None
+    sapiens2_detector_path: Path | None = None
+    sapiens2_config_path: Path | None = None
+    sapiens2_device: str = "cuda:0"
+    sapiens2_keypoint_threshold: float = 0.5
+    sapiens2_bbox_threshold: float = 0.3
+    sapiens2_nms_threshold: float = 0.3
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,6 +82,21 @@ class Settings:
                 if os.getenv("SAM3_POSE_MODEL_PATH")
                 else None
             ),
+            sapiens2_checkpoint_path=_optional_path_env(
+                "SAM3_SAPIENS2_CHECKPOINT_PATH"
+            ),
+            sapiens2_detector_path=_optional_path_env("SAM3_SAPIENS2_DETECTOR_PATH"),
+            sapiens2_config_path=_optional_path_env("SAM3_SAPIENS2_CONFIG_PATH"),
+            sapiens2_device=os.getenv("SAM3_SAPIENS2_DEVICE", "cuda:0"),
+            sapiens2_keypoint_threshold=_unit_float_env(
+                "SAM3_SAPIENS2_KEYPOINT_THRESHOLD", 0.5
+            ),
+            sapiens2_bbox_threshold=_unit_float_env(
+                "SAM3_SAPIENS2_BBOX_THRESHOLD", 0.3
+            ),
+            sapiens2_nms_threshold=_unit_float_env(
+                "SAM3_SAPIENS2_NMS_THRESHOLD", 0.3
+            ),
         )
 
     def ensure_directories(self) -> None:
@@ -87,3 +109,12 @@ class Settings:
 def _csv_env(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _optional_path_env(name: str) -> Path | None:
+    value = os.getenv(name)
+    return Path(value).expanduser().resolve() if value else None
+
+
+def _unit_float_env(name: str, default: float) -> float:
+    return max(0.0, min(1.0, float(os.getenv(name, str(default)))))
