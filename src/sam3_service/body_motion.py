@@ -349,8 +349,8 @@ class Sapiens2BodyMotionAnalyzer:
             outputs, target_sizes=target_sizes, threshold=self.bbox_threshold
         )[0]
         person_mask = result["labels"] == 1
-        boxes = result["boxes"][person_mask].detach().cpu().numpy()
-        scores = result["scores"][person_mask].detach().cpu().numpy()
+        boxes = _tensor_to_float32_numpy(result["boxes"][person_mask])
+        scores = _tensor_to_float32_numpy(result["scores"][person_mask])
         return _nms_boxes(boxes, scores, self.nms_threshold)
 
     def _infer_pose(
@@ -374,7 +374,9 @@ class Sapiens2BodyMotionAnalyzer:
                 flipped = model(inputs.flip(-1)).flip(-1)
                 flipped = flipped[:, model.pose_metainfo["flip_indices"]]
                 prediction = (prediction + flipped) / 2.0
-        decoded, scores = model.codec.decode(prediction[0].detach().cpu().numpy())
+        # Sapiens2 may emit BF16 heatmaps on BF16-capable GPUs such as the A30.
+        # NumPy has no native bfloat16 dtype, so convert at the Torch boundary.
+        decoded, scores = model.codec.decode(_tensor_to_float32_numpy(prediction[0]))
         sample = data["data_samples"]
         input_size = sample["meta"]["input_size"]
         bbox_center = sample["meta"]["bbox_center"]
@@ -606,6 +608,10 @@ def _nms_boxes(boxes: Any, scores: Any, threshold: float) -> Any:
         kept.append(current)
         order = [index for index in order if _bbox_iou(boxes[current], boxes[index]) <= threshold]
     return boxes[kept]
+
+
+def _tensor_to_float32_numpy(tensor: Any) -> Any:
+    return tensor.detach().float().cpu().numpy()
 
 
 def _landmark_confidence(landmark: dict[str, float]) -> float:

@@ -13,6 +13,7 @@ from sam3_service.body_motion import (
     Sapiens2BodyMotionAnalyzer,
     _select_primary_bbox,
     _sapiens2_selected_landmarks,
+    _tensor_to_float32_numpy,
     build_body_motion_record,
     create_body_motion_analyzer,
     load_body_motion_frames_by_index,
@@ -143,6 +144,31 @@ class BodyMotionTest(unittest.TestCase):
         self.assertEqual(first, boxes[1])
         self.assertEqual(continued, boxes[0])
         self.assertIsNone(_select_primary_bbox([], None, (100, 100)))
+
+    def test_sapiens2_casts_bfloat16_like_tensors_before_numpy(self) -> None:
+        calls: list[str] = []
+
+        class TensorStub:
+            def detach(self):
+                calls.append("detach")
+                return self
+
+            def float(self):
+                calls.append("float")
+                return self
+
+            def cpu(self):
+                calls.append("cpu")
+                return self
+
+            def numpy(self):
+                calls.append("numpy")
+                return [[1.0]]
+
+        converted = _tensor_to_float32_numpy(TensorStub())
+
+        self.assertEqual(converted, [[1.0]])
+        self.assertEqual(calls, ["detach", "float", "cpu", "numpy"])
 
     def test_sapiens2_analyzer_requires_local_assets(self) -> None:
         analyzer = Sapiens2BodyMotionAnalyzer(None, None)
