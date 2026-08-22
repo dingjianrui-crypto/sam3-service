@@ -618,12 +618,19 @@ h2 {
 }
 
 .viewer {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   display: grid;
   gap: 18px;
 }
 
 .video-shell {
   position: relative;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -862,6 +869,10 @@ h2 {
 }
 
 .viewer-controls {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(300px, 0.85fr) minmax(520px, 1.6fr);
   align-items: start;
@@ -1081,7 +1092,12 @@ h2 {
   accent-color: #55d7f2;
 }
 
-@media (max-width: 1200px) {
+/*
+ * The outer layout can reserve up to 700px for its two side panels. Stack the
+ * controls until the remaining workspace can accommodate their 820px minimum
+ * width plus workspace padding without spilling into Recent Jobs.
+ */
+@media (max-width: 1600px) {
   .viewer-controls {
     grid-template-columns: 1fr;
   }
