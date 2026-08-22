@@ -47,6 +47,21 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 
 const OVERLAY_FONT_FAMILY =
   'Arial, Helvetica, system-ui, sans-serif';
+const BODY_JOINT_OPTIONS = [
+  ["left_wrist", "Left wrist"],
+  ["left_elbow", "Left elbow"],
+  ["left_shoulder", "Left shoulder"],
+  ["left_hip", "Left hip"],
+  ["left_knee", "Left knee"],
+  ["left_ankle", "Left ankle"],
+  ["right_wrist", "Right wrist"],
+  ["right_elbow", "Right elbow"],
+  ["right_shoulder", "Right shoulder"],
+  ["right_hip", "Right hip"],
+  ["right_knee", "Right knee"],
+  ["right_ankle", "Right ankle"]
+] as const;
+const ALL_BODY_JOINT_NAMES = BODY_JOINT_OPTIONS.map(([name]) => name);
 
 function defaultDegreeOffsetPercent(manifest: ResultManifest) {
   return manifest.video.height > manifest.video.width ? 16 : 5.5;
@@ -116,6 +131,9 @@ export function Player({ manifest }: Props) {
   const [bodyMotionEnabled, setBodyMotionEnabled] = useState(bodyMotionAvailable);
   const [exportBodyMotionEnabled, setExportBodyMotionEnabled] =
     useState(bodyMotionAvailable);
+  const [exportBodyJointNames, setExportBodyJointNames] = useState(
+    () => new Set<string>(ALL_BODY_JOINT_NAMES)
+  );
   const [bodyMotionDataVersion, setBodyMotionDataVersion] = useState(0);
   const [exportProgress, setExportProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
@@ -545,6 +563,7 @@ export function Player({ manifest }: Props) {
           event_hold_seconds: exportEventHoldSeconds,
           include_event_metrics: false,
           include_body_motion: exportBodyMotionEnabled,
+          body_joint_names: [...exportBodyJointNames],
           metric_count: exportMetricCount,
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
@@ -577,6 +596,7 @@ export function Player({ manifest }: Props) {
     exportEventFreezeEnabled,
     exportEventHoldSeconds,
     exportBodyMotionEnabled,
+    exportBodyJointNames,
     exportEventPaddleIndex,
     exportExitEnabled,
     exportMetricCount,
@@ -800,8 +820,47 @@ export function Player({ manifest }: Props) {
                 disabled={!bodyMotionAvailable}
                 onChange={(event) => setExportBodyMotionEnabled(event.target.checked)}
               />
-              Include body motion
+              Body motion
             </label>
+            {exportBodyMotionEnabled && (
+              <details className="body-joint-selector">
+                <summary>
+                  Body joints ({exportBodyJointNames.size}/{BODY_JOINT_OPTIONS.length})
+                </summary>
+                <div className="body-joint-selector-menu">
+                  <div className="body-joint-selector-actions">
+                    <button
+                      type="button"
+                      onClick={() => setExportBodyJointNames(new Set(ALL_BODY_JOINT_NAMES))}
+                    >
+                      Select all
+                    </button>
+                    <button type="button" onClick={() => setExportBodyJointNames(new Set())}>
+                      Clear
+                    </button>
+                  </div>
+                  <div className="body-joint-options">
+                    {BODY_JOINT_OPTIONS.map(([name, label]) => (
+                      <label key={name} className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={exportBodyJointNames.has(name)}
+                          onChange={() =>
+                            setExportBodyJointNames((current) => {
+                              const next = new Set(current);
+                              if (next.has(name)) next.delete(name);
+                              else next.add(name);
+                              return next;
+                            })
+                          }
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </details>
+            )}
             <label className="checkbox">
               <input
                 type="checkbox"

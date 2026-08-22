@@ -78,6 +78,7 @@ PADDLE_EVENT_EXIT_ANGLE_COLOR = (46, 204, 113, 255)
 PADDLE_ANGLE_TEXT_COLOR = (255, 242, 168, 255)
 BODY_LEFT_COLOR = (52, 211, 153, 235)
 BODY_RIGHT_COLOR = (244, 114, 182, 235)
+BODY_LINE_COLOR = (85, 215, 242, 235)
 BODY_LEFT_ELBOW_COLOR = (52, 211, 153, 255)
 BODY_RIGHT_ELBOW_COLOR = (244, 114, 182, 255)
 BODY_TORSO_COLOR = PADDLE_ANGLE_TEXT_COLOR
@@ -85,6 +86,11 @@ BODY_LEFT_SHOULDER_COLOR = (56, 189, 248, 255)
 BODY_RIGHT_SHOULDER_COLOR = (251, 146, 60, 255)
 BODY_LEFT_KNEE_COLOR = (167, 139, 250, 255)
 BODY_RIGHT_KNEE_COLOR = (250, 204, 21, 255)
+BODY_JOINT_NAMES = tuple(
+    f"{side}_{joint}"
+    for side in ("left", "right")
+    for joint in ("wrist", "elbow", "shoulder", "hip", "knee", "ankle")
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,7 @@ class ExportOptions:
     event_hold_seconds: float = 1.2
     include_event_metrics: bool = False
     include_body_motion: bool = False
+    body_joint_names: tuple[str, ...] = BODY_JOINT_NAMES
     event_metric_center_offset_percent: float = 5.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
@@ -599,6 +606,7 @@ def export_centerline_video(
                     metric_offset_percent=(
                         export_options.event_metric_center_offset_percent
                     ),
+                    body_joint_names=export_options.body_joint_names,
                 )
             if freeze_moment is not None:
                 assert event_image is not None
@@ -614,6 +622,7 @@ def export_centerline_video(
                         metric_offset_percent=(
                             export_options.event_metric_center_offset_percent
                         ),
+                        body_joint_names=export_options.body_joint_names,
                     )
                 if export_options.include_angles:
                     _draw_event_companion_angles(
@@ -1006,6 +1015,9 @@ def _normalize_export_options(
         event_hold_seconds=max(0.1, min(10.0, float(requested.event_hold_seconds))),
         include_event_metrics=bool(requested.include_event_metrics),
         include_body_motion=bool(requested.include_body_motion),
+        body_joint_names=tuple(
+            name for name in BODY_JOINT_NAMES if name in requested.body_joint_names
+        ),
         event_metric_center_offset_percent=max(
             -45.0,
             min(45.0, float(requested.event_metric_center_offset_percent)),
@@ -6032,41 +6044,29 @@ def _draw_body_motion_overlay(
     canoe_travel_direction: str | None = None,
     angle_label_font_size: int | None = None,
     metric_offset_percent: float = 10.0,
+    body_joint_names: tuple[str, ...] = BODY_JOINT_NAMES,
 ) -> None:
     landmarks = record.get("landmarks")
     if not isinstance(landmarks, dict):
         return
     thickness = max(2, round(min(width, height) / 300))
     radius = max(3, round(min(width, height) / 170))
-    upper_body_connections = (
+    del canoe_travel_direction
+    selected_joints = set(body_joint_names)
+    connections = (
         ("wrist", "elbow"),
         ("elbow", "shoulder"),
         ("shoulder", "hip"),
+        ("hip", "knee"),
+        ("knee", "ankle"),
     )
-    connections = (
-        upper_body_connections
-        + (("hip", "knee"), ("knee", "ankle"))
-        if discipline == "canoe"
-        else upper_body_connections
-    )
-    hidden_body_side: str | None = None
-    if discipline == "canoe":
-        if canoe_travel_direction == "right":
-            hidden_body_side = "left"
-        elif canoe_travel_direction == "left":
-            hidden_body_side = "right"
-    joint_colors = {
-        ("left", "elbow"): BODY_LEFT_ELBOW_COLOR,
-        ("right", "elbow"): BODY_RIGHT_ELBOW_COLOR,
-        ("left", "shoulder"): BODY_LEFT_SHOULDER_COLOR,
-        ("right", "shoulder"): BODY_RIGHT_SHOULDER_COLOR,
-        ("left", "knee"): BODY_LEFT_KNEE_COLOR,
-        ("right", "knee"): BODY_RIGHT_KNEE_COLOR,
-    }
     for side, color in (("left", BODY_LEFT_COLOR), ("right", BODY_RIGHT_COLOR)):
-        if side == hidden_body_side:
-            continue
         for first_name, second_name in connections:
+            if (
+                f"{side}_{first_name}" not in selected_joints
+                or f"{side}_{second_name}" not in selected_joints
+            ):
+                continue
             first = _body_point(landmarks.get(f"{side}_{first_name}"), width, height)
             second = _body_point(landmarks.get(f"{side}_{second_name}"), width, height)
             if first is None or second is None:
@@ -6076,13 +6076,12 @@ def _draw_body_motion_overlay(
                 width,
                 height,
                 (first[0], first[1], second[0], second[1]),
-                color,
+                BODY_LINE_COLOR,
                 thickness,
             )
-        joints = ("wrist", "elbow", "shoulder", "hip")
-        if discipline == "canoe":
-            joints += ("knee", "ankle")
-        for joint in joints:
+        for joint in ("wrist", "elbow", "shoulder", "hip", "knee", "ankle"):
+            if f"{side}_{joint}" not in selected_joints:
+                continue
             point = _body_point(landmarks.get(f"{side}_{joint}"), width, height)
             if point is not None:
                 _fill_circle(
@@ -6092,8 +6091,24 @@ def _draw_body_motion_overlay(
                     round(point[0]),
                     round(point[1]),
                     radius,
-                    joint_colors.get((side, joint), color),
+                    color,
                 )
+    for joint in ("shoulder", "hip"):
+        left_name = f"left_{joint}"
+        right_name = f"right_{joint}"
+        if left_name not in selected_joints or right_name not in selected_joints:
+            continue
+        left = _body_point(landmarks.get(left_name), width, height)
+        right = _body_point(landmarks.get(right_name), width, height)
+        if left is None or right is None:
+            continue
+        midpoint = ((left[0] + right[0]) / 2, (left[1] + right[1]) / 2)
+        _draw_line(
+            image, width, height, (left[0], left[1], *midpoint), BODY_LINE_COLOR, thickness
+        )
+        _draw_line(
+            image, width, height, (*midpoint, right[0], right[1]), BODY_LINE_COLOR, thickness
+        )
 
     metrics = record.get("metrics")
     if not isinstance(metrics, dict):
@@ -6113,10 +6128,10 @@ def _draw_body_motion_overlay(
     )
     metric_entries: list[tuple[str, str, Color]] = []
     for label, side, joint, color in joint_metrics:
-        if side == hidden_body_side:
-            continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
-        if value is not None:
+        if value is not None and all(
+            f"{side}_{name}" in selected_joints for name in definitions[joint]
+        ):
             _draw_body_joint_arc(
                 image,
                 width,
@@ -6140,10 +6155,10 @@ def _draw_body_motion_overlay(
         )
     )
     for label, side, joint, color in shoulder_metrics:
-        if side == hidden_body_side:
-            continue
         value = _finite_body_metric(metrics, f"{side}_{joint}_deg")
-        if value is not None:
+        if value is not None and all(
+            f"{side}_{name}" in selected_joints for name in definitions[joint]
+        ):
             _draw_body_joint_arc(
                 image,
                 width,
@@ -6163,10 +6178,10 @@ def _draw_body_motion_overlay(
             ("L Knee", "left", BODY_LEFT_KNEE_COLOR),
             ("R Knee", "right", BODY_RIGHT_KNEE_COLOR),
         ):
-            if side == hidden_body_side:
-                continue
             value = _finite_body_metric(metrics, f"{side}_knee_deg")
-            if value is not None:
+            if value is not None and all(
+                f"{side}_{name}" in selected_joints for name in definitions["knee"]
+            ):
                 _draw_body_joint_arc(
                     image,
                     width,

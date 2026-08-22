@@ -135,6 +135,7 @@ export type ExportVideoOptions = {
   event_hold_seconds: number;
   include_event_metrics: boolean;
   include_body_motion: boolean;
+  body_joint_names: string[];
   metric_count: number;
   event_paddle_index?: number;
   event_metric_center_offset_percent: number;
@@ -296,6 +297,7 @@ export async function exportJobVideo(
     event_hold_seconds: String(options.event_hold_seconds),
     include_event_metrics: String(options.include_event_metrics),
     include_body_motion: String(options.include_body_motion),
+    body_joint_names: options.body_joint_names.join(","),
     metric_count: String(options.metric_count),
     event_metric_center_offset_percent: String(
       options.event_metric_center_offset_percent

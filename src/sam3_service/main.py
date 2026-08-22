@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings
 from .db import Database, expires_at, utc_now
 from .errors import ServiceError
-from .exporter import ExportOptions, export_centerline_video
+from .exporter import BODY_JOINT_NAMES, ExportOptions, export_centerline_video
 from .media import probe_video
 from .schemas import JobCreate, VideoCreate
 from .storage import LocalStorage, sha256_file
@@ -454,6 +454,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         ),
         include_body_motion: bool = Query(default=False),
+        body_joint_names: str | None = Query(
+            default=None,
+            description=(
+                "Comma-separated body joints to draw. Omit to draw all supported joints; "
+                "send an empty value to draw no joints."
+            ),
+        ),
         export_task_id: str | None = Query(default=None, min_length=1, max_length=100),
         metric_count: int | None = Query(default=None, ge=1, le=4),
         event_paddle_index: int | None = Query(default=None, ge=1, le=4),
@@ -504,6 +511,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=400,
             )
         parsed_selection_keyframes = _parse_selection_keyframes(selection_keyframes)
+        parsed_body_joint_names = (
+            BODY_JOINT_NAMES
+            if body_joint_names is None
+            else tuple(
+                name.strip() for name in body_joint_names.split(",") if name.strip()
+            )
+        )
+        unsupported_body_joint_names = tuple(
+            name for name in parsed_body_joint_names if name not in BODY_JOINT_NAMES
+        )
+        if unsupported_body_joint_names:
+            raise ServiceError(
+                "INVALID_BODY_JOINT_NAMES",
+                "Body joint selection contains unsupported names.",
+                status_code=400,
+            )
         if (
             event_paddle_index is not None
             and metric_count is not None
@@ -586,6 +609,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     event_hold_seconds=event_hold_seconds,
                     include_event_metrics=include_event_metrics,
                     include_body_motion=include_body_motion,
+                    body_joint_names=parsed_body_joint_names,
                     target_slot_count=metric_count or 0,
                     event_paddle_index=event_paddle_index,
                     event_metric_center_offset_percent=event_metric_center_offset_percent,

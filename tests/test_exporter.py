@@ -9,6 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sam3_service.exporter import (
+    BODY_JOINT_NAMES,
+    BODY_LEFT_COLOR,
+    BODY_LINE_COLOR,
+    BODY_RIGHT_COLOR,
     Centerline,
     DegreeLabel,
     EventMetricColumn,
@@ -228,11 +232,12 @@ class ExporterTest(unittest.TestCase):
             },
         }
 
-    def test_canoe_body_overlay_hides_non_travel_side_skeleton(self) -> None:
+    def test_body_overlay_draws_selected_neighbor_links_with_one_line_color(self) -> None:
         image = bytearray(100 * 100 * 4)
         with (
             patch("sam3_service.exporter._draw_line") as draw_line,
             patch("sam3_service.exporter._fill_circle") as fill_circle,
+            patch("sam3_service.exporter._draw_body_joint_arc"),
             patch("sam3_service.exporter._draw_body_metric_row") as draw_metrics,
         ):
             _draw_body_motion_overlay(
@@ -242,20 +247,30 @@ class ExporterTest(unittest.TestCase):
                 self._body_motion_overlay_record(),
                 discipline="canoe",
                 canoe_travel_direction="right",
+                body_joint_names=(
+                    "left_elbow",
+                    "left_shoulder",
+                    "left_hip",
+                    "right_shoulder",
+                    "right_hip",
+                ),
             )
 
-        line_x_values = [
-            coordinate
-            for call in draw_line.call_args_list
-            for coordinate in (call.args[3][0], call.args[3][2])
-        ]
-        circle_x_values = [call.args[3] for call in fill_circle.call_args_list]
-        self.assertTrue(line_x_values)
-        self.assertTrue(circle_x_values)
-        self.assertTrue(all(x > 50 for x in line_x_values))
-        self.assertTrue(all(x > 50 for x in circle_x_values))
+        lines = [(call.args[3], call.args[4]) for call in draw_line.call_args_list]
+        circles = [(call.args[3], call.args[6]) for call in fill_circle.call_args_list]
+        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(circles), 5)
+        self.assertIn(((25.0, 30.0, 25.0, 38.0), BODY_LINE_COLOR), lines)
+        self.assertIn(((25.0, 38.0, 25.0, 50.0), BODY_LINE_COLOR), lines)
+        self.assertIn(((75.0, 38.0, 75.0, 50.0), BODY_LINE_COLOR), lines)
+        self.assertTrue(all(color == BODY_LINE_COLOR for _line, color in lines))
+        self.assertTrue(all(color == BODY_LEFT_COLOR for x, color in circles if x < 50))
+        self.assertTrue(all(color == BODY_RIGHT_COLOR for x, color in circles if x > 50))
         metric_entries = draw_metrics.call_args.args[3]
-        self.assertEqual([entry[0] for entry in metric_entries], ["右肘", "躯干", "右肩", "右膝"])
+        self.assertEqual(
+            [entry[0] for entry in metric_entries],
+            ["左肘", "右肘", "躯干", "左肩", "右肩", "左膝", "右膝"],
+        )
         self.assertTrue(
             all(entry[2] == PADDLE_ANGLE_TEXT_COLOR for entry in metric_entries)
         )
@@ -2540,6 +2555,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(options.event_hold_seconds, 1.2)
         self.assertFalse(options.include_event_metrics)
         self.assertFalse(options.include_body_motion)
+        self.assertEqual(options.body_joint_names, BODY_JOINT_NAMES)
         self.assertEqual(_event_freeze_frame_count(options, 30), 0)
         self.assertEqual(
             _event_freeze_frame_count(
@@ -2548,6 +2564,19 @@ class ExporterTest(unittest.TestCase):
             ),
             36,
         )
+
+    def test_export_body_joint_selection_is_filtered_and_canonicalized(self) -> None:
+        options = _normalize_export_options(
+            ExportOptions(
+                include_body_motion=True,
+                body_joint_names=("right_ankle", "unknown", "left_wrist"),
+            ),
+            {"prompts": [], "tracks": [], "settings": {}},
+            1920,
+            1080,
+        )
+
+        self.assertEqual(options.body_joint_names, ("left_wrist", "right_ankle"))
 
     def test_event_metrics_keep_live_angles_and_use_an_independent_offset(self) -> None:
         options = _normalize_export_options(
