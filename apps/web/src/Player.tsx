@@ -122,6 +122,7 @@ export function Player({ manifest }: Props) {
     "all"
   );
   const [exportAnglesEnabled, setExportAnglesEnabled] = useState(true);
+  const [exportBoatLineEnabled, setExportBoatLineEnabled] = useState(true);
   const [exportSpmEnabled, setExportSpmEnabled] = useState(false);
   const [exportCatchEnabled, setExportCatchEnabled] = useState(false);
   const [exportExitEnabled, setExportExitEnabled] = useState(false);
@@ -564,6 +565,7 @@ export function Player({ manifest }: Props) {
           include_event_metrics: false,
           include_body_motion: exportBodyMotionEnabled,
           body_joint_names: [...exportBodyJointNames],
+          include_boat_line: exportBoatLineEnabled,
           metric_count: exportMetricCount,
           event_paddle_index:
             exportEventPaddleIndex === "all" ? undefined : exportEventPaddleIndex,
@@ -597,6 +599,7 @@ export function Player({ manifest }: Props) {
     exportEventHoldSeconds,
     exportBodyMotionEnabled,
     exportBodyJointNames,
+    exportBoatLineEnabled,
     exportEventPaddleIndex,
     exportExitEnabled,
     exportMetricCount,
@@ -1026,6 +1029,14 @@ export function Player({ manifest }: Props) {
                     {prompt.text}
                   </label>
                 ))}
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={exportBoatLineEnabled}
+                  onChange={(event) => setExportBoatLineEnabled(event.target.checked)}
+                />
+                Boat
+              </label>
             </div>
           </div>
           <div className="export-controls">

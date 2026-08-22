@@ -2556,6 +2556,7 @@ class ExporterTest(unittest.TestCase):
         self.assertFalse(options.include_event_metrics)
         self.assertFalse(options.include_body_motion)
         self.assertEqual(options.body_joint_names, BODY_JOINT_NAMES)
+        self.assertTrue(options.include_boat_line)
         self.assertEqual(_event_freeze_frame_count(options, 30), 0)
         self.assertEqual(
             _event_freeze_frame_count(
@@ -2663,6 +2664,47 @@ class ExporterTest(unittest.TestCase):
 
         draw_block.assert_not_called()
         draw_marker.assert_not_called()
+
+    def test_export_can_hide_boat_line_without_removing_angle_measurement(self) -> None:
+        records = [
+            {
+                "prompt_id": "boat",
+                "instance_id": "boat:1",
+                "centerline_line_xyxy": [0, 20, 100, 20],
+            },
+            {
+                "prompt_id": "paddle",
+                "instance_id": "paddle:1",
+                "centerline_line_xyxy": [50, 0, 50, 80],
+            },
+        ]
+        options = ExportOptions(
+            include_angles=True,
+            include_boat_line=False,
+            reference_prompt_id="boat",
+            target_prompt_ids=("paddle",),
+        )
+
+        with (
+            patch("sam3_service.exporter._draw_line") as draw_line,
+            patch("sam3_service.exporter._draw_degree_label_block") as draw_block,
+        ):
+            _draw_frame_overlay(
+                bytearray(100 * 100 * 4),
+                100,
+                100,
+                records,
+                {"boat": (255, 181, 71, 255), "paddle": (53, 194, 255, 255)},
+                export_options=options,
+                timestamp_ms=0,
+                spm_estimator=SpmEstimator(),
+            )
+
+        self.assertEqual(
+            [call.args[3] for call in draw_line.call_args_list],
+            [(50.0, 0.0, 50.0, 80.0)],
+        )
+        draw_block.assert_called_once()
 
     def test_export_angles_use_only_the_top_or_bottom_block(self) -> None:
         records = [

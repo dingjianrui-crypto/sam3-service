@@ -454,6 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         ),
         include_body_motion: bool = Query(default=False),
+        include_boat_line: bool = Query(default=True),
         body_joint_names: str | None = Query(
             default=None,
             description=(
@@ -610,6 +611,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     include_event_metrics=include_event_metrics,
                     include_body_motion=include_body_motion,
                     body_joint_names=parsed_body_joint_names,
+                    include_boat_line=include_boat_line,
                     target_slot_count=metric_count or 0,
                     event_paddle_index=event_paddle_index,
                     event_metric_center_offset_percent=event_metric_center_offset_percent,

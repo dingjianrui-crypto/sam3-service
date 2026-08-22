@@ -106,6 +106,7 @@ class ExportOptions:
     include_event_metrics: bool = False
     include_body_motion: bool = False
     body_joint_names: tuple[str, ...] = BODY_JOINT_NAMES
+    include_boat_line: bool = True
     event_metric_center_offset_percent: float = 5.5
     metric_center_offset_percent: float | None = None
     reference_prompt_id: str | None = None
@@ -1018,6 +1019,7 @@ def _normalize_export_options(
         body_joint_names=tuple(
             name for name in BODY_JOINT_NAMES if name in requested.body_joint_names
         ),
+        include_boat_line=bool(requested.include_boat_line),
         event_metric_center_offset_percent=max(
             -45.0,
             min(45.0, float(requested.event_metric_center_offset_percent)),
@@ -1314,14 +1316,16 @@ def _draw_frame_overlay(
             continue
         color = colors.get(record["prompt_id"], (53, 194, 255, 255))
         centerlines.append(Centerline(record=record, line=line, color=color))
-        _draw_line(
-            image,
-            width,
-            height,
-            line,
-            color,
-            _overlay_reference_line_width(width, height),
-        )
+        is_reference = record.get("prompt_id") == export_options.reference_prompt_id
+        if export_options.include_boat_line or not is_reference:
+            _draw_line(
+                image,
+                width,
+                height,
+                line,
+                color,
+                _overlay_reference_line_width(width, height),
+            )
 
     labels = _degree_labels(centerlines, export_options)
     displayed_labels = _degree_slots(labels, export_options)
@@ -5141,7 +5145,7 @@ def _draw_paddle_event_label(
         PADDLE_EVENT_PADDLE_COLOR,
         line_width,
     )
-    if event.reference_line is not None:
+    if event.reference_line is not None and options.include_boat_line:
         _draw_line(
             image,
             width,
